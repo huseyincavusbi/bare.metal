@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
@@ -15,6 +16,7 @@ static void print_usage(const char* prog) {
     printf("  info <checkpoint>           Print model information\n");
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
+    printf("  test-kernels                Test all forward kernels\n");
     printf("\nOptions:\n");
     printf("  -t, --temperature <float>   Sampling temperature (default: 1.0)\n");
     printf("  -p, --topp <float>          Top-p threshold (default: 0.9)\n");
@@ -133,12 +135,68 @@ matmul_cleanup:
     return ok ? 0 : 1;
 }
 
+static int cmd_test_kernels(void) {
+    backend_ctx_t* be = backend_create();
+    if (!be || !be->library) { fprintf(stderr, "No Metal backend\n"); return 1; }
+    int failures = 0;
+
+    // --- softmax ---
+    {
+        backend_kernel_t* kn = backend_kernel_create(be, "softmax_forward");
+        int N = 2, C = 3;
+        float inp[6] = {1,2,3, 1,2,3};
+        float out[6] = {0};
+        backend_buffer_t* bufs[3];
+        bufs[0] = backend_buffer_alloc(be, N*C*sizeof(float));
+        bufs[1] = backend_buffer_alloc(be, N*C*sizeof(float));
+        int params[2] = {N, C};
+        bufs[2] = backend_buffer_alloc(be, 2*sizeof(int));
+        memcpy(backend_buffer_map(bufs[0]), inp, N*C*sizeof(float));
+        memcpy(backend_buffer_map(bufs[2]), params, 2*sizeof(int));
+        backend_kernel_dispatch(be, kn, bufs, NULL, 3, N, 1, 1, 1, 1, 1);
+        memcpy(out, backend_buffer_map(bufs[1]), N*C*sizeof(float));
+        float r0 = out[0]+out[1]+out[2], r1 = out[3]+out[4]+out[5];
+        printf("Softmax: row0_sum=%.4f row1_sum=%.4f %s\n", r0, r1,
+               (fabs(r0-1)<0.001f && fabs(r1-1)<0.001f) ? "PASS" : "FAIL");
+        if (fabs(r0-1)>=0.001f) failures++;
+        backend_buffer_free(bufs[0]); backend_buffer_free(bufs[1]); backend_buffer_free(bufs[2]);
+        backend_kernel_destroy(kn);
+    }
+
+    // --- gelu ---
+    {
+        backend_kernel_t* kn = backend_kernel_create(be, "gelu_forward");
+        int N = 4;
+        float inp[4] = {-1, 0, 1, 2};
+        float out[4];
+        backend_buffer_t* bufs[3];
+        bufs[0] = backend_buffer_alloc(be, N*sizeof(float));
+        bufs[1] = backend_buffer_alloc(be, N*sizeof(float));
+        bufs[2] = backend_buffer_alloc(be, sizeof(int));
+        memcpy(backend_buffer_map(bufs[0]), inp, N*sizeof(float));
+        memcpy(backend_buffer_map(bufs[2]), &N, sizeof(int));
+        backend_kernel_dispatch(be, kn, bufs, NULL, 3, N, 1, 1, N, 1, 1);
+        memcpy(out, backend_buffer_map(bufs[1]), N*sizeof(float));
+        int ok = (out[3] > out[1]) && (out[0] < 0) && (out[1] == 0);
+        printf("GELU: [%.3f %.3f %.3f %.3f] %s\n", out[0], out[1], out[2], out[3],
+               ok ? "PASS" : "FAIL");
+        if (!ok) failures++;
+        backend_buffer_free(bufs[0]); backend_buffer_free(bufs[1]); backend_buffer_free(bufs[2]);
+        backend_kernel_destroy(kn);
+    }
+
+    backend_destroy(be);
+    printf("%d failures\n", failures);
+    return failures > 0 ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
     const char* cmd = argv[1];
 
     if (strcmp(cmd, "test-dispatch") == 0) return cmd_test_dispatch();
     if (strcmp(cmd, "test-matmul") == 0) return cmd_test_matmul();
+    if (strcmp(cmd, "test-kernels") == 0) return cmd_test_kernels();
 
     if (strcmp(cmd, "info") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
