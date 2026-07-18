@@ -1,6 +1,7 @@
 #include "baremetal.h"
 #include "baremetal/model.h"
 #include "baremetal/context.h"
+#include "baremetal/tokenizer.h"
 #include "backend/backend.h"
 #include "backend/metal/device.h"
 #include "utils/log.h"
@@ -79,12 +80,12 @@ int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
     // KV cache: [L][2][max_seq][KV_DIM]
     float* kv_cache = calloc(L * 2 * max_seq * KV_DIM, sizeof(float));
 
-    // Simple character-level tokenizer for now
-    int prompt_tokens[256], num_tokens = 0;
-    if (prompt && prompt[0]) {
-        for (const char* p = prompt; *p && num_tokens < 256; p++)
-            prompt_tokens[num_tokens++] = (unsigned char)*p;
-    } else prompt_tokens[num_tokens++] = 0;
+    // BPE tokenizer
+    bm_tokenizer_t tok;
+    bm_tokenizer_init(&tok, "tokenizer.bin", model->arch.vocab_size);
+    int* prompt_tokens = malloc(256 * sizeof(int));
+    int num_tokens = 0;
+    bm_tokenizer_encode(&tok, prompt, 1, 0, prompt_tokens, &num_tokens);
 
     int token = prompt_tokens[0];
     int next;
@@ -224,7 +225,8 @@ int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
     }
     printf("\n");
 
-    free(x); free(xb); free(logits); free(kv_cache);
+    free(prompt_tokens);
+    bm_tokenizer_free(&tok);
     backend_buffer_free(b_in); backend_buffer_free(b_w); backend_buffer_free(b_out);
     backend_buffer_free(b_p4); backend_buffer_free(b_eps);
     bmt_run_free_kernels();
