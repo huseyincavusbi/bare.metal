@@ -139,35 +139,42 @@ int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
             memcpy(kc_k + pos*KV_DIM, k, KV_DIM*sizeof(float));
             memcpy(kc_v + pos*KV_DIM, v, KV_DIM*sizeof(float));
 
-            // Attention per head
-            float* att = calloc(NH*(pos+1), sizeof(float));
+            // Attention: GPU matmul for QK^T and SV
             int S = pos + 1;
-            float* xb_att = calloc(NH*HD, sizeof(float));
+            float* xb_att = calloc(NH * HD, sizeof(float));
+
             for (int h = 0; h < NH; h++) {
                 int kv_h = h / KV_MUL;
-                for (int t = 0; t < S; t++) {
-                    float d = 0;
-                    for (int i = 0; i < HD; i++)
-                        d += q[h*HD+i] * kc_k[kv_h*KV_DIM + t*KV_DIM + i];
-                    att[h*S+t] = d * scale;
-                }
-                float m = -INFINITY; float sum = 0;
-                for (int t = 0; t < S; t++) {
-                    if (att[h*S+t] > m) m = att[h*S+t];
-                }
-                for (int t = 0; t < S; t++) {
-                    att[h*S+t] = expf(att[h*S+t]-m); sum += att[h*S+t];
-                }
-                for (int t = 0; t < S; t++) att[h*S+t] /= sum;
+                float* qh = q + h * HD;
 
-                for (int i = 0; i < HD; i++) {
-                    float d = 0;
-                    for (int t = 0; t < S; t++)
-                        d += att[h*S+t] * kc_v[kv_h*KV_DIM + t*KV_DIM + i];
-                    xb_att[h*HD+i] = d;
+                // Copy K rows for this head into contiguous buffer: (S, HD)
+                float* kbuf = calloc(S * HD, sizeof(float));
+                float* vbuf = calloc(S * HD, sizeof(float));
+                for (int t = 0; t < S; t++) {
+                    for (int i = 0; i < HD; i++) {
+                        kbuf[t * HD + i] = kc_k[kv_h * KV_DIM + t * KV_DIM + i];
+                        vbuf[t * HD + i] = kc_v[kv_h * KV_DIM + t * KV_DIM + i];
+                    }
                 }
+
+                // Q @ K^T: (1, HD) @ (S, HD)^T → (1, S)
+                float* scores = calloc(S, sizeof(float));
+                MTL_MATMUL(qh, kbuf, 0, 1, HD, S, scores);
+                for (int t = 0; t < S; t++) scores[t] *= scale;
+
+                // Softmax
+                float m = -INFINITY; float sum = 0;
+                for (int t = 0; t < S; t++) if (scores[t] > m) m = scores[t];
+                for (int t = 0; t < S; t++) { scores[t] = expf(scores[t]-m); sum += scores[t]; }
+                for (int t = 0; t < S; t++) scores[t] /= sum;
+
+                // Scores @ V: (1, S) @ (S, HD) → (1, HD)
+                float* h_out = calloc(HD, sizeof(float));
+                MTL_MATMUL(scores, vbuf, 0, 1, S, HD, h_out);
+                for (int i = 0; i < HD; i++) xb_att[h * HD + i] = h_out[i];
+
+                free(kbuf); free(vbuf); free(scores); free(h_out);
             }
-            free(att);
 
             // Output projection
             MTL_MATMUL(xb_att, model->attprojw + l*NH*HD*D, 0, 1, NH*HD, D, xb);
