@@ -16,7 +16,8 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/model.c \
              src/baremetal/checkpoint.c \
              src/baremetal/api.c \
-             tools/cli.c
+             tools/cli.c \
+             tools/run.c
 
 OBJS      := $(patsubst %.c,build/%.o,$(C_SRCS))
 OBJS      += $(patsubst %.m,build/%.o,$(OBJC_SRCS))

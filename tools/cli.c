@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <math.h>
 
+extern int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
+                  int steps, float temperature, unsigned long long seed);
+
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
     printf("Usage: %s <command> [options]\n\n", prog);
@@ -210,7 +213,15 @@ int main(int argc, char** argv) {
     }
 
     if (strcmp(cmd, "run") == 0) {
-        printf("Inference mode — not yet implemented.\n");
+        if (argc < 3) { print_usage(argv[0]); return 1; }
+        bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+        bm_model_t* model = calloc(1, sizeof(*model));
+        bm_load_weights(model, argv[2]);
+        const char* prompt = argc > 3 ? argv[3] : "";
+        srand(time(NULL));
+        bm_run(ctx, model, prompt, 256, 1.0, rand());
+        bm_destroy_model(model);
+        bm_destroy(ctx);
         return 0;
     }
 

@@ -190,3 +190,62 @@ kernel void residual_forward(
     if ((int)gid >= N) return;
     dst[gid] += src[gid];
 }
+
+// ----------------------------------------------------------------
+// softmax_causal_scale
+// ----------------------------------------------------------------
+kernel void softmax_causal_scale(
+    device float* scores [[buffer(0)]],
+    constant int& seq_len [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int row = (int)gid;
+    device float* srow = scores + row * seq_len;
+
+    for (int t = 0; t < seq_len; t++) srow[t] *= scale;
+
+    float maxval = -INFINITY;
+    for (int t = 0; t <= row; t++) {
+        if (srow[t] > maxval) maxval = srow[t];
+    }
+
+    float sum = 0.0f;
+    for (int t = 0; t <= row; t++) {
+        srow[t] = exp(srow[t] - maxval);
+        sum += srow[t];
+    }
+    float norm = 1.0f / sum;
+    for (int t = 0; t <= row; t++) srow[t] *= norm;
+    for (int t = row + 1; t < seq_len; t++) srow[t] = 0.0f;
+}
+
+// ----------------------------------------------------------------
+// rope_forward
+// ----------------------------------------------------------------
+kernel void rope_forward(
+    device float* q [[buffer(0)]],
+    device float* k [[buffer(1)]],
+    constant int& head_size [[buffer(2)]],
+    constant int& pos [[buffer(3)]],
+    constant float& theta [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int h = (int)gid;
+    device float* qh = q + h * head_size;
+    device float* kh = k + h * head_size;
+
+    for (int i = 0; i < head_size; i += 2) {
+        float freq = 1.0f / pow(theta, (float)i / (float)head_size);
+        float cosv = cos((float)pos * freq);
+        float sinv = sin((float)pos * freq);
+
+        float q0 = qh[i], q1 = qh[i+1];
+        qh[i]   = q0 * cosv - q1 * sinv;
+        qh[i+1] = q0 * sinv + q1 * cosv;
+
+        float k0 = kh[i], k1 = kh[i+1];
+        kh[i]   = k0 * cosv - k1 * sinv;
+        kh[i+1] = k0 * sinv + k1 * cosv;
+    }
+}

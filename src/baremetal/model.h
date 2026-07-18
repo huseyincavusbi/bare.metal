@@ -27,6 +27,7 @@ struct bm_model_s {
     float*   ln2b;
     float*   fcw;
     float*   fcb;
+    float*   fcw3;
     float*   fcprojw;
     float*   fcprojb;
     float*   lnfw;
