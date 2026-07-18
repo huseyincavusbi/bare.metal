@@ -24,8 +24,8 @@ int               backend_kernel_dispatch(backend_ctx_t* ctx,
                        backend_buffer_t* buffers[],
                        size_t offsets[],
                        int num_buffers,
-                       int threadgroups,
-                       int threads_per_threadgroup);
+                       int grid_x, int grid_y, int grid_z,
+                       int tg_x,  int tg_y,  int tg_z);
 void              backend_synchronize(backend_ctx_t* ctx);
 
 #endif

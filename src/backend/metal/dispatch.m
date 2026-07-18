@@ -46,8 +46,8 @@ int backend_kernel_dispatch(backend_ctx_t* ctx,
                             backend_buffer_t* buffers[],
                             size_t offsets[],
                             int num_buffers,
-                            int threadgroups,
-                            int threads_per_threadgroup) {
+                            int grid_x, int grid_y, int grid_z,
+                            int tg_x,  int tg_y,  int tg_z) {
     if (!ctx || !kernel || !buffers) return -1;
 
     id<MTLComputePipelineState> pso =
@@ -64,8 +64,8 @@ int backend_kernel_dispatch(backend_ctx_t* ctx,
         [encoder setBuffer:buf offset:offsets ? offsets[i] : 0 atIndex:i];
     }
 
-    MTLSize gridSize = MTLSizeMake(threadgroups * threads_per_threadgroup, 1, 1);
-    MTLSize threadgroupSize = MTLSizeMake(threads_per_threadgroup, 1, 1);
+    MTLSize gridSize = MTLSizeMake(grid_x, grid_y, grid_z);
+    MTLSize threadgroupSize = MTLSizeMake(tg_x, tg_y, tg_z);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
 
     [encoder endEncoding];
