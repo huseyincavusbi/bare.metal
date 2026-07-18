@@ -15,16 +15,40 @@ backend_ctx_t* backend_create(void) {
         free(ctx);
         return NULL;
     }
-
     ctx->device = (__bridge_retained void*)device;
     ctx->queue  = (__bridge_retained void*)[device newCommandQueue];
 
     BMT_LOG_INFO("Metal device: %s", [[device name] UTF8String]);
+
+    NSString* path = [[NSBundle mainBundle] pathForResource:@"default"
+                                                     ofType:@"metallib"];
+    if (!path) {
+        NSString* exePath = [[NSProcessInfo processInfo] arguments][0];
+        NSString* exeDir = [exePath stringByDeletingLastPathComponent];
+        path = [exeDir stringByAppendingPathComponent:@"kernels/default.metallib"];
+    }
+
+    NSError* error = nil;
+    NSURL* url = [NSURL fileURLWithPath:path];
+    id<MTLLibrary> library = [device newLibraryWithURL:url error:&error];
+    if (!library) {
+        BMT_LOG_WARN("Could not load metallib from %s: %s",
+                     [path UTF8String],
+                     [[error localizedDescription] UTF8String]);
+    } else {
+        ctx->library = (__bridge_retained void*)library;
+        BMT_LOG_INFO("Loaded metallib");
+    }
+
     return ctx;
 }
 
 void backend_destroy(backend_ctx_t* ctx) {
     if (!ctx) return;
+    if (ctx->library) {
+        id<MTLLibrary> l = (__bridge_transfer id<MTLLibrary>)ctx->library;
+        (void)l;
+    }
     if (ctx->queue) {
         id<MTLCommandQueue> q = (__bridge_transfer id<MTLCommandQueue>)ctx->queue;
         (void)q;

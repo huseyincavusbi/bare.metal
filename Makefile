@@ -9,7 +9,8 @@ CC      := clang
 CFLAGS  := -std=c11 -Wall -Wextra -O2 -I include -I src
 LDFLAGS := -framework Metal -framework Foundation
 
-OBJC_SRCS := src/backend/metal/device.m
+OBJC_SRCS := src/backend/metal/device.m \
+             src/backend/metal/dispatch.m
 C_SRCS    := src/utils/log.c \
              src/baremetal/context.c \
              src/baremetal/model.c \
