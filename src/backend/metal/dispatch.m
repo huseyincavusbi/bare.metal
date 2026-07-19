@@ -78,3 +78,55 @@ int backend_kernel_dispatch(backend_ctx_t* ctx,
 void backend_synchronize(backend_ctx_t* ctx) {
     (void)ctx;
 }
+
+backend_encoder_t* backend_encode_begin(backend_ctx_t* ctx) {
+    if (!ctx) return NULL;
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)ctx->queue;
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    backend_encoder_t* e = calloc(1, sizeof(backend_encoder_t));
+    e->command_buffer = (__bridge_retained void*)cmdBuf;
+    e->encoder = (__bridge_retained void*)enc;
+    return e;
+}
+
+int backend_encode_dispatch(backend_encoder_t* enc,
+                            backend_kernel_t* kernel,
+                            backend_buffer_t* buffers[],
+                            size_t offsets[],
+                            int num_buffers,
+                            int grid_x, int grid_y, int grid_z,
+                            int tg_x,  int tg_y,  int tg_z) {
+    if (!enc || !kernel || !buffers) return -1;
+    id<MTLComputeCommandEncoder> encoder =
+        (__bridge id<MTLComputeCommandEncoder>)enc->encoder;
+    id<MTLComputePipelineState> pso =
+        (__bridge id<MTLComputePipelineState>)kernel->pipeline_state;
+
+    [encoder setComputePipelineState:pso];
+    for (int i = 0; i < num_buffers; i++) {
+        id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffers[i]->buffer;
+        [encoder setBuffer:buf offset:offsets ? offsets[i] : 0 atIndex:i];
+    }
+    [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
+       threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
+    return 0;
+}
+
+void backend_encode_commit(backend_encoder_t* enc) {
+    if (!enc) return;
+    [(__bridge id<MTLComputeCommandEncoder>)enc->encoder endEncoding];
+    [(__bridge id<MTLCommandBuffer>)enc->command_buffer commit];
+}
+
+void backend_encode_wait(backend_encoder_t* enc) {
+    if (!enc) return;
+    [(__bridge id<MTLCommandBuffer>)enc->command_buffer waitUntilCompleted];
+    id<MTLComputeCommandEncoder> encoder =
+        (__bridge_transfer id<MTLComputeCommandEncoder>)enc->encoder;
+    id<MTLCommandBuffer> cmdBuf =
+        (__bridge_transfer id<MTLCommandBuffer>)enc->command_buffer;
+    (void)encoder; (void)cmdBuf;
+    free(enc);
+}

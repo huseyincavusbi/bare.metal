@@ -16,4 +16,9 @@ struct backend_kernel_s {
     void* pipeline_state;
 };
 
+struct backend_encoder_s {
+    void* command_buffer;
+    void* encoder;
+};
+
 #endif
