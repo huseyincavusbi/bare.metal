@@ -34,8 +34,15 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
         total_bytes += L * D                   * sizeof(float);
         total_bytes += L * D                   * sizeof(float);
     }
-    total_bytes += L * 3 * D * NH * HD         * sizeof(float);
+    int NKV = arch->n_kv_heads;
+    total_bytes += L * NH * HD * D             * sizeof(float);
+    total_bytes += L * NKV * HD * D            * sizeof(float);
+    total_bytes += L * NKV * HD * D            * sizeof(float);
     if (arch->bias) total_bytes += L * 3 * D   * sizeof(float);
+    if (arch->has_qk_norm) {
+        total_bytes += L * NH * HD             * sizeof(float);
+        total_bytes += L * arch->n_kv_heads * HD * sizeof(float);
+    }
     total_bytes += L * NH * HD * D             * sizeof(float);
     if (arch->bias) total_bytes += L * D       * sizeof(float);
     total_bytes += L * H * D                   * sizeof(float);
@@ -44,7 +51,9 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
         total_bytes += L * H * D               * sizeof(float);
     total_bytes += L * D * H                   * sizeof(float);
     if (arch->bias) total_bytes += L * D       * sizeof(float);
-    total_bytes += D                           * sizeof(float);
+    if (arch->has_ffn_post_norm) {
+        total_bytes += L * D * 2              * sizeof(float);
+    }
     if (arch->norm == BM_NORM_LAYERNORM)
         total_bytes += D                       * sizeof(float);
     if (!arch->weight_tie)
@@ -70,8 +79,14 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     } else {
         model->ln1w = w; w += L * D;
     }
-    model->qkvw = w; w += L * 3 * D * NH * HD;
-    if (arch->bias) { model->qkvb = w; w += L * 3 * D; }
+    model->qw = w; w += L * NH * HD * D;
+    model->kw = w; w += L * NKV * HD * D;
+    model->vw = w; w += L * NKV * HD * D;
+    if (arch->bias) { model->qkvb = w; w += L * (NH + 2*NKV) * HD; }
+    if (arch->has_qk_norm) {
+        model->q_norm_w = w; w += L * NH * HD;
+        model->k_norm_w = w; w += L * arch->n_kv_heads * HD;
+    }
     model->attprojw = w; w += L * NH * HD * D;
     if (arch->bias) { model->attprojb = w; w += L * D; }
 
@@ -87,6 +102,11 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     if (arch->activation == BM_ACT_SWIGLU) { model->fcw3 = w; w += L * H * D; }
     model->fcprojw = w; w += L * D * H;
     if (arch->bias) { model->fcprojb = w; w += L * D; }
+
+    if (arch->has_ffn_post_norm) {
+        model->pre_ffn_w = w; w += L * D;
+        model->ffn_post_w = w; w += L * D;
+    }
 
     model->lnfw = w; w += D;
     if (arch->norm == BM_NORM_LAYERNORM) { model->lnfb = w; w += D; }

@@ -27,9 +27,13 @@ bm_model_t* bm_create_model(bm_context_t* ctx, const bm_arch_t* arch) {
 }
 
 void bm_load_weights(bm_model_t* model, const char* path) {
+    // Try bare.metal format first
     if (bmt_checkpoint_load(model, path) == 0) return;
+    // Try legacy llama2.c format
     BMT_LOG_INFO("Trying legacy llama2.c format...");
     if (bmt_checkpoint_load_legacy_llama2c(model, path) == 0) return;
+    // Try directory (safetensors)
+    if (bmt_checkpoint_load_safetensors(model, path) == 0) return;
     BMT_LOG_ERROR("Failed to load weights from %s", path);
 }
 

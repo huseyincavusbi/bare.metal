@@ -9,7 +9,8 @@
 #include <math.h>
 
 extern int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
-                  int steps, float temperature, unsigned long long seed);
+                  int steps, float temperature, unsigned long long seed,
+                  const char* tok_path);
 
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
@@ -218,8 +219,9 @@ int main(int argc, char** argv) {
         bm_model_t* model = calloc(1, sizeof(*model));
         bm_load_weights(model, argv[2]);
         const char* prompt = argc > 3 ? argv[3] : "";
+        const char* tok_path = "tokenizer.bin";
         srand(time(NULL));
-        bm_run(ctx, model, prompt, 256, 1.0, rand());
+        bm_run(ctx, model, prompt, 10, 0.0, rand(), tok_path);
         bm_destroy_model(model);
         bm_destroy(ctx);
         return 0;

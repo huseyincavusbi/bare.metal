@@ -15,6 +15,7 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/context.c \
              src/baremetal/model.c \
              src/baremetal/checkpoint.c \
+             src/baremetal/checkpoint_st.c \
              src/baremetal/api.c \
              src/baremetal/tokenizer.c \
              tools/cli.c \

@@ -18,7 +18,9 @@ def convert_hf_to_baremetal(model_dir, output_path):
 
     # Architecture detection
     has_rope = cfg.get('rope_theta') is not None or cfg.get('rope_scaling') is not None
-    arch['norm'] = 1 if 'rms' in str(cfg.get('norm_type', '')).lower() else 0
+    is_rms = 'rms' in str(cfg.get('norm_type', '')).lower() or \
+             'rms_norm_eps' in cfg or 'rmsnorm' in str(cfg).lower()
+    arch['norm'] = 1 if is_rms else 0
     act = cfg.get('hidden_act', 'gelu_new').lower()
     arch['activation'] = 1 if act in ('silu', 'swiglu') else 0
     arch['pos_enc'] = 1 if has_rope else 0
@@ -31,6 +33,18 @@ def convert_hf_to_baremetal(model_dir, output_path):
     L, D, H, V = arch['n_layers'], arch['dim'], arch['hidden_dim'], arch['vocab_size']
     NH, HD = arch['n_heads'], D // arch['n_heads']
 
+    # Load all tensors first so we can detect architecture features
+    tensors = {}
+    for fn in sorted(os.listdir(model_dir)):
+        if fn.endswith('.safetensors'):
+            with safe_open(os.path.join(model_dir, fn), framework='pt') as sf:
+                for k in sf.keys():
+                    tensors[k] = sf.get_tensor(k).float().numpy()
+
+    # Architecture detection from actual tensors
+    arch['has_qk_norm'] = 1 if any('.q_norm' in k or '.k_norm' in k for k in tensors) else 0
+    arch['has_ffn_post_norm'] = 1 if any('post_feedforward_layernorm' in k for k in tensors) else 0
+
     header = [0] * 256
     header[0] = 20250718; header[1] = 1; header[2] = 0
     header[3] = D; header[4] = H; header[5] = L; header[6] = NH
@@ -38,13 +52,7 @@ def convert_hf_to_baremetal(model_dir, output_path):
     header[10] = arch['norm']; header[11] = arch['activation']
     header[12] = arch['pos_enc']; header[13] = arch['attention']
     header[14] = arch['bias']; header[15] = arch['weight_tie']
-
-    tensors = {}
-    for fn in sorted(os.listdir(model_dir)):
-        if fn.endswith('.safetensors'):
-            with safe_open(os.path.join(model_dir, fn), framework='pt') as sf:
-                for k in sf.keys():
-                    tensors[k] = sf.get_tensor(k).float().numpy()
+    header[16] = arch['has_qk_norm']; header[17] = arch['has_ffn_post_norm']
 
     def get(*names):
         for n in names:
@@ -88,6 +96,12 @@ def convert_hf_to_baremetal(model_dir, output_path):
         else:
             qkv = np.zeros((3 * NH * HD, D))
         weights.append(qkv.flatten())
+
+        if arch['has_qk_norm']:
+            qn = get(f'model.layers.{l}.self_attn.q_norm.weight')
+            kn = get(f'model.layers.{l}.self_attn.k_norm.weight')
+            if qn is not None: weights.append(qn.flatten())
+            if kn is not None: weights.append(kn.flatten())
 
         if arch['bias']:
             qb = get(f'model.layers.{l}.self_attn.q_proj.bias',
@@ -133,6 +147,12 @@ def convert_hf_to_baremetal(model_dir, output_path):
             w2b = get(f'model.layers.{l}.mlp.down_proj.bias',
                       f'transformer.h.{l}.mlp.c_proj.bias')
             if w2b is not None: weights.append(w2b.flatten())
+
+        if arch['has_ffn_post_norm']:
+            pre_ffn = get(f'model.layers.{l}.pre_feedforward_layernorm.weight')
+            if pre_ffn is not None: weights.append(pre_ffn.flatten())
+            ffn_post = get(f'model.layers.{l}.post_feedforward_layernorm.weight')
+            if ffn_post is not None: weights.append(ffn_post.flatten())
 
     lnf = get('model.norm.weight', 'transformer.ln_f.weight', 'ln_f.weight')
     if lnf is not None: weights.append(lnf.flatten())

@@ -21,6 +21,9 @@ struct bm_model_s {
     float*   ln1b;
     float*   qkvw;
     float*   qkvb;
+    float*   qw;
+    float*   kw;
+    float*   vw;
     float*   attprojw;
     float*   attprojb;
     float*   ln2w;
@@ -33,6 +36,10 @@ struct bm_model_s {
     float*   lnfw;
     float*   lnfb;
     float*   wcls;
+    float*   q_norm_w;
+    float*   k_norm_w;
+    float*   pre_ffn_w;
+    float*   ffn_post_w;
 };
 
 int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);
