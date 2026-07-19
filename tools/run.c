@@ -84,8 +84,8 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     bm_tokenizer_t tok; bm_tokenizer_init(&tok, (char*)tok_path, V);
     fprintf(stderr,"Tokenizing prompt (%s)...\n", prompt);
     fflush(stderr);
-    int*ptok=malloc(1024*sizeof(int)); int nt=1; int prev=1;
-    ptok[0]=2; // skip encode, use BOS
+    int*ptok=malloc(1024*sizeof(int)); int nt=0; int prev=1;
+    bm_tokenizer_encode(&tok,prompt,1,0,ptok,&nt);
     int token=ptok[0],next;
     backend_encoder_t*enc;
     backend_buffer_t *bq=backend_buffer_alloc(g_be,NH*HD*sizeof(float));
