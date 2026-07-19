@@ -46,6 +46,14 @@ void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
         t->vocab[i][len] = '\0';
     }
     fclose(file);
+
+    // sort vocabulary eagerly
+    t->sorted_vocab = malloc(t->vocab_size * sizeof(bm_token_index_t));
+    for (int i = 0; i < t->vocab_size; i++) {
+        t->sorted_vocab[i].str = t->vocab[i];
+        t->sorted_vocab[i].id = i;
+    }
+    qsort(t->sorted_vocab, t->vocab_size, sizeof(bm_token_index_t), compare_tokens);
 }
 
 void bm_tokenizer_free(bm_tokenizer_t* t) {
@@ -85,14 +93,7 @@ int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
                         int8_t eos, int* tokens, int* n_tokens) {
     if (!text) return -1;
 
-    if (!t->sorted_vocab) {
-        t->sorted_vocab = malloc(t->vocab_size * sizeof(bm_token_index_t));
-        for (int i = 0; i < t->vocab_size; i++) {
-            t->sorted_vocab[i].str = t->vocab[i];
-            t->sorted_vocab[i].id = i;
-        }
-        qsort(t->sorted_vocab, t->vocab_size, sizeof(bm_token_index_t), compare_tokens);
-    }
+    if (!t->sorted_vocab) return -1;
 
     char* str_buffer = malloc((t->max_token_length * 2 + 3) * sizeof(char));
     size_t str_len = 0;
