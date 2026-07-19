@@ -4,4 +4,4 @@ build/
 *.o
 data/
 *.bin
-.DS_Store
+.DS_Storegemma3_tokenizer.bin

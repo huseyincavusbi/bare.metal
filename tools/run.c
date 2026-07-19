@@ -35,6 +35,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
+    if (MS > 1024) MS = 1024; // cap to avoid OOM
     float sc=1.0f/sqrtf((float)HD); (void)seed;
     int max_dim=MAX(D,MAX(H,V));
     bi=backend_buffer_alloc(g_be,max_dim*sizeof(float));
@@ -79,7 +80,9 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     float*x=calloc(D,sizeof(float)),*b=calloc(D,sizeof(float)),*logits=calloc(V,sizeof(float));
     float*hb=calloc(H,sizeof(float)),*hb2=calloc(H,sizeof(float));
     float*kvc=calloc(L*2*MS*KV,sizeof(float));
+    fprintf(stderr,"Loading tokenizer (%d vocab)...\n", V);
     bm_tokenizer_t tok; bm_tokenizer_init(&tok, (char*)tok_path, V);
+    fprintf(stderr,"Tokenizing prompt...\n");
     int*ptok=malloc(1024*sizeof(int)); int nt=0; int prev=1;
     bm_tokenizer_encode(&tok,prompt,1,0,ptok,&nt);
     int token=ptok[0],next;
@@ -223,6 +226,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                   for(next=0;next<V;next++){c+=logits[next];if(c>=r)break;}}}
         bm_tokenizer_safe_print(bm_tokenizer_decode(&tok,prev,next));
         prev=token;token=next;
+        fprintf(stderr,".");
     }
     printf("\n");
     backend_buffer_free(bq);backend_buffer_free(bk);backend_buffer_free(bv);

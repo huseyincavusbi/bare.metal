@@ -219,9 +219,9 @@ int main(int argc, char** argv) {
         bm_model_t* model = calloc(1, sizeof(*model));
         bm_load_weights(model, argv[2]);
         const char* prompt = argc > 3 ? argv[3] : "";
-        const char* tok_path = "tokenizer.bin";
+        const char* tok_path = "gemma3_tokenizer.bin";
         srand(time(NULL));
-        bm_run(ctx, model, prompt, 10, 0.0, rand(), tok_path);
+        bm_run(ctx, model, prompt, 5, 0.0, rand(), tok_path);
         bm_destroy_model(model);
         bm_destroy(ctx);
         return 0;
