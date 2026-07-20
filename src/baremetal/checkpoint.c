@@ -51,8 +51,9 @@ int bmt_checkpoint_load(bm_model_t* model, const char* path) {
     arch.embed_scale   = header[20];
     arch.weight_layout = header[21];
     arch.gemma_norm    = header[22];
+    arch.rope_theta    = (float)header[23];
+    if (arch.rope_theta <= 0.0f) arch.rope_theta = 10000.0f;
     arch.padded_vocab_size = arch.vocab_size;
-    arch.rope_theta    = 10000.0f;
 
     if (bmt_model_alloc_buffers(model, &arch) != 0) {
         fclose(file);
