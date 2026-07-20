@@ -11,6 +11,7 @@
 extern int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
                   int steps, float temperature, unsigned long long seed,
                   const char* tok_path);
+extern int bm_validate(bm_context_t* ctx, bm_model_t* model, const char* ref_path);
 
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
@@ -21,6 +22,7 @@ static void print_usage(const char* prog) {
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
     printf("  test-kernels                Test all forward kernels\n");
+    printf("  validate <model> <ref.bin>  Validate against PyTorch reference\n");
     printf("\nOptions:\n");
     printf("  -t, --temperature <float>   Sampling temperature (default: 1.0)\n");
     printf("  -p, --topp <float>          Top-p threshold (default: 0.9)\n");
@@ -211,6 +213,17 @@ int main(int argc, char** argv) {
         bm_destroy_model(model);
         bm_destroy(ctx);
         return 0;
+    }
+
+    if (strcmp(cmd, "validate") == 0) {
+        if (argc < 4) { printf("Usage: %s validate <model> <ref.bin>\n", argv[0]); return 1; }
+        bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+        bm_model_t* model = calloc(1, sizeof(*model));
+        bm_load_weights(model, argv[2]);
+        int r = bm_validate(ctx, model, argv[3]);
+        bm_destroy_model(model);
+        bm_destroy(ctx);
+        return r;
     }
 
     if (strcmp(cmd, "run") == 0) {
