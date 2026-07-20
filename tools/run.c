@@ -16,7 +16,7 @@
 #endif
 
 static backend_kernel_t *km,*kr,*kl,*kg,*ks,*kp;
-static backend_buffer_t *bi,*bw,*bo,*bp,*be;
+static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
 #define D(kn,bufs,n,gx,gy,gz,tx,ty,tz) do{backend_encode_dispatch(enc,kn,bufs,NULL,n,gx,gy,gz,tx,ty,tz);}while(0)
@@ -32,6 +32,8 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     kg=backend_kernel_create(g_be,"gelu_forward");
     ks=backend_kernel_create(g_be,"swiglu_forward");
     kp=backend_kernel_create(g_be,"rope_forward");
+    backend_kernel_t* ksx = backend_kernel_create(g_be,"softmax_causal_scale");
+    (void)ksx; // unused for now
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
@@ -42,21 +44,23 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     bw=backend_buffer_alloc(g_be,MAX(V,3*NH*HD)*MAX(D,H)*sizeof(float));
     bo=backend_buffer_alloc(g_be,max_dim*sizeof(float));
     bp=backend_buffer_alloc(g_be,4*sizeof(int));
-    be=backend_buffer_alloc(g_be,sizeof(float));
-    *(float*)backend_buffer_map(be)=1e-5f;
+    beps=backend_buffer_alloc(g_be,sizeof(float));
+    bo2=backend_buffer_alloc(g_be,max_dim*sizeof(float));
+    *(float*)backend_buffer_map(beps)=1e-5f;
 
-    #define E(inp,wgt,woff,BT,CC,OC) do{ \
-        int _p[]={BT,CC,OC,0}; memcpy(backend_buffer_map(bp),_p,4*sizeof(int)); \
-        memcpy(backend_buffer_map(bi),(inp),BT*CC*sizeof(float)); \
-        memcpy(backend_buffer_map(bw),(float*)(wgt)+(woff),OC*CC*sizeof(float)); \
-        backend_buffer_t*_a[]={bi,bw,bi,bo,bp}; D(km,_a,5,BT,OC,1,1,1,1); \
-    }while(0)
+#define E2(outbuf,inp,wgt,woff,BT,CC,OC) do{ \
+    int _p[]={BT,CC,OC,0}; memcpy(backend_buffer_map(bp),_p,4*sizeof(int)); \
+    memcpy(backend_buffer_map(bi),(inp),BT*CC*sizeof(float)); \
+    memcpy(backend_buffer_map(bw),(float*)(wgt)+(woff),OC*CC*sizeof(float)); \
+    backend_buffer_t*_a[]={bi,bw,bi,(outbuf),bp}; D(km,_a,5,BT,OC,1,1,1,1); \
+}while(0)
+#define E(inp,wgt,woff,BT,CC,OC) E2(bo,inp,wgt,woff,BT,CC,OC)
     #define R(inp,wgt) do{ \
         memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
         memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
         backend_kernel_t*kn=(nm==BM_NORM_RMSNORM)?kr:kl; \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,be}; D(kn,_n,5,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(kn,_n,5,1,1,1,1,1,1); \
     }while(0)
     #define G(inp,N) do{ \
         memcpy(backend_buffer_map(bi),(inp),(N)*sizeof(float)); \
@@ -102,17 +106,15 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             B(); R(x,m->ln1w+l*D); C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
 
-            // QKV matmul (separate Q, K, V for GQA support)
             float _q[NH*HD],_k[KV],_v[KV];
-            B(); E(b,m->qw+l*NH*HD*D,0,1,D,NH*HD); C();
-            memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
-            B(); E(b,m->kw+l*NKV*HD*D,0,1,D,KV); C();
-            memcpy(_k,backend_buffer_map(bo),KV*sizeof(float));
-            B(); E(b,m->vw+l*NKV*HD*D,0,1,D,KV); C();
-            memcpy(_v,backend_buffer_map(bo),KV*sizeof(float));
-            memcpy(backend_buffer_map(bq),_q,NH*HD*sizeof(float));
-            memcpy(backend_buffer_map(bk),_k,KV*sizeof(float));
-            memcpy(backend_buffer_map(bv),_v,KV*sizeof(float));
+            B();
+            E2(bq,b,m->qw+l*NH*HD*D,0,1,D,NH*HD);
+            E2(bk,b,m->kw+l*NKV*HD*D,0,1,D,KV);
+            E2(bv,b,m->vw+l*NKV*HD*D,0,1,D,KV);
+            C();
+            memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
+            memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
+            memcpy(_v,backend_buffer_map(bv),KV*sizeof(float));
 
             // QK norm (Gemma-style)
             if(m->arch.has_qk_norm){
@@ -121,13 +123,13 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                 memcpy(backend_buffer_map(bi),_q,NH*HD*sizeof(float));
                 memcpy(backend_buffer_map(bw),qnw,NH*HD*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){NH,HD},2*sizeof(int));
-                backend_buffer_t*_qn[]={bi,bw,bo,bp,be}; D(kr,_qn,5,NH,1,1,1,1,1);
+                backend_buffer_t*_qn[]={bi,bw,bo,bp,beps}; D(kr,_qn,5,NH,1,1,1,1,1);
                 memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
                 float*knw=m->k_norm_w+l*m->n_kv_heads*HD;
                 memcpy(backend_buffer_map(bi),_k,KV*sizeof(float));
                 memcpy(backend_buffer_map(bw),knw,KV*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){m->n_kv_heads,HD},2*sizeof(int));
-                backend_buffer_t*_kn[]={bi,bw,bo,bp,be}; D(kr,_kn,5,m->n_kv_heads,1,1,1,1,1);
+                backend_buffer_t*_kn[]={bi,bw,bo,bp,beps}; D(kr,_kn,5,m->n_kv_heads,1,1,1,1,1);
                 C();
                 memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
                 memcpy(_k,backend_buffer_map(bo),KV*sizeof(float));
@@ -232,7 +234,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     backend_buffer_free(bq);backend_buffer_free(bk);backend_buffer_free(bv);
     backend_buffer_free(br);backend_buffer_free(bf);
     free(ptok);bm_tokenizer_free(&tok);free(kvc);free(x);free(b);free(logits);free(hb);free(hb2);
-    backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bp);backend_buffer_free(be);
+    backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bp);backend_buffer_free(beps);
     backend_kernel_destroy(km);backend_kernel_destroy(kr);backend_kernel_destroy(kl);
     backend_kernel_destroy(kg);backend_kernel_destroy(ks);backend_kernel_destroy(kp);
     return 0;
