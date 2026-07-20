@@ -73,13 +73,15 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     #define G(inp,N) do{ \
         memcpy(backend_buffer_map(bi),(inp),(N)*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
-        backend_buffer_t*_g[]={bi,bo,bp}; D(kg,_g,3,(N),1,1,(N),1,1); \
+        int _tx = (N) < 256 ? (N) : 256; \
+        backend_buffer_t*_g[]={bi,bo,bp}; D(kg,_g,3,(N),1,1,_tx,1,1); \
     }while(0)
     #define S(gate,up,N) do{ \
         memcpy(backend_buffer_map(bi),(gate),(N)*sizeof(float)); \
         memcpy(backend_buffer_map(bw),(up),(N)*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
-        backend_buffer_t*_s[]={bi,bw,bo,bp}; D(ks,_s,4,(N),1,1,(N),1,1); \
+        int _tx = (N) < 256 ? (N) : 256; \
+        backend_buffer_t*_s[]={bi,bw,bo,bp}; D(ks,_s,4,(N),1,1,_tx,1,1); \
     }while(0)
     #define RP(qbuf,kbuf,hdim,pos) do{ \
         *(int*)backend_buffer_map(bp)=hdim; \
@@ -184,10 +186,10 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                 for(int t=0;t<S;t++)if(scores[t]>mx)mx=scores[t];
                 for(int t=0;t<S;t++){scores[t]=expf(scores[t]-mx);sum+=scores[t];}
                 for(int t=0;t<S;t++)scores[t]/=sum;
-                B();
-                E(scores,vb,0,1,S,HD);
-                C();
-                memcpy(ho,backend_buffer_map(bo),HD*sizeof(float));
+                for(int i=0;i<HD;i++){
+                    ho[i]=0;
+                    for(int t=0;t<S;t++)ho[i]+=scores[t]*vb[t*HD+i];
+                }
                 for(int i=0;i<HD;i++)xa[h*HD+i]=ho[i];
                 free(kb);free(vb);free(scores);free(ho);
             }
