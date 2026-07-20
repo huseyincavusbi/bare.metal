@@ -46,7 +46,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     bp=backend_buffer_alloc(g_be,4*sizeof(int));
     beps=backend_buffer_alloc(g_be,sizeof(float));
     bo2=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    *(float*)backend_buffer_map(beps)=1e-5f;
+    *(float*)backend_buffer_map(beps)=1e-6f;
 
 #define E2(outbuf,inp,wgt,woff,BT,CC,OC) do{ \
     int _p[]={BT,CC,OC,0}; memcpy(backend_buffer_map(bp),_p,4*sizeof(int)); \
@@ -96,6 +96,8 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     backend_buffer_t *bv=backend_buffer_alloc(g_be,KV*sizeof(float));
     backend_buffer_t *br=backend_buffer_alloc(g_be,4*sizeof(int));
     backend_buffer_t *bf=backend_buffer_alloc(g_be,sizeof(float));
+    backend_buffer_t *btheta=backend_buffer_alloc(g_be,sizeof(float));
+    *(float*)backend_buffer_map(btheta)=10000.0f;
 
     for(int pos=0;pos<steps;pos++){
         float*wte=m->token_embedding_table;
@@ -140,10 +142,10 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             if(pt==BM_POS_ROPE){
                 *(int*)backend_buffer_map(br)=HD;
                 int ps=pos;
-                *(float*)backend_buffer_map(bf)=(float)ps;
+                *(int*)backend_buffer_map(bf)=ps;
                 B();
-                backend_buffer_t *_rp[]={bq,bk,br,bf};
-                D(kp,_rp,4,NH+m->n_kv_heads,1,1,1,1,1);
+                backend_buffer_t *_rp[]={bq,bk,br,bf,btheta};
+                D(kp,_rp,5,NH+m->n_kv_heads,1,1,1,1,1);
                 C();
                 memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
                 memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
@@ -216,6 +218,13 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
         }
         // Final norm + classifier
         B();R(x,m->lnfw);C();
+        if (pos == 0) {
+            float hstate[D];
+            memcpy(hstate, backend_buffer_map(bo), D*sizeof(float));
+            FILE* xf = fopen("test/our_hidden.bin", "wb");
+            fwrite(hstate, sizeof(float), D, xf);
+            fclose(xf);
+        }
         B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
         memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
         if (pos == 0) {
