@@ -5,3 +5,4 @@ build/
 data/
 *.bin
 .DS_Storegemma3_tokenizer.bin
+.DS_Store
