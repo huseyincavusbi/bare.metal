@@ -63,6 +63,8 @@ typedef struct {
     int head_dim;
     int gated_mlp;
     int gemma_norm;
+    int embed_scale;
+    int weight_layout;
 
     float rope_theta;
 } bm_arch_t;

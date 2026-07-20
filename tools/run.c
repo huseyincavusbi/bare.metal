@@ -110,7 +110,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     for(int pos=0;pos<steps;pos++){
         float*wte=m->token_embedding_table;
         memcpy(x,wte+token*D,D*sizeof(float));
-        {float esc = sqrtf((float)D); for(int i=0;i<D;i++) x[i] *= esc;}
+        if(m->arch.embed_scale){float esc=sqrtf((float)D);for(int i=0;i<D;i++)x[i]*=esc;}
         if(pt==BM_POS_LEARNED&&m->wpe)for(int i=0;i<D;i++)x[i]+=m->wpe[pos*D+i];
 
         for(int l=0;l<L;l++){

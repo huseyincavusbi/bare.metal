@@ -70,6 +70,9 @@ hdr[16]=1 if has_qk else 0
 hdr[17]=1 if has_ffn_post else 0
 hdr[18]=HD
 hdr[19]=1 if has_up_proj else 0  # gated_mlp
+hdr[20]=1 if is_gemma else 0     # embed_scale (sqrt(D))
+hdr[21]=1 if is_gpt2 else 0      # weight_layout (Conv1D transpose)
+hdr[22]=1 if is_gemma else 0     # gemma_norm (1+w RMSNorm)
 
 W = []
 
