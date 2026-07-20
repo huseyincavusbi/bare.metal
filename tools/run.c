@@ -107,11 +107,9 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
 
             float _q[NH*HD],_k[KV],_v[KV];
-            B();
-            E2(bq,b,m->qw+l*NH*HD*D,0,1,D,NH*HD);
-            E2(bk,b,m->kw+l*NKV*HD*D,0,1,D,KV);
-            E2(bv,b,m->vw+l*NKV*HD*D,0,1,D,KV);
-            C();
+            B();E2(bq,b,m->qw+l*NH*HD*D,0,1,D,NH*HD);C();
+            B();E2(bk,b,m->kw+l*NKV*HD*D,0,1,D,KV);C();
+            B();E2(bv,b,m->vw+l*NKV*HD*D,0,1,D,KV);C();
             memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
             memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
             memcpy(_v,backend_buffer_map(bv),KV*sizeof(float));
@@ -119,19 +117,20 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             // QK norm (Gemma-style)
             if(m->arch.has_qk_norm){
                 B();
-                float* qnw=m->q_norm_w+l*NH*HD;
+                float* qnw=m->q_norm_w+l*HD;
                 memcpy(backend_buffer_map(bi),_q,NH*HD*sizeof(float));
-                memcpy(backend_buffer_map(bw),qnw,NH*HD*sizeof(float));
+                for(int h=0;h<NH;h++)memcpy(backend_buffer_map(bw)+h*HD,qnw,HD*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){NH,HD},2*sizeof(int));
                 backend_buffer_t*_qn[]={bi,bw,bo,bp,beps}; D(kr,_qn,5,NH,1,1,1,1,1);
+                C();
                 memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
+                B();
                 float*knw=m->k_norm_w+l*m->n_kv_heads*HD;
                 memcpy(backend_buffer_map(bi),_k,KV*sizeof(float));
                 memcpy(backend_buffer_map(bw),knw,KV*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){m->n_kv_heads,HD},2*sizeof(int));
                 backend_buffer_t*_kn[]={bi,bw,bo,bp,beps}; D(kr,_kn,5,m->n_kv_heads,1,1,1,1,1);
                 C();
-                memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
                 memcpy(_k,backend_buffer_map(bo),KV*sizeof(float));
                 memcpy(backend_buffer_map(bq),_q,NH*HD*sizeof(float));
                 memcpy(backend_buffer_map(bk),_k,KV*sizeof(float));
@@ -191,15 +190,13 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                 memcpy(x,backend_buffer_map(bo),D*sizeof(float));
             }
             // FFN norm + gate + up + act + down
-            B();
             if(m->arch.has_ffn_post_norm){
-                R(x,m->pre_ffn_w+l*D);
+                B();R(x,m->pre_ffn_w+l*D);C();
             }else{
-                R(x,m->ln2w+l*D);
+                B();R(x,m->ln2w+l*D);C();
             }
-            E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);
-            if(at==BM_ACT_SWIGLU){E(backend_buffer_map(bo),m->fcw3+l*H*D,0,1,D,H);}
-            C();
+            B();E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);C();
+            if(at==BM_ACT_SWIGLU){B();E(backend_buffer_map(bo),m->fcw3+l*H*D,0,1,D,H);C();}
             memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
             if(at==BM_ACT_SWIGLU){
                 memcpy(hb2,backend_buffer_map(bo),H*sizeof(float));
@@ -211,14 +208,15 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             }
             B();E(hb,m->fcprojw+l*D*H,0,1,H,D);C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
-            for(int i=0;i<D;i++)x[i]+=b[i];
             if(m->arch.has_ffn_post_norm){
-                B();R(x,m->ffn_post_w+l*D);C();
-                memcpy(x,backend_buffer_map(bo),D*sizeof(float));
+                B();R(b,m->ffn_post_w+l*D);C();
+                memcpy(b,backend_buffer_map(bo),D*sizeof(float));
             }
+            for(int i=0;i<D;i++)x[i]+=b[i];
         }
         // Final norm + classifier
-        B();R(x,m->lnfw);E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
+        B();R(x,m->lnfw);C();
+        B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
         memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
         if (pos == 0) {
             FILE* lf = fopen("test/our_logits.bin", "wb");

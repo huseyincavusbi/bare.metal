@@ -7,7 +7,7 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     memset(model, 0, sizeof(bm_model_t));
     model->arch = *arch;
 
-    model->head_size = arch->dim / arch->n_heads;
+    model->head_size = arch->head_dim > 0 ? arch->head_dim : (arch->dim / arch->n_heads);
     model->kv_dim    = model->head_size * arch->n_kv_heads;
     model->n_kv_heads = arch->n_kv_heads;
     model->kv_mul     = arch->n_heads / arch->n_kv_heads;
@@ -38,13 +38,13 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     total_bytes += L * NH * HD * D             * sizeof(float);
     total_bytes += L * NKV * HD * D            * sizeof(float);
     total_bytes += L * NKV * HD * D            * sizeof(float);
-    if (arch->bias) total_bytes += L * 3 * D   * sizeof(float);
+    if (arch->bias) total_bytes += L * ((int)NH + 2*(int)NKV) * (int)HD * sizeof(float);
     if (arch->has_qk_norm) {
-        total_bytes += L * NH * HD             * sizeof(float);
+        total_bytes += L * HD                 * sizeof(float);
         total_bytes += L * arch->n_kv_heads * HD * sizeof(float);
     }
     total_bytes += L * NH * HD * D             * sizeof(float);
-    if (arch->bias) total_bytes += L * D       * sizeof(float);
+    if (arch->bias) total_bytes += L * NH * HD * sizeof(float);
     total_bytes += L * H * D                   * sizeof(float);
     if (arch->bias) total_bytes += L * H       * sizeof(float);
     if (arch->activation == BM_ACT_SWIGLU)
@@ -54,6 +54,7 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     if (arch->has_ffn_post_norm) {
         total_bytes += L * D * 2              * sizeof(float);
     }
+    total_bytes += D                           * sizeof(float);
     if (arch->norm == BM_NORM_LAYERNORM)
         total_bytes += D                       * sizeof(float);
     if (!arch->weight_tie)
@@ -82,13 +83,13 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     model->qw = w; w += L * NH * HD * D;
     model->kw = w; w += L * NKV * HD * D;
     model->vw = w; w += L * NKV * HD * D;
-    if (arch->bias) { model->qkvb = w; w += L * (NH + 2*NKV) * HD; }
+    if (arch->bias) { model->qkvb = w; w += L * ((int)NH + 2*(int)NKV) * (int)HD; }
     if (arch->has_qk_norm) {
-        model->q_norm_w = w; w += L * NH * HD;
+        model->q_norm_w = w; w += L * HD;
         model->k_norm_w = w; w += L * arch->n_kv_heads * HD;
     }
     model->attprojw = w; w += L * NH * HD * D;
-    if (arch->bias) { model->attprojb = w; w += L * D; }
+    if (arch->bias) { model->attprojb = w; w += L * NH * HD; }
 
     if (arch->norm == BM_NORM_LAYERNORM) {
         model->ln2w = w; w += L * D;

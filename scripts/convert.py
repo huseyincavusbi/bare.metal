@@ -58,6 +58,7 @@ hdr[14]=1 if has_bias else 0
 hdr[15]=1 if weight_tie else 0
 hdr[16]=1 if has_qk else 0
 hdr[17]=1 if has_ffn_post else 0
+hdr[18]=HD
 
 W = []
 

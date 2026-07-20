@@ -197,6 +197,11 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     // Bias
     arch.bias = (strstr(config_json, "\"attention_bias\": true") != NULL) ? 1 : 0;
 
+    // Head dim detection
+    arch.head_dim = 0;
+    char* hd = strstr(config_json, "\"head_dim\"");
+    if (hd) { hd = strstr(hd, ":"); if (hd) arch.head_dim = (int)strtol(hd+1, NULL, 10); }
+
     // Weight tie - detect from safetensors file
     arch.weight_tie = 0;
 
@@ -272,7 +277,7 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
         // QK norm
         if (arch.has_qk_norm) {
             snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.q_norm.weight", l);
-            CPT(buf, w, NH * HD); w += NH * HD;
+            CPT(buf, w, HD); w += HD;
             snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.k_norm.weight", l);
             CPT(buf, w, model->n_kv_heads * HD); w += model->n_kv_heads * HD;
         }
