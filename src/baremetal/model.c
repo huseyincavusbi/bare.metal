@@ -47,7 +47,7 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     if (arch->bias) total_bytes += L * NH * HD * sizeof(float);
     total_bytes += L * H * D                   * sizeof(float);
     if (arch->bias) total_bytes += L * H       * sizeof(float);
-    if (arch->activation == BM_ACT_SWIGLU)
+    if (arch->gated_mlp)
         total_bytes += L * H * D               * sizeof(float);
     total_bytes += L * D * H                   * sizeof(float);
     if (arch->bias) total_bytes += L * D       * sizeof(float);
@@ -100,7 +100,7 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
 
     model->fcw = w; w += L * H * D;
     if (arch->bias) { model->fcb = w; w += L * H; }
-    if (arch->activation == BM_ACT_SWIGLU) { model->fcw3 = w; w += L * H * D; }
+    if (arch->gated_mlp) { model->fcw3 = w; w += L * H * D; }
     model->fcprojw = w; w += L * D * H;
     if (arch->bias) { model->fcprojb = w; w += L * D; }
 

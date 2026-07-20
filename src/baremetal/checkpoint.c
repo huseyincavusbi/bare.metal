@@ -47,6 +47,7 @@ int bmt_checkpoint_load(bm_model_t* model, const char* path) {
     arch.has_qk_norm   = header[16];
     arch.has_ffn_post_norm = header[17];
     arch.head_dim      = header[18];
+    arch.gated_mlp     = header[19];
     arch.padded_vocab_size = arch.vocab_size;
     arch.rope_theta    = 10000.0f;
 

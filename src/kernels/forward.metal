@@ -68,16 +68,17 @@ kernel void softmax_forward(
 kernel void layernorm_forward(
     device const float* inp [[buffer(0)]],
     device const float* weight [[buffer(1)]],
-    device const float* bias [[buffer(2)]],
-    device float* out [[buffer(3)]],
-    constant int* p [[buffer(4)]],
-    constant float& eps [[buffer(5)]],
+    device float* out [[buffer(2)]],
+    constant int* p [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    device const float* bias [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     int N = p[0], C = p[1];
     int row = (int)gid;
     if (row >= N) return;
     const device float* inp_row = inp + row * C;
+    const device float* bias_row = bias + row * C;
     device float* out_row = out + row * C;
 
     float mean = 0.0f;
@@ -94,7 +95,7 @@ kernel void layernorm_forward(
     float inv_std = 1.0f / sqrt(var + eps);
     for (int j = 0; j < C; j++) {
         float n = (inp_row[j] - mean) * inv_std;
-        out_row[j] = n * weight[j] + bias[j];
+        out_row[j] = n * weight[j] + bias_row[j];
     }
 }
 

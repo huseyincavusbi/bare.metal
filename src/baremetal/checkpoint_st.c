@@ -231,10 +231,13 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     // Detect qk_norm and ffn_post_norm from tensor names
     arch.has_qk_norm = 0;
     arch.has_ffn_post_norm = 0;
+    arch.gated_mlp = 0;
+    arch.gemma_norm = (strstr(config_json, "\"gemma") != NULL) ? 1 : 0;
     for (int i = 0; i < n_st; i++) {
         for (int j = 0; j < st_files[i]->n_entries; j++) {
             const char* n = st_files[i]->entries[j].name;
             if (strstr(n, ".q_norm")) arch.has_qk_norm = 1;
+            if (strstr(n, ".up_proj")) arch.gated_mlp = 1;
             if (strstr(n, "post_feedforward")) arch.has_ffn_post_norm = 1;
         }
     }

@@ -61,6 +61,8 @@ typedef struct {
     int has_qk_norm;
     int has_ffn_post_norm;
     int head_dim;
+    int gated_mlp;
+    int gemma_norm;
 
     float rope_theta;
 } bm_arch_t;

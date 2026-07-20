@@ -102,6 +102,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     for(int pos=0;pos<steps;pos++){
         float*wte=m->token_embedding_table;
         memcpy(x,wte+token*D,D*sizeof(float));
+        {float esc = sqrtf((float)D); for(int i=0;i<D;i++) x[i] *= esc;}
         if(pt==BM_POS_LEARNED&&m->wpe)for(int i=0;i<D;i++)x[i]+=m->wpe[pos*D+i];
 
         for(int l=0;l<L;l++){
@@ -164,7 +165,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                 float*kb=calloc(S*HD,sizeof(float)),*vb=calloc(S*HD,sizeof(float));
                 float*scores=calloc(S,sizeof(float)),*ho=calloc(HD,sizeof(float));
                 for(int t=0;t<S;t++)for(int i=0;i<HD;i++){
-                    kb[t*HD+i]=kk[kh*KV+t*KV+i]; vb[t*HD+i]=kv[kh*KV+t*KV+i];
+                    kb[t*HD+i]=kk[t*KV+kh*HD+i]; vb[t*HD+i]=kv[t*KV+kh*HD+i];
                 }
                 B();
                 E(_q+h*HD,kb,0,1,HD,S);
@@ -197,14 +198,24 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             }else{
                 B();R(x,m->ln2w+l*D);C();
             }
-            B();E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);C();
-            if(at==BM_ACT_SWIGLU){B();E(backend_buffer_map(bo),m->fcw3+l*H*D,0,1,D,H);C();}
-            memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-            if(at==BM_ACT_SWIGLU){
-                memcpy(hb2,backend_buffer_map(bo),H*sizeof(float));
-                B();S(hb,hb2,H);C();
+            if(m->arch.gated_mlp){
+                float ffn_in[D];
+                memcpy(ffn_in,backend_buffer_map(bo),D*sizeof(float));
+                B();E(ffn_in,m->fcw+l*H*D,0,1,D,H);C();
                 memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
+                B();E(ffn_in,m->fcw3+l*H*D,0,1,D,H);C();
+                memcpy(hb2,backend_buffer_map(bo),H*sizeof(float));
+                if(at==BM_ACT_SWIGLU){
+                    B();S(hb,hb2,H);C();
+                    memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
+                }else{
+                    B();G(hb,H);C();
+                    memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
+                    for(int i=0;i<H;i++) hb[i] *= hb2[i];
+                }
             }else{
+                B();E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);C();
+                memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
                 B();G(hb,H);C();
                 memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
             }
@@ -215,6 +226,10 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
                 memcpy(b,backend_buffer_map(bo),D*sizeof(float));
             }
             for(int i=0;i<D;i++)x[i]+=b[i];
+            if(pos==0&&l==0){
+                float l0x[D]; memcpy(l0x,x,D*sizeof(float));
+                FILE*xf=fopen("test/l0_hidden.bin","wb");fwrite(l0x,D*sizeof(float),1,xf);fclose(xf);
+            }
         }
         // Final norm + classifier
         B();R(x,m->lnfw);C();
