@@ -220,6 +220,15 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
         // Final norm + classifier
         B();R(x,m->lnfw);E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
         memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
+        if (pos == 0) {
+            FILE* lf = fopen("test/our_logits.bin", "wb");
+            if (lf) {
+                int Vv = V;
+                fwrite(&Vv, sizeof(int), 1, lf);
+                fwrite(logits, sizeof(float), V, lf);
+                fclose(lf);
+            }
+        }
         // Sample
         if(pos<nt-1)next=ptok[pos+1];
         else{if(temp==0){next=0;float mv=logits[0];for(int i=1;i<V;i++)if(logits[i]>mv){mv=logits[i];next=i;}}
