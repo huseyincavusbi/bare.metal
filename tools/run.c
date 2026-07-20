@@ -80,10 +80,9 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     float*x=calloc(D,sizeof(float)),*b=calloc(D,sizeof(float)),*logits=calloc(V,sizeof(float));
     float*hb=calloc(H,sizeof(float)),*hb2=calloc(H,sizeof(float));
     float*kvc=calloc(L*2*MS*KV,sizeof(float));
-    fprintf(stderr,"Loading tokenizer (%d vocab)...\n", V);
+    fprintf(stderr,"Loading tokenizer...\n"); fflush(stderr);
     bm_tokenizer_t tok; bm_tokenizer_init(&tok, (char*)tok_path, V);
-    fprintf(stderr,"Tokenizing prompt (%s)...\n", prompt);
-    fflush(stderr);
+    fprintf(stderr,"Tokenizer loaded, encoding...\n"); fflush(stderr);
     int*ptok=malloc(1024*sizeof(int)); int nt=0; int prev=1;
     bm_tokenizer_encode(&tok,prompt,1,0,ptok,&nt);
     int token=ptok[0],next;

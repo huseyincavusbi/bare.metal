@@ -46,6 +46,13 @@ void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
         t->vocab[i][len] = '\0';
     }
     fclose(file);
+
+    t->sorted_vocab = malloc(t->vocab_size * sizeof(bm_token_index_t));
+    for (int i = 0; i < t->vocab_size; i++) {
+        t->sorted_vocab[i].str = t->vocab[i];
+        t->sorted_vocab[i].id = i;
+    }
+    qsort(t->sorted_vocab, t->vocab_size, sizeof(bm_token_index_t), compare_tokens);
 }
 
 void bm_tokenizer_free(bm_tokenizer_t* t) {
@@ -74,16 +81,70 @@ void bm_tokenizer_safe_print(char* piece) {
     fflush(stdout);
 }
 
+static int man_bsearch(char* key, bm_token_index_t* arr, int n) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int cmp = strcmp(key, arr[mid].str);
+        if (cmp == 0) return arr[mid].id;
+        if (cmp < 0) hi = mid - 1;
+        else lo = mid + 1;
+    }
+    return -1;
+}
+
 int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
                         int8_t eos, int* tokens, int* n_tokens) {
-    if (!text) return -1;
+    if (!text || !t->sorted_vocab) return -1;
 
+    char* str_buffer = malloc((t->max_token_length * 2 + 3) * sizeof(char));
+    size_t str_len = 0;
     *n_tokens = 0;
+
     if (bos) tokens[(*n_tokens)++] = 1;
 
-    for (const char* c = text; *c != '\0'; c++)
-        tokens[(*n_tokens)++] = (unsigned char)*c + 3;
+    if (text[0] != '\0') {
+        int dp = man_bsearch(" ", t->sorted_vocab, t->vocab_size);
+        if (dp >= 0) tokens[(*n_tokens)++] = dp;
+    }
+
+    for (const char* c = text; *c != '\0'; c++) {
+        if ((*c & 0xC0) != 0x80) str_len = 0;
+        str_buffer[str_len++] = *c;
+        str_buffer[str_len] = '\0';
+        if ((*(c + 1) & 0xC0) == 0x80 && str_len < 4) continue;
+
+        int id = man_bsearch(str_buffer, t->sorted_vocab, t->vocab_size);
+        if (id != -1) {
+            tokens[(*n_tokens)++] = id;
+        } else {
+            for (size_t i = 0; i < str_len; i++)
+                tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
+        }
+        str_len = 0;
+    }
+
+    while (1) {
+        float best_score = -1e10f;
+        int best_id = -1, best_idx = -1;
+        for (int i = 0; i < (*n_tokens - 1); i++) {
+            snprintf(str_buffer, t->max_token_length * 4 + 3, "%s%s",
+                     t->vocab[tokens[i]], t->vocab[tokens[i+1]]);
+            int id = man_bsearch(str_buffer, t->sorted_vocab, t->vocab_size);
+            if (id != -1 && t->vocab_scores[id] > best_score) {
+                best_score = t->vocab_scores[id];
+                best_id = id;
+                best_idx = i;
+            }
+        }
+        if (best_idx == -1) break;
+        tokens[best_idx] = best_id;
+        for (int i = best_idx + 1; i < (*n_tokens - 1); i++)
+            tokens[i] = tokens[i+1];
+        (*n_tokens)--;
+    }
 
     if (eos) tokens[(*n_tokens)++] = 2;
+    free(str_buffer);
     return 0;
 }
