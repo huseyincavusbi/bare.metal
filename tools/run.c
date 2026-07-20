@@ -107,7 +107,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     backend_buffer_t *br=backend_buffer_alloc(g_be,4*sizeof(int));
     backend_buffer_t *bf=backend_buffer_alloc(g_be,sizeof(float));
     backend_buffer_t *btheta=backend_buffer_alloc(g_be,sizeof(float));
-    *(float*)backend_buffer_map(btheta)=10000.0f;
+    *(float*)backend_buffer_map(btheta)=m->arch.rope_theta;
 
     for(int pos=0;pos<steps;pos++){
         float*wte=m->token_embedding_table;
