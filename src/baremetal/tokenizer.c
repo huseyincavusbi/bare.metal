@@ -103,7 +103,7 @@ int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
 
     if (bos) tokens[(*n_tokens)++] = 1;
 
-    if (text[0] != '\0') {
+    if (text[0] != '\0' && text[0] != ' ') {
         int dp = man_bsearch(" ", t->sorted_vocab, t->vocab_size);
         if (dp >= 0) tokens[(*n_tokens)++] = dp;
     }
@@ -118,8 +118,25 @@ int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
         if (id != -1) {
             tokens[(*n_tokens)++] = id;
         } else {
-            for (size_t i = 0; i < str_len; i++)
-                tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
+            for (size_t i = 0; i < str_len; i++) {
+                unsigned char b = (unsigned char)str_buffer[i];
+                char byte_buf[5] = {0};
+                int blen = 0;
+                if (b < 0x21) {
+                    byte_buf[0] = 0xC0 | ((0x100 + b) >> 6);
+                    byte_buf[1] = 0x80 | ((0x100 + b) & 0x3F);
+                    blen = 2;
+                } else {
+                    byte_buf[0] = b;
+                    blen = 1;
+                }
+                int bid = man_bsearch(byte_buf, t->sorted_vocab, t->vocab_size);
+                if (bid >= 0) {
+                    tokens[(*n_tokens)++] = bid;
+                } else {
+                    tokens[(*n_tokens)++] = b + 3;
+                }
+            }
         }
         str_len = 0;
     }
