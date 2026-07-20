@@ -16,7 +16,7 @@
 #endif
 
 static backend_kernel_t *km,*kr,*kl,*kg,*ks,*kp;
-static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps;
+static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps,*bbs;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
 #define D(kn,bufs,n,gx,gy,gz,tx,ty,tz) do{backend_encode_dispatch(enc,kn,bufs,NULL,n,gx,gy,gz,tx,ty,tz);}while(0)
@@ -46,7 +46,8 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
     bp=backend_buffer_alloc(g_be,4*sizeof(int));
     beps=backend_buffer_alloc(g_be,sizeof(float));
     bo2=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    *(float*)backend_buffer_map(beps)=1e-6f;
+    bbs=backend_buffer_alloc(g_be,D*sizeof(float));
+    *(float*)backend_buffer_map(beps)=1e-5f;
 
 #define E2(outbuf,inp,wgt,woff,BT,CC,OC) do{ \
     int _p[]={BT,CC,OC,0}; memcpy(backend_buffer_map(bp),_p,4*sizeof(int)); \
@@ -59,9 +60,16 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
         memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
         memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
-        backend_kernel_t*kn=(nm==BM_NORM_RMSNORM)?kr:kl; \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(kn,_n,5,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(kr,_n,5,1,1,1,1,1,1); \
     }while(0)
+    #define L(inp,wgt,bias) do{ \
+        memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bbs),(bias),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(kl,_n,6,1,1,1,1,1,1); \
+    }while(0)
+    #define N(inp,wgt,bias) do{ if(nm==BM_NORM_LAYERNORM)L(inp,wgt,bias);else R(inp,wgt); }while(0)
     #define G(inp,N) do{ \
         memcpy(backend_buffer_map(bi),(inp),(N)*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
@@ -106,7 +114,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
         if(pt==BM_POS_LEARNED&&m->wpe)for(int i=0;i<D;i++)x[i]+=m->wpe[pos*D+i];
 
         for(int l=0;l<L;l++){
-            B(); R(x,m->ln1w+l*D); C();
+            B(); N(x,m->ln1w+l*D,m->ln1b+l*D); C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
 
             float _q[NH*HD],_k[KV],_v[KV];
@@ -189,14 +197,14 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             for(int i=0;i<D;i++)x[i]+=b[i]; free(xa);
             // Post-attention norm (always applied for Gemma, same as ln2w for Llama)
             if(m->arch.has_ffn_post_norm){
-                B();R(x,m->ln2w+l*D);C();
+                B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
                 memcpy(x,backend_buffer_map(bo),D*sizeof(float));
             }
             // FFN norm + gate + up + act + down
             if(m->arch.has_ffn_post_norm){
-                B();R(x,m->pre_ffn_w+l*D);C();
+                B();N(x,m->pre_ffn_w+l*D,NULL);C();
             }else{
-                B();R(x,m->ln2w+l*D);C();
+                B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
             }
             if(m->arch.gated_mlp){
                 float ffn_in[D];
@@ -222,7 +230,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             B();E(hb,m->fcprojw+l*D*H,0,1,H,D);C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
             if(m->arch.has_ffn_post_norm){
-                B();R(b,m->ffn_post_w+l*D);C();
+                B();N(b,m->ffn_post_w+l*D,NULL);C();
                 memcpy(b,backend_buffer_map(bo),D*sizeof(float));
             }
             for(int i=0;i<D;i++)x[i]+=b[i];
@@ -232,7 +240,7 @@ int bm_run(bm_context_t* ctx, bm_model_t* m, const char* prompt,
             }
         }
         // Final norm + classifier
-        B();R(x,m->lnfw);C();
+        B();N(x,m->lnfw,m->lnfb);C();
         if (pos == 0) {
             float hstate[D];
             memcpy(hstate, backend_buffer_map(bo), D*sizeof(float));

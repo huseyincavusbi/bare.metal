@@ -18,7 +18,7 @@ V  = cfg.get('vocab_size', cfg.get('n_vocab', 0))
 MS = cfg.get('max_position_embeddings', cfg.get('n_positions', 2048))
 HD = cfg.get('head_dim', D // NH)
 is_rms = 'rms_norm_eps' in cfg
-act = cfg.get('hidden_activation', cfg.get('activation_function', 'gelu_new'))
+act = cfg.get('hidden_activation', cfg.get('hidden_act', cfg.get('activation_function', 'gelu_new')))
 is_swiglu = act in ('silu', 'swiglu')
 model_type = cfg.get('model_type', cfg.get('module', cfg.get('architectures', [''])[0] if isinstance(cfg.get('architectures'), list) else ''))
 is_gemma = 'gemma' in model_type.lower() if model_type else False
@@ -95,13 +95,13 @@ if not is_rms:
 if is_gpt2:
     for l in range(L):
         ca = get(f'transformer.h.{l}.attn.c_attn.weight', f'h.{l}.attn.c_attn.weight')
-        W.append(ca[:,:D].flatten())  # Q
+        W.append(ca[:,:D].T.flatten())  # Q [D, D] → transpose → [768, 768]
     for l in range(L):
         ca = get(f'transformer.h.{l}.attn.c_attn.weight', f'h.{l}.attn.c_attn.weight')
-        W.append(ca[:,D:2*D].flatten())  # K
+        W.append(ca[:,D:2*D].T.flatten())  # K
     for l in range(L):
         ca = get(f'transformer.h.{l}.attn.c_attn.weight', f'h.{l}.attn.c_attn.weight')
-        W.append(ca[:,2*D:].flatten())  # V
+        W.append(ca[:,2*D:].T.flatten())  # V
 else:
     for l in range(L):
         W.append(get(f'model.layers.{l}.self_attn.q_proj.weight',
@@ -138,7 +138,7 @@ if has_qk:
 if is_gpt2:
     for l in range(L):
         W.append(get(f'transformer.h.{l}.attn.c_proj.weight',
-                     f'h.{l}.attn.c_proj.weight').flatten())
+                     f'h.{l}.attn.c_proj.weight').T.flatten())
 else:
     for l in range(L):
         W.append(get(f'model.layers.{l}.self_attn.o_proj.weight',
@@ -161,10 +161,15 @@ if not is_rms:
                      f'h.{l}.ln_2.bias').flatten())
 
 # 11. fcw (w1/gate): [L][H][D] + fcb
-for l in range(L):
-    W.append(get(f'model.layers.{l}.mlp.gate_proj.weight',
-                 f'transformer.h.{l}.mlp.c_fc.weight',
-                 f'h.{l}.mlp.c_fc.weight').flatten())
+if is_gpt2:
+    for l in range(L):
+        W.append(get(f'transformer.h.{l}.mlp.c_fc.weight',
+                     f'h.{l}.mlp.c_fc.weight').T.flatten())
+else:
+    for l in range(L):
+        W.append(get(f'model.layers.{l}.mlp.gate_proj.weight',
+                     f'transformer.h.{l}.mlp.c_fc.weight',
+                     f'h.{l}.mlp.c_fc.weight').flatten())
 if has_bias:
     for l in range(L):
         W.append(get(f'model.layers.{l}.mlp.gate_proj.bias',
@@ -177,10 +182,15 @@ if has_up_proj:
         W.append(get(f'model.layers.{l}.mlp.up_proj.weight').flatten())
 
 # 13. fcprojw (w2/down): [L][D][H] + fcprojb
-for l in range(L):
-    W.append(get(f'model.layers.{l}.mlp.down_proj.weight',
-                 f'transformer.h.{l}.mlp.c_proj.weight',
-                 f'h.{l}.mlp.c_proj.weight').flatten())
+if is_gpt2:
+    for l in range(L):
+        W.append(get(f'transformer.h.{l}.mlp.c_proj.weight',
+                     f'h.{l}.mlp.c_proj.weight').T.flatten())
+else:
+    for l in range(L):
+        W.append(get(f'model.layers.{l}.mlp.down_proj.weight',
+                     f'transformer.h.{l}.mlp.c_proj.weight',
+                     f'h.{l}.mlp.c_proj.weight').flatten())
 if has_bias:
     for l in range(L):
         W.append(get(f'model.layers.{l}.mlp.down_proj.bias',
