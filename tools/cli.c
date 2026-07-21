@@ -12,11 +12,17 @@ extern int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
                   int steps, float temperature, unsigned long long seed,
                   const char* tok_path);
 
+extern int bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
+                         const int* prompt_ids, int n_prompt,
+                         int steps, float temperature, int top_k, float top_p,
+                         uint64_t seed, bm_token_cb_t callback, void* user_data);
+
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
     printf("Usage: %s <command> [options]\n\n", prog);
     printf("Commands:\n");
     printf("  run <checkpoint> [prompt]   Run inference on a model\n");
+    printf("  run-tokens <ckpt> <prompt.bin> <output.bin>  Run with pre-tokenized input\n");
     printf("  info <checkpoint>           Print model information\n");
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
@@ -194,6 +200,104 @@ static int cmd_test_kernels(void) {
     return failures > 0 ? 1 : 0;
 }
 
+typedef struct {
+    int* ids;
+    int  count;
+    int  capacity;
+} token_collector_t;
+
+static int collect_token(int token_id, void* user_data) {
+    token_collector_t* c = (token_collector_t*)user_data;
+    if (c->count >= c->capacity) {
+        c->capacity = c->capacity ? c->capacity * 2 : 256;
+        c->ids = realloc(c->ids, c->capacity * sizeof(int));
+    }
+    c->ids[c->count++] = token_id;
+    return 0;
+}
+
+static int read_token_ids(const char* path, int** out_ids) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    int n;
+    if (fread(&n, sizeof(int), 1, f) != 1) { fclose(f); return -1; }
+    if (n < 0) { fclose(f); return -1; }
+    *out_ids = malloc(n * sizeof(int));
+    if (n > 0 && fread(*out_ids, sizeof(int), n, f) != (size_t)n) {
+        free(*out_ids); *out_ids = NULL; fclose(f); return -1;
+    }
+    fclose(f);
+    return n;
+}
+
+static int write_token_ids(const char* path, const int* ids, int n) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    fwrite(&n, sizeof(int), 1, f);
+    if (n > 0) fwrite(ids, sizeof(int), n, f);
+    fclose(f);
+    return 0;
+}
+
+static int cmd_run_tokens(int argc, char** argv) {
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s run-tokens <checkpoint> <prompt_ids.bin> <output_ids.bin> [options]\n", argv[0]);
+        fprintf(stderr, "  --steps <int>       Max generation steps (default: 256)\n");
+        fprintf(stderr, "  --temp <float>      Sampling temperature (default: 0.7)\n");
+        fprintf(stderr, "  --top-k <int>       Top-k sampling (default: 40)\n");
+        fprintf(stderr, "  --top-p <float>     Top-p sampling (default: 0.9)\n");
+        fprintf(stderr, "  --seed <int>        RNG seed, 0=time-based (default: 0)\n");
+        return 1;
+    }
+    const char* ckpt_path = argv[2];
+    const char* prompt_path = argv[3];
+    const char* output_path = argv[4];
+
+    int steps = 256;
+    float temp = 0.7f;
+    int top_k = 40;
+    float top_p = 0.9f;
+    uint64_t seed = 0;
+
+    for (int i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temp = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) top_p = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = (uint64_t)atoll(argv[++i]);
+    }
+
+    int* prompt_ids = NULL;
+    int n_prompt = read_token_ids(prompt_path, &prompt_ids);
+    if (n_prompt < 0) {
+        fprintf(stderr, "error: failed to read prompt_ids from %s\n", prompt_path);
+        return 1;
+    }
+    fprintf(stderr, "[run-tokens] loaded %d prompt tokens\n", n_prompt);
+
+    bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+    bm_model_t* model = calloc(1, sizeof(*model));
+    bm_load_weights(model, ckpt_path);
+    bm_print_model_info(model);
+
+    token_collector_t collector = {NULL, 0, 0};
+    int rc = bm_run_tokens(ctx, model, prompt_ids, n_prompt,
+                           steps, temp, top_k, top_p, seed,
+                           collect_token, &collector);
+
+    if (rc == 0) {
+        fprintf(stderr, "[run-tokens] generated %d tokens\n", collector.count);
+        write_token_ids(output_path, collector.ids, collector.count);
+        fprintf(stderr, "[run-tokens] wrote output to %s\n", output_path);
+    }
+
+    free(collector.ids);
+    free(prompt_ids);
+    bm_destroy_model(model);
+    bm_destroy(ctx);
+    return rc;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
     const char* cmd = argv[1];
@@ -201,6 +305,7 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "test-dispatch") == 0) return cmd_test_dispatch();
     if (strcmp(cmd, "test-matmul") == 0) return cmd_test_matmul();
     if (strcmp(cmd, "test-kernels") == 0) return cmd_test_kernels();
+    if (strcmp(cmd, "run-tokens") == 0) return cmd_run_tokens(argc, argv);
 
     if (strcmp(cmd, "info") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
