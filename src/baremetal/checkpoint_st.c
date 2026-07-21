@@ -47,6 +47,13 @@ static int bmt_st_parse_header(const char* json, size_t len, bmt_st_entry_t** ou
         *name = '\0';
         p++; // skip closing "
 
+        if (strncmp(entries[n].name, "__", 2) == 0) {
+            const char* skip = strstr(p, "}");
+            if (!skip) break;
+            p = skip + 1;
+            continue;
+        }
+
         // find data_offsets
         const char* off = strstr(p, "data_offsets");
         if (!off) break;
@@ -74,11 +81,16 @@ static int bmt_st_parse_header(const char* json, size_t len, bmt_st_entry_t** ou
         }
 
         p = off;
+        while (p < end && *p != ']') p++;
+        if (p < end && *p == ']') p++;
+        if (p < end && *p == '}') p++;
         n++;
         if (n >= cap) {
             cap *= 2;
             entries = realloc(entries, cap * sizeof(bmt_st_entry_t));
         }
+        if (p < end && *p == ',') p++;
+        if (p >= end || *p == '}') break;
     }
 
     *out_entries = entries;
@@ -178,6 +190,7 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
     // Activation detection
     char* act = strstr(config_json, "hidden_activation");
+    if (!act) act = strstr(config_json, "hidden_act");
     if (act) {
         act = strstr(act, ":");
         if (act) {
@@ -202,10 +215,13 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     char* hd = strstr(config_json, "\"head_dim\"");
     if (hd) { hd = strstr(hd, ":"); if (hd) arch.head_dim = (int)strtol(hd+1, NULL, 10); }
 
-    // Weight tie - detect from safetensors file
-    arch.weight_tie = 0;
+    // Weight tie - prefer config, fall back to safetensors presence
+    arch.weight_tie = (strstr(config_json, "\"tie_word_embeddings\": true") != NULL) ? 1 : 0;
+    arch.gemma_norm = (strstr(config_json, "\"gemma") != NULL) ? 1 : 0;
 
-    arch.rope_theta = 10000.0f;
+    char* rt = strstr(config_json, "\"rope_theta\"");
+    if (rt) { rt = strstr(rt, ":"); if (rt) arch.rope_theta = strtof(rt+1, NULL); }
+    if (arch.rope_theta <= 0.0f) arch.rope_theta = 10000.0f;
     arch.precision = BM_PRECISION_FP32;
 
     free(config_json);
@@ -228,19 +244,21 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
     if (n_st == 0) { BMT_LOG_ERROR("No safetensors files found"); return -1; }
 
-    // Detect qk_norm and ffn_post_norm from tensor names
+    // Detect qk_norm, ffn_post_norm, gated_mlp, weight_tie from tensor names
     arch.has_qk_norm = 0;
     arch.has_ffn_post_norm = 0;
     arch.gated_mlp = 0;
-    arch.gemma_norm = (strstr(config_json, "\"gemma") != NULL) ? 1 : 0;
+    int saw_lm_head = 0;
     for (int i = 0; i < n_st; i++) {
         for (int j = 0; j < st_files[i]->n_entries; j++) {
             const char* n = st_files[i]->entries[j].name;
             if (strstr(n, ".q_norm")) arch.has_qk_norm = 1;
             if (strstr(n, ".up_proj")) arch.gated_mlp = 1;
             if (strstr(n, "post_feedforward")) arch.has_ffn_post_norm = 1;
+            if (strstr(n, "lm_head")) saw_lm_head = 1;
         }
     }
+    if (!saw_lm_head) arch.weight_tie = 1;
 
     // Allocate model buffers
     if (bmt_model_alloc_buffers(model, &arch) != 0) {
