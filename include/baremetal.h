@@ -118,6 +118,13 @@ int            bm_step(bm_session_t* sess, int token);
 void           bm_reset_session(bm_session_t* sess);
 void           bm_destroy_session(bm_session_t* sess);
 
+typedef int (*bm_token_cb_t)(int token_id, void* user_data);
+
+int            bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
+                             const int* prompt_ids, int n_prompt,
+                             int steps, float temperature, int top_k, float top_p,
+                             uint64_t seed, bm_token_cb_t callback, void* user_data);
+
 /* ---- Sampler ---- */
 
 bm_sampler_t*  bm_create_sampler(int vocab_size, float temp, float topp,
