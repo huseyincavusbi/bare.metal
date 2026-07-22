@@ -22,8 +22,9 @@ static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
     printf("Usage: %s <command> [options]\n\n", prog);
     printf("Commands:\n");
-    printf("  run <checkpoint> [prompt]   Run inference on a model\n");
-    printf("  run-tokens <ckpt> <prompt.bin> <output.bin>  Run with pre-tokenized input\n");
+    printf("  run <model_dir> <prompt> [opts]  Run inference (text in, text out)\n");
+    printf("  run-tokens <model_dir> <prompt.bin> <output.bin>  Run with pre-tokenized input\n");
+    printf("  tok-test <model_dir> <text>      Test tokenizer encode/decode\n");
     printf("  info <checkpoint>           Print model information\n");
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
@@ -368,16 +369,74 @@ int main(int argc, char** argv) {
 
     if (strcmp(cmd, "run") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
+        const char* model_dir = argv[2];
+        const char* prompt = "";
+        char tok_path[512];
+        int steps = 256;
+        float temp = 0.7f;
+        int top_k = 40;
+        float top_p = 0.9f;
+        uint64_t seed = 0;
+
+        for (int i = 3; i < argc; i++) {
+            if (argv[i][0] == '-' && argv[i][1] == '-') {
+                if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) steps = atoi(argv[++i]);
+                else if (strcmp(argv[i], "--temp") == 0 && i+1 < argc) temp = (float)atof(argv[++i]);
+                else if (strcmp(argv[i], "--top-k") == 0 && i+1 < argc) top_k = atoi(argv[++i]);
+                else if (strcmp(argv[i], "--top-p") == 0 && i+1 < argc) top_p = (float)atof(argv[++i]);
+                else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = (uint64_t)atoll(argv[++i]);
+                else if (strcmp(argv[i], "--tokenizer") == 0 && i+1 < argc) {
+                    snprintf(tok_path, sizeof(tok_path), "%s", argv[++i]);
+                }
+                else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
+            } else if (prompt[0] == '\0') {
+                prompt = argv[i];
+            }
+        }
+
+        if (prompt[0] == '\0') {
+            fprintf(stderr, "Usage: %s run <model_dir> <prompt> [options]\n", argv[0]);
+            return 1;
+        }
+
+        snprintf(tok_path, sizeof(tok_path), "%s/tokenizer.bin", model_dir);
+
         bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
         bm_model_t* model = calloc(1, sizeof(*model));
-        bm_load_weights(model, argv[2]);
-        const char* prompt = argc > 3 ? argv[3] : "";
-        const char* tok_path = argc > 4 ? argv[4] : "gemma3_tokenizer.bin";
-        srand(time(NULL));
-        bm_run(ctx, model, prompt, 500, 0.0f, rand(), tok_path);
+        bm_load_weights(model, model_dir);
+        bm_print_model_info(model);
+
+        bm_tokenizer_t tok;
+        bm_tokenizer_init(&tok, tok_path, model->arch.vocab_size);
+
+        int ptok[1024];
+        int nt = 0;
+        bm_tokenizer_encode(&tok, prompt, 0, 0, ptok, &nt);
+        fprintf(stderr, "[run] prompt: %d tokens\n", nt);
+
+        printf("%s", prompt);
+        fflush(stdout);
+
+        token_collector_t collector = {NULL, 0, 0};
+        int rc = bm_run_tokens(ctx, model, ptok, nt,
+                               steps, temp, top_k, top_p, seed,
+                               collect_token, &collector);
+
+        if (rc == 0) {
+            for (int i = 0; i < collector.count; i++) {
+                int prev = i > 0 ? collector.ids[i-1] : 1;
+                char* piece = bm_tokenizer_decode(&tok, prev, collector.ids[i]);
+                bm_tokenizer_safe_print(piece);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+
+        free(collector.ids);
+        bm_tokenizer_free(&tok);
         bm_destroy_model(model);
         bm_destroy(ctx);
-        return 0;
+        return rc;
     }
 
     print_usage(argv[0]);
