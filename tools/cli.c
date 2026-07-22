@@ -1,5 +1,6 @@
 #include "baremetal.h"
 #include "baremetal/model.h"
+#include "baremetal/tokenizer.h"
 #include "backend/backend.h"
 #include "backend/metal/device.h"
 #include "utils/log.h"
@@ -298,6 +299,52 @@ static int cmd_run_tokens(int argc, char** argv) {
     return rc;
 }
 
+static int cmd_tok_test(int argc, char** argv) {
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s tok-test <model_dir> <text> [tokenizer_path]\n", argv[0]);
+        return 1;
+    }
+    const char* model_dir = argv[2];
+    const char* text = argc > 3 ? argv[3] : "";
+    char tok_path[512];
+    if (argc > 4) {
+        snprintf(tok_path, sizeof(tok_path), "%s", argv[4]);
+    } else {
+        snprintf(tok_path, sizeof(tok_path), "%s/tokenizer.bin", model_dir);
+    }
+
+    bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+    bm_model_t* model = calloc(1, sizeof(*model));
+    bm_load_weights(model, model_dir);
+
+    bm_tokenizer_t tok;
+    bm_tokenizer_init(&tok, tok_path, model->arch.vocab_size);
+
+    int tokens[1024];
+    int n_tokens = 0;
+    bm_tokenizer_encode(&tok, text, 0, 0, tokens, &n_tokens);
+
+    printf("ids:");
+    for (int i = 0; i < n_tokens; i++) printf(" %d", tokens[i]);
+    printf("\n");
+
+    printf("tokens:");
+    for (int i = 0; i < n_tokens; i++) printf(" [%s]", tok.vocab[tokens[i]]);
+    printf("\n");
+
+    printf("decoded:");
+    for (int i = 0; i < n_tokens; i++) {
+        char* d = bm_tokenizer_decode(&tok, i > 0 ? tokens[i-1] : 0, tokens[i]);
+        printf("%s", d);
+    }
+    printf("\n");
+
+    bm_tokenizer_free(&tok);
+    bm_destroy_model(model);
+    bm_destroy(ctx);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
     const char* cmd = argv[1];
@@ -306,6 +353,7 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "test-matmul") == 0) return cmd_test_matmul();
     if (strcmp(cmd, "test-kernels") == 0) return cmd_test_kernels();
     if (strcmp(cmd, "run-tokens") == 0) return cmd_run_tokens(argc, argv);
+    if (strcmp(cmd, "tok-test") == 0) return cmd_tok_test(argc, argv);
 
     if (strcmp(cmd, "info") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
