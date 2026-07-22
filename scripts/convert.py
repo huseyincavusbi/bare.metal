@@ -149,10 +149,15 @@ else:
         W.append(get(f'model.layers.{l}.self_attn.o_proj.weight',
                      f'transformer.h.{l}.attn.c_proj.weight').flatten())
 if has_bias:
-    for l in range(L):
-        W.append(get(f'model.layers.{l}.self_attn.o_proj.bias',
-                     f'transformer.h.{l}.attn.c_proj.bias',
-                     f'h.{l}.attn.c_proj.bias').flatten())
+    has_o_proj_bias = any('o_proj.bias' in k for k in tensors)
+    if has_o_proj_bias:
+        for l in range(L):
+            W.append(get(f'model.layers.{l}.self_attn.o_proj.bias',
+                         f'transformer.h.{l}.attn.c_proj.bias',
+                         f'h.{l}.attn.c_proj.bias').flatten())
+    else:
+        for l in range(L):
+            W.append(np.zeros(NH * HD, dtype=np.float32))
 
 # 10. ln2w: [L][D]
 for l in range(L):
@@ -176,10 +181,15 @@ else:
                      f'transformer.h.{l}.mlp.c_fc.weight',
                      f'h.{l}.mlp.c_fc.weight').flatten())
 if has_bias:
-    for l in range(L):
-        W.append(get(f'model.layers.{l}.mlp.gate_proj.bias',
-                     f'transformer.h.{l}.mlp.c_fc.bias',
-                     f'h.{l}.mlp.c_fc.bias').flatten())
+    has_gate_proj_bias = any('gate_proj.bias' in k for k in tensors)
+    if has_gate_proj_bias:
+        for l in range(L):
+            W.append(get(f'model.layers.{l}.mlp.gate_proj.bias',
+                         f'transformer.h.{l}.mlp.c_fc.bias',
+                         f'h.{l}.mlp.c_fc.bias').flatten())
+    else:
+        for l in range(L):
+            W.append(np.zeros(H, dtype=np.float32))
 
 # 12. fcw3 (w3/up, for gated FFN)
 if has_up_proj:
@@ -197,10 +207,15 @@ else:
                      f'transformer.h.{l}.mlp.c_proj.weight',
                      f'h.{l}.mlp.c_proj.weight').flatten())
 if has_bias:
-    for l in range(L):
-        W.append(get(f'model.layers.{l}.mlp.down_proj.bias',
-                     f'transformer.h.{l}.mlp.c_proj.bias',
-                     f'h.{l}.mlp.c_proj.bias').flatten())
+    has_down_proj_bias = any('down_proj.bias' in k for k in tensors)
+    if has_down_proj_bias:
+        for l in range(L):
+            W.append(get(f'model.layers.{l}.mlp.down_proj.bias',
+                         f'transformer.h.{l}.mlp.c_proj.bias',
+                         f'h.{l}.mlp.c_proj.bias').flatten())
+    else:
+        for l in range(L):
+            W.append(np.zeros(D, dtype=np.float32))
 
 # 14. pre_ffn_w + ffn_post_w (if has_ffn_post_norm)
 if has_ffn_post:
@@ -211,8 +226,13 @@ if has_ffn_post:
 
 # 15. lnfw: [D] + lnfb
 W.append(get('model.norm.weight', 'transformer.ln_f.weight', 'ln_f.weight').flatten())
-if has_bias:
-    W.append(get('model.norm.bias', 'transformer.ln_f.bias', 'ln_f.bias').flatten())
+if not is_rms:
+    if has_bias:
+        has_norm_bias = any('norm.bias' in k or 'ln_f.bias' in k for k in tensors)
+        if has_norm_bias:
+            W.append(get('model.norm.bias', 'transformer.ln_f.bias', 'ln_f.bias').flatten())
+        else:
+            W.append(np.zeros(D, dtype=np.float32))
 
 # 16. wcls (if no weight tie)
 if not weight_tie:
