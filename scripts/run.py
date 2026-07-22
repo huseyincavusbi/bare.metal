@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Orchestrator: tokenize via HF, invoke baremetal run-tokens, decode output."""
 import argparse
-import json
 import struct
 import subprocess
 import sys
@@ -12,49 +11,6 @@ from transformers import AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BIN = REPO_ROOT / "build" / "baremetal"
-CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert.py"
-
-
-def detect_arch(model_dir: Path) -> dict:
-    with open(model_dir / "config.json") as f:
-        cfg = json.load(f)
-    return {
-        "model_type": cfg.get("model_type", "unknown"),
-        "architectures": cfg.get("architectures", []),
-        "hidden_size": cfg.get("hidden_size"),
-        "num_hidden_layers": cfg.get("num_hidden_layers"),
-        "num_attention_heads": cfg.get("num_attention_heads"),
-        "num_key_value_heads": cfg.get("num_key_value_heads", cfg.get("num_attention_heads")),
-        "vocab_size": cfg.get("vocab_size"),
-        "max_position_embeddings": cfg.get("max_position_embeddings"),
-    }
-
-
-def find_binary_checkpoint(model_dir: Path) -> Path:
-    name = model_dir.name
-    candidates = [
-        REPO_ROOT / f"{name}_fp32.bin",
-        REPO_ROOT / f"{name}.bin",
-        model_dir / "model.bin",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return candidates[0]
-
-
-def ensure_checkpoint(model_dir: Path, checkpoint: Path) -> Path:
-    if checkpoint.exists():
-        print(f"[run] checkpoint: {checkpoint}")
-        return checkpoint
-    print(f"[run] checkpoint missing: {checkpoint}")
-    print(f"[run] running convert.py to build it...")
-    cmd = [sys.executable, str(CONVERT_SCRIPT), str(model_dir), str(checkpoint)]
-    subprocess.run(cmd, check=True)
-    if not checkpoint.exists():
-        raise RuntimeError(f"convert.py did not produce {checkpoint}")
-    print(f"[run] built: {checkpoint}")
-    return checkpoint
 
 
 def write_token_ids(ids, path: Path) -> None:
@@ -89,7 +45,6 @@ def main():
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p (nucleus) sampling (default: 0.9)")
     p.add_argument("--seed", type=int, default=0, help="RNG seed, 0=time-based (default: 0)")
     p.add_argument("--binary", type=Path, default=DEFAULT_BIN, help=f"baremetal binary (default: {DEFAULT_BIN})")
-    p.add_argument("--checkpoint", type=Path, default=None, help="Binary checkpoint path (default: auto-detect)")
     p.add_argument("--keep-files", action="store_true", help="Keep prompt_ids.bin / output_ids.bin in cwd")
     p.add_argument("--prompt-ids-out", type=Path, default=None, help="Override path for prompt_ids.bin")
     p.add_argument("--output-ids-out", type=Path, default=None, help="Override path for output_ids.bin")
@@ -103,15 +58,7 @@ def main():
         print(f"hint: run 'make baremetal' first", file=sys.stderr)
         sys.exit(1)
 
-    arch = detect_arch(args.model_dir)
     print(f"[run] model:    {args.model_dir}")
-    print(f"[run] arch:     {arch['model_type']} ({arch['architectures']})")
-    print(f"[run] config:   D={arch['hidden_size']} L={arch['num_hidden_layers']} "
-          f"NH={arch['num_attention_heads']} NKV={arch['num_key_value_heads']} "
-          f"V={arch['vocab_size']} MS={arch['max_position_embeddings']}")
-
-    ckpt = args.checkpoint or find_binary_checkpoint(args.model_dir)
-    ckpt = ensure_checkpoint(args.model_dir, ckpt)
 
     print(f"[run] tokenizer: {args.model_dir}")
     try:
@@ -138,7 +85,7 @@ def main():
 
     cmd = [
         str(args.binary), "run-tokens",
-        str(ckpt),
+        str(args.model_dir),
         str(prompt_path),
         str(output_path),
         "--steps", str(args.steps),
