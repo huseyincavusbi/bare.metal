@@ -15,7 +15,7 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-static backend_kernel_t *km,*kr,*kl,*kg,*ks,*kp;
+static backend_kernel_t *km,*kr,*kl,*kg,*ks,*kp,*ka;
 static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps,*bbs;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
@@ -127,6 +127,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     kg=backend_kernel_create(g_be,"gelu_forward");
     ks=backend_kernel_create(g_be,"swiglu_forward");
     kp=backend_kernel_create(g_be,"rope_forward");
+    ka=backend_kernel_create(g_be,"attention_forward");
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
@@ -136,7 +137,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     bi=backend_buffer_alloc(g_be,max_dim*sizeof(float));
     bw=backend_buffer_alloc(g_be,MAX(V,3*NH*HD)*MAX(D,H)*sizeof(float));
     bo=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    bp=backend_buffer_alloc(g_be,4*sizeof(int));
+    bp=backend_buffer_alloc(g_be,8*sizeof(int));
     beps=backend_buffer_alloc(g_be,sizeof(float));
     bo2=backend_buffer_alloc(g_be,max_dim*sizeof(float));
     bbs=backend_buffer_alloc(g_be,D*sizeof(float));
@@ -185,6 +186,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     float*x=calloc(D,sizeof(float)),*b=calloc(D,sizeof(float)),*logits=calloc(V,sizeof(float));
     float*hb=calloc(H,sizeof(float)),*hb2=calloc(H,sizeof(float));
     float*kvc=calloc(L*2*MS*KV,sizeof(float));
+    backend_buffer_t* bkvc=backend_buffer_alloc(g_be,L*2*MS*KV*sizeof(float));
     backend_encoder_t*enc;
     backend_buffer_t *bq=backend_buffer_alloc(g_be,NH*HD*sizeof(float));
     backend_buffer_t *bk=backend_buffer_alloc(g_be,KV*sizeof(float));
@@ -278,36 +280,35 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
             memcpy(kk+pos*KV,_k,KV*sizeof(float));
             memcpy(kv+pos*KV,_v,KV*sizeof(float));
 
+            float* kvc_gpu = (float*)backend_buffer_map(bkvc);
+            memcpy(kvc_gpu + l*2*MS*KV + pos*KV, _k, KV*sizeof(float));
+            memcpy(kvc_gpu + l*2*MS*KV + MS*KV + pos*KV, _v, KV*sizeof(float));
+            backend_buffer_unmap(bkvc);
+
             int S=pos+1;
-            float*xa=calloc(NH*HD,sizeof(float));
-            for(int h=0;h<NH;h++){
-                int kh=h/KM;
-                float*kb=calloc(S*HD,sizeof(float)),*vb=calloc(S*HD,sizeof(float));
-                float*scores=calloc(S,sizeof(float)),*ho=calloc(HD,sizeof(float));
-                for(int t=0;t<S;t++)for(int i=0;i<HD;i++){
-                    kb[t*HD+i]=kk[t*KV+kh*HD+i]; vb[t*HD+i]=kv[t*KV+kh*HD+i];
-                }
-                B();
-                E(_q+h*HD,kb,0,1,HD,S);
-                C();
-                memcpy(scores,backend_buffer_map(bo),S*sizeof(float));
-                for(int t=0;t<S;t++)scores[t]*=sc;
-                float mx=-INFINITY,sum=0;
-                for(int t=0;t<S;t++)if(scores[t]>mx)mx=scores[t];
-                for(int t=0;t<S;t++){scores[t]=expf(scores[t]-mx);sum+=scores[t];}
-                for(int t=0;t<S;t++)scores[t]/=sum;
-                for(int i=0;i<HD;i++){
-                    ho[i]=0;
-                    for(int t=0;t<S;t++)ho[i]+=scores[t]*vb[t*HD+i];
-                }
-                for(int i=0;i<HD;i++)xa[h*HD+i]=ho[i];
-                free(kb);free(vb);free(scores);free(ho);
-            }
-            
-            B();E2(bo2,xa,m->attprojw+l*NH*HD*D,0,1,NH*HD,D);C();
-            memcpy(b,backend_buffer_map(bo2),D*sizeof(float));
-            
-            for(int i=0;i<D;i++)x[i]+=b[i]; free(xa);
+            memcpy(backend_buffer_map(bq), _q, NH*HD*sizeof(float));
+            backend_buffer_unmap(bq);
+
+            int att_params[8] = {NH, HD, NKV, KV, S, KM, l, MS};
+            memcpy(backend_buffer_map(bp), att_params, 8*sizeof(int));
+            backend_buffer_unmap(bp);
+            *(float*)backend_buffer_map(bf) = sc;
+            backend_buffer_unmap(bf);
+
+B();
+            backend_buffer_t* att_bufs[] = {bq, bkvc, bo2, bp, bf};
+            D(ka, att_bufs, 5, NH*256, 1, 1, 256, 1, 1);
+            C();
+
+            B();
+            int _pp[]={1,NH*HD,D,0}; memcpy(backend_buffer_map(bp),_pp,4*sizeof(int));
+            memcpy(backend_buffer_map(bw),m->attprojw+l*NH*HD*D,D*NH*HD*sizeof(float));
+            backend_buffer_unmap(bw); backend_buffer_unmap(bp);
+            backend_buffer_t* _pa[]={bo2,bw,bbs,bo,bp}; D(km,_pa,5,1,D,1,1,1,1);
+            C();
+            memcpy(b,backend_buffer_map(bo),D*sizeof(float));
+
+            for(int i=0;i<D;i++)x[i]+=b[i];
             if(m->arch.has_ffn_post_norm){
                 B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
                 memcpy(x,backend_buffer_map(bo),D*sizeof(float));
@@ -387,8 +388,9 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     backend_buffer_free(bq);backend_buffer_free(bk);backend_buffer_free(bv);
     backend_buffer_free(br);backend_buffer_free(bf);backend_buffer_free(bnkv);
     free(x);free(b);free(logits);free(hb);free(hb2);free(kvc);
-    backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bp);backend_buffer_free(beps);
+    backend_buffer_free(bkvc);
+    backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bo2);backend_buffer_free(bp);backend_buffer_free(beps);
     backend_kernel_destroy(km);backend_kernel_destroy(kr);backend_kernel_destroy(kl);
-    backend_kernel_destroy(kg);backend_kernel_destroy(ks);backend_kernel_destroy(kp);
+    backend_kernel_destroy(kg);backend_kernel_destroy(ks);backend_kernel_destroy(kp);backend_kernel_destroy(ka);
     return 0;
 }
