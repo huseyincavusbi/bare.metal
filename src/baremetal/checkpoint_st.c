@@ -399,6 +399,6 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
     for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
 
-    BMT_LOG_INFO("Loaded safetensors: %s (%zu params)", dir_path, model->n_parameters);
+    BMT_LOG_INFO("Loaded safetensors: %s (%d params)", dir_path, model->n_parameters);
     return 0;
 }

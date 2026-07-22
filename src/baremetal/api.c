@@ -96,5 +96,5 @@ void bm_print_model_info(const bm_model_t* model) {
     printf("  attention:   %s\n", a->attention == BM_ATTN_MHA ? "MHA" : "GQA");
     printf("  bias:        %s\n", a->bias ? "yes" : "no");
     printf("  weight_tie:  %s\n", a->weight_tie ? "yes" : "no");
-    printf("  parameters:  %zu\n", model->n_parameters);
+    printf("  parameters:  %d\n", model->n_parameters);
 }

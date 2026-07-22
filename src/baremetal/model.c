@@ -119,7 +119,7 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     }
 
     model->weight_buffer = (void*)raw;
-    BMT_LOG_INFO("Allocated %zu bytes for %zu parameters (arch=%d)",
+    BMT_LOG_INFO("Allocated %zu bytes for %d parameters (arch=%d)",
                  total_bytes, model->n_parameters, arch->norm);
     return 0;
 }
