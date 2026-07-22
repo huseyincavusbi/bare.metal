@@ -302,24 +302,18 @@ static int cmd_run_tokens(int argc, char** argv) {
 
 static int cmd_tok_test(int argc, char** argv) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s tok-test <model_dir> <text> [tokenizer_path]\n", argv[0]);
+        fprintf(stderr, "Usage: %s tok-test <model_dir> <text>\n", argv[0]);
         return 1;
     }
     const char* model_dir = argv[2];
-    const char* text = argc > 3 ? argv[3] : "";
-    char tok_path[512];
-    if (argc > 4) {
-        snprintf(tok_path, sizeof(tok_path), "%s", argv[4]);
-    } else {
-        snprintf(tok_path, sizeof(tok_path), "%s/tokenizer.bin", model_dir);
-    }
+    const char* text = argv[3];
 
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
     bm_model_t* model = calloc(1, sizeof(*model));
     bm_load_weights(model, model_dir);
 
     bm_tokenizer_t tok;
-    bm_tokenizer_init(&tok, tok_path, model->arch.vocab_size);
+    bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
 
     int tokens[1024];
     int n_tokens = 0;
@@ -371,7 +365,6 @@ int main(int argc, char** argv) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
         const char* model_dir = argv[2];
         const char* prompt = "";
-        char tok_path[512];
         int steps = 256;
         float temp = 0.7f;
         int top_k = 40;
@@ -385,9 +378,6 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--top-k") == 0 && i+1 < argc) top_k = atoi(argv[++i]);
                 else if (strcmp(argv[i], "--top-p") == 0 && i+1 < argc) top_p = (float)atof(argv[++i]);
                 else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = (uint64_t)atoll(argv[++i]);
-                else if (strcmp(argv[i], "--tokenizer") == 0 && i+1 < argc) {
-                    snprintf(tok_path, sizeof(tok_path), "%s", argv[++i]);
-                }
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -399,15 +389,13 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        snprintf(tok_path, sizeof(tok_path), "%s/tokenizer.bin", model_dir);
-
         bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
         bm_model_t* model = calloc(1, sizeof(*model));
         bm_load_weights(model, model_dir);
         bm_print_model_info(model);
 
         bm_tokenizer_t tok;
-        bm_tokenizer_init(&tok, tok_path, model->arch.vocab_size);
+        bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
 
         int ptok[1024];
         int nt = 0;
