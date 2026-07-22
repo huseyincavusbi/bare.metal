@@ -192,7 +192,9 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     backend_buffer_t *br=backend_buffer_alloc(g_be,4*sizeof(int));
     backend_buffer_t *bf=backend_buffer_alloc(g_be,sizeof(float));
     backend_buffer_t *btheta=backend_buffer_alloc(g_be,sizeof(float));
+    backend_buffer_t *bnkv=backend_buffer_alloc(g_be,sizeof(int));
     *(float*)backend_buffer_map(btheta)=m->arch.rope_theta;
+    *(int*)backend_buffer_map(bnkv)=m->n_kv_heads;
     if (seed == 0) seed = (uint64_t)time(NULL);
     unsigned int rng_state = (unsigned int)seed;
 
@@ -207,6 +209,10 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
 
         float*wte=m->token_embedding_table;
         memcpy(x,wte+token*D,D*sizeof(float));
+        if (pos == 0) {
+            FILE* ef = fopen("debug/embed.bin", "wb");
+            if (ef) { fwrite(x, sizeof(float), D, ef); fclose(ef); }
+        }
         if(m->arch.embed_scale){float esc=sqrtf((float)D);for(int i=0;i<D;i++)x[i]*=esc;}
         if(pt==BM_POS_LEARNED&&m->wpe)for(int i=0;i<D;i++)x[i]+=m->wpe[pos*D+i];
 
@@ -221,6 +227,15 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
             memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
             memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
             memcpy(_v,backend_buffer_map(bv),KV*sizeof(float));
+
+            if (pos == 0 && l == 0) {
+                FILE* f = fopen("debug/l0_q.bin", "wb");
+                if (f) { fwrite(_q, sizeof(float), NH*HD, f); fclose(f); }
+                f = fopen("debug/l0_k.bin", "wb");
+                if (f) { fwrite(_k, sizeof(float), KV, f); fclose(f); }
+                f = fopen("debug/l0_v.bin", "wb");
+                if (f) { fwrite(_v, sizeof(float), KV, f); fclose(f); }
+            }
 
             if(m->arch.has_qk_norm){
                 B();
@@ -252,8 +267,8 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 *(int*)backend_buffer_map(bf)=ps;
                 backend_buffer_unmap(br); backend_buffer_unmap(bf);
                 B();
-                backend_buffer_t *_rp[]={bq,bk,br,bf,btheta};
-                D(kp,_rp,5,NH+m->n_kv_heads,1,1,1,1,1);
+                backend_buffer_t *_rp[]={bq,bk,br,bf,btheta,bnkv};
+                D(kp,_rp,6,MAX(NH,m->n_kv_heads),1,1,1,1,1);
                 C();
                 memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
                 memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
@@ -289,46 +304,8 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 free(kb);free(vb);free(scores);free(ho);
             }
             
-            if (pos == 0 && l == 0) {
-                FILE* f = fopen("debug/l0_attn_before_proj.bin", "wb");
-                if (f) { fwrite(xa, sizeof(float), NH*HD, f); fclose(f); }
-                
-                // Also dump the weight we're using
-                f = fopen("debug/l0_attprojw.bin", "wb");
-                if (f) { fwrite(m->attprojw+l*NH*HD*D, sizeof(float), NH*HD*D, f); fclose(f); }
-                
-                // Dump what we're about to copy to bi and bw
-                f = fopen("debug/l0_matmul_inp.bin", "wb");
-                if (f) { fwrite(xa, sizeof(float), NH*HD, f); fclose(f); }
-                f = fopen("debug/l0_matmul_wgt.bin", "wb");
-                if (f) { fwrite(m->attprojw+l*NH*HD*D, sizeof(float), NH*HD*D, f); fclose(f); }
-            }
-            
             B();E2(bo2,xa,m->attprojw+l*NH*HD*D,0,1,NH*HD,D);C();
-            
-            if (pos == 0 && l == 0) {
-                // Dump what's in bo2 right after the matmul
-                float* bo2_data = backend_buffer_map(bo2);
-                FILE* f = fopen("debug/l0_matmul_bo2.bin", "wb");
-                if (f) { fwrite(bo2_data, sizeof(float), D, f); fclose(f); }
-                backend_buffer_unmap(bo2);
-                
-                // Also dump what's in bi and bw after the copy
-                float* bi_data = backend_buffer_map(bi);
-                float* bw_data = backend_buffer_map(bw);
-                f = fopen("debug/l0_matmul_bi.bin", "wb");
-                if (f) { fwrite(bi_data, sizeof(float), NH*HD, f); fclose(f); }
-                f = fopen("debug/l0_matmul_bw.bin", "wb");
-                if (f) { fwrite(bw_data, sizeof(float), NH*HD*D, f); fclose(f); }
-                backend_buffer_unmap(bi);
-                backend_buffer_unmap(bw);
-            }
             memcpy(b,backend_buffer_map(bo2),D*sizeof(float));
-            
-            if (pos == 0 && l == 0) {
-                FILE* f = fopen("debug/l0_attn.bin", "wb");
-                if (f) { fwrite(b, sizeof(float), D, f); fclose(f); }
-            }
             
             for(int i=0;i<D;i++)x[i]+=b[i]; free(xa);
             if(m->arch.has_ffn_post_norm){
@@ -341,30 +318,13 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
             }
             
-            if (pos == 0 && l == 0) {
-                FILE* f = fopen("debug/l0_ffn_norm.bin", "wb");
-                if (f) { fwrite(backend_buffer_map(bo), sizeof(float), D, f); fclose(f); }
-            }
-            
             if(m->arch.gated_mlp){
                 float ffn_in[D];
                 memcpy(ffn_in,backend_buffer_map(bo),D*sizeof(float));
                 B();E(ffn_in,m->fcw+l*H*D,0,1,D,H);C();
                 memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-                
-                if (pos == 0 && l == 0) {
-                    FILE* f = fopen("debug/l0_ffn_gate.bin", "wb");
-                    if (f) { fwrite(hb, sizeof(float), H, f); fclose(f); }
-                }
-                
                 B();E(ffn_in,m->fcw3+l*H*D,0,1,D,H);C();
                 memcpy(hb2,backend_buffer_map(bo),H*sizeof(float));
-                
-                if (pos == 0 && l == 0) {
-                    FILE* f = fopen("debug/l0_ffn_up.bin", "wb");
-                    if (f) { fwrite(hb2, sizeof(float), H, f); fclose(f); }
-                }
-                
                 if(at==BM_ACT_SWIGLU){
                     B();S(hb,hb2,H);C();
                     memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
@@ -372,11 +332,6 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                     B();G(hb,H);C();
                     memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
                     for(int i=0;i<H;i++) hb[i] *= hb2[i];
-                }
-                
-                if (pos == 0 && l == 0) {
-                    FILE* f = fopen("debug/l0_ffn_act.bin", "wb");
-                    if (f) { fwrite(hb, sizeof(float), H, f); fclose(f); }
                 }
             }else{
                 B();E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);C();
@@ -391,11 +346,6 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 memcpy(b,backend_buffer_map(bo),D*sizeof(float));
             }
             for(int i=0;i<D;i++)x[i]+=b[i];
-            
-            if (pos == 0 && l == 0) {
-                FILE* f = fopen("debug/l0_ffn.bin", "wb");
-                if (f) { fwrite(x, sizeof(float), D, f); fclose(f); }
-            }
         }
         B();N(x,m->lnfw,m->lnfb);C();
         B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
@@ -408,6 +358,19 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 if (logits[i] < min_logit) min_logit = logits[i];
             }
             fprintf(stderr, " [logits: min=%.2f max=%.2f]", min_logit, max_logit);
+
+            float_idx_t* sorted = malloc(V * sizeof(float_idx_t));
+            for (int i = 0; i < V; i++) { sorted[i].val = logits[i]; sorted[i].idx = i; }
+            qsort(sorted, V, sizeof(float_idx_t), cmp_float_desc);
+            fprintf(stderr, " [top5:");
+            for (int i = 0; i < 5; i++) fprintf(stderr, " %d(%.2f)", sorted[i].idx, sorted[i].val);
+            fprintf(stderr, "]");
+            free(sorted);
+
+            char fname[64];
+            snprintf(fname, sizeof(fname), "debug/logits_pos%d.bin", pos);
+            FILE* lf = fopen(fname, "wb");
+            if (lf) { fwrite(logits, sizeof(float), V, lf); fclose(lf); }
         }
 
         if (pos >= n_prompt - 1) {
@@ -422,7 +385,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     }
     printf("\n");
     backend_buffer_free(bq);backend_buffer_free(bk);backend_buffer_free(bv);
-    backend_buffer_free(br);backend_buffer_free(bf);
+    backend_buffer_free(br);backend_buffer_free(bf);backend_buffer_free(bnkv);
     free(x);free(b);free(logits);free(hb);free(hb2);free(kvc);
     backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bp);backend_buffer_free(beps);
     backend_kernel_destroy(km);backend_kernel_destroy(kr);backend_kernel_destroy(kl);
