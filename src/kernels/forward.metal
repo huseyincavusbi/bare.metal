@@ -254,3 +254,71 @@ kernel void rope_forward(
         }
     }
 }
+
+// ----------------------------------------------------------------
+// attention_forward
+// One threadgroup per query head. Within each threadgroup:
+//   Phase 1: threads compute QK^T dot products (one per timestep)
+//   Phase 2: thread 0 does softmax over scores
+//   Phase 3: threads compute weighted V output (one per dimension)
+// GQA: kh = h / kv_mul maps query head to KV head
+// ----------------------------------------------------------------
+kernel void attention_forward(
+    device const float* q [[buffer(0)]],
+    device const float* kv_cache [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant int* params [[buffer(3)]],
+    constant float& scale [[buffer(4)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int NH = params[0], HD = params[1];
+    int KV = params[3], S = params[4];
+    int kv_mul = params[5], layer = params[6], MS = params[7];
+
+    int h = (int)tgid.x;
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+    if (h >= NH) return;
+
+    int kh = h / kv_mul;
+    int kv_off = layer * 2 * MS * KV;
+    const device float* k_cache = kv_cache + kv_off;
+    const device float* v_cache = kv_cache + kv_off + MS * KV;
+    const device float* qh = q + h * HD;
+
+    threadgroup float scores[1024];
+
+    for (int t = tid; t < S; t += tptg) {
+        float score = 0.0f;
+        for (int i = 0; i < HD; i++) {
+            score += qh[i] * k_cache[t * KV + kh * HD + i];
+        }
+        scores[t] = score * scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        float maxval = -INFINITY;
+        for (int t = 0; t < S; t++) {
+            if (scores[t] > maxval) maxval = scores[t];
+        }
+        float sum = 0.0f;
+        for (int t = 0; t < S; t++) {
+            scores[t] = exp(scores[t] - maxval);
+            sum += scores[t];
+        }
+        float inv_sum = 1.0f / sum;
+        for (int t = 0; t < S; t++) scores[t] *= inv_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int i = tid; i < HD; i += tptg) {
+        float val = 0.0f;
+        for (int t = 0; t < S; t++) {
+            val += scores[t] * v_cache[t * KV + kh * HD + i];
+        }
+        out[h * HD + i] = val;
+    }
+}
