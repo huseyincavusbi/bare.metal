@@ -155,12 +155,10 @@ void bm_tokenizer_free(bm_tokenizer_t* t) {
 }
 
 char* bm_tokenizer_decode(bm_tokenizer_t* t, int prev_token, int token) {
-    char* piece = t->vocab[token];
-    if (prev_token == 1 && piece[0] == ' ') piece++;
-    unsigned char byte_val;
-    if (sscanf(piece, "<0x%02hhX>", &byte_val) == 1)
-        piece = (char*)t->byte_pieces + byte_val * 2;
-    return piece;
+    if (t->decoded_vocab && token >= 0 && token < t->vocab_size) {
+        return t->decoded_vocab[token];
+    }
+    return t->vocab[token];
 }
 
 void bm_tokenizer_safe_print(char* piece) {
@@ -190,47 +188,23 @@ int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
     if (!text || !t->sorted_vocab) return -1;
 
     char* str_buffer = malloc((t->max_token_length * 2 + 3) * sizeof(char));
-    size_t str_len = 0;
     *n_tokens = 0;
 
     if (bos) tokens[(*n_tokens)++] = 1;
 
-    if (text[0] != '\0' && text[0] != ' ') {
-        int dp = man_bsearch(" ", t->sorted_vocab, t->vocab_size);
-        if (dp >= 0) tokens[(*n_tokens)++] = dp;
-    }
-
-    for (const char* c = text; *c != '\0'; c++) {
-        if ((*c & 0xC0) != 0x80) str_len = 0;
-        str_buffer[str_len++] = *c;
-        str_buffer[str_len] = '\0';
-        if ((*(c + 1) & 0xC0) == 0x80 && str_len < 4) continue;
-
-        int id = man_bsearch(str_buffer, t->sorted_vocab, t->vocab_size);
+    const unsigned char* bytes = (const unsigned char*)text;
+    size_t text_len = strlen(text);
+    for (size_t i = 0; i < text_len; i++) {
+        unsigned char b = bytes[i];
+        int cp = t->b2u[b];
+        char utf8[5];
+        codepoint_to_utf8(cp, utf8);
+        int id = man_bsearch(utf8, t->sorted_vocab, t->vocab_size);
         if (id != -1) {
             tokens[(*n_tokens)++] = id;
         } else {
-            for (size_t i = 0; i < str_len; i++) {
-                unsigned char b = (unsigned char)str_buffer[i];
-                char byte_buf[5] = {0};
-                int blen = 0;
-                if (b < 0x21) {
-                    byte_buf[0] = 0xC0 | ((0x100 + b) >> 6);
-                    byte_buf[1] = 0x80 | ((0x100 + b) & 0x3F);
-                    blen = 2;
-                } else {
-                    byte_buf[0] = b;
-                    blen = 1;
-                }
-                int bid = man_bsearch(byte_buf, t->sorted_vocab, t->vocab_size);
-                if (bid >= 0) {
-                    tokens[(*n_tokens)++] = bid;
-                } else {
-                    tokens[(*n_tokens)++] = b + 3;
-                }
-            }
+            tokens[(*n_tokens)++] = b;
         }
-        str_len = 0;
     }
 
     while (1) {
