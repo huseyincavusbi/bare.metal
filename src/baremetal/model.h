@@ -1,12 +1,13 @@
 #ifndef BMT_MODEL_H
 #define BMT_MODEL_H
 
+#include <stddef.h>
 #include "baremetal.h"
 
 struct bm_model_s {
     bm_arch_t arch;
 
-    int      n_parameters;
+    size_t   n_parameters;
 
     int      kv_dim;
     int      head_size;
