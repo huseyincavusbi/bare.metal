@@ -89,7 +89,75 @@ static char* decode_token_b2u(bm_tokenizer_t* t, const char* token_str) {
     return decoded;
 }
 
-void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
+// --- JSON parsing helpers for tokenizer.json ---
+
+static int man_bsearch(char* key, bm_token_index_t* arr, int n);
+
+static void json_skip_ws(const char** p) {
+    while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
+}
+
+static int json_parse_string(const char** p, char* out, int max_len) {
+    if (**p != '"') return -1;
+    (*p)++;
+    int len = 0;
+    while (**p && **p != '"') {
+        if (**p == '\\' && (*p)[1]) {
+            (*p)++;
+            switch (**p) {
+                case '"':  out[len++] = '"';  break;
+                case '\\': out[len++] = '\\'; break;
+                case '/':  out[len++] = '/';  break;
+                case 'n':  out[len++] = '\n';  break;
+                case 't':  out[len++] = '\t';  break;
+                case 'r':  out[len++] = '\r';  break;
+                case 'b':  out[len++] = '\b';  break;
+                case 'f':  out[len++] = '\f';  break;
+                case 'u': {
+                    (*p)++;
+                    int cp = 0;
+                    for (int i = 0; i < 4; i++) {
+                        char c = (*p)[i];
+                        int d;
+                        if (c >= '0' && c <= '9') d = c - '0';
+                        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                        else { out[len] = '\0'; return -1; }
+                        cp = (cp << 4) | d;
+                    }
+                    (*p) += 3;
+                    len += codepoint_to_utf8(cp, out + len);
+                    break;
+                }
+                default: out[len++] = **p; break;
+            }
+            (*p)++;
+        } else {
+            out[len++] = **p;
+            (*p)++;
+        }
+        if (len >= max_len - 1) break;
+    }
+    out[len] = '\0';
+    if (**p == '"') (*p)++;
+    return len;
+}
+
+static int json_parse_int(const char** p) {
+    json_skip_ws(p);
+    int neg = 0;
+    if (**p == '-') { neg = 1; (*p)++; }
+    int val = 0;
+    while (**p >= '0' && **p <= '9') {
+        val = val * 10 + (**p - '0');
+        (*p)++;
+    }
+    return neg ? -val : val;
+}
+
+// --- Binary format loader (legacy tokenizer.bin) ---
+
+static void bm_tokenizer_init_from_bin(bm_tokenizer_t* t, const char* path, int vocab_size) {
     t->vocab_size = vocab_size;
     t->vocab = (char**)malloc(vocab_size * sizeof(char*));
     t->vocab_scores = (float*)malloc(vocab_size * sizeof(float));
@@ -143,6 +211,141 @@ void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
     }
 }
 
+// --- JSON format loader (tokenizer.json, no preprocessing needed) ---
+
+static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path, int vocab_size) {
+    t->vocab_size = vocab_size;
+    t->vocab = (char**)calloc(vocab_size, sizeof(char*));
+    t->vocab_scores = (float*)malloc(vocab_size * sizeof(float));
+    t->sorted_vocab = NULL;
+    t->decoded_vocab = NULL;
+    for (int i = 0; i < 256; i++) {
+        t->byte_pieces[i * 2] = (unsigned char)i;
+        t->byte_pieces[i * 2 + 1] = '\0';
+    }
+
+    init_byte_unicode_tables(t);
+
+    for (int i = 0; i < vocab_size; i++) {
+        t->vocab_scores[i] = -1e20f;
+    }
+
+    FILE* f = fopen(json_path, "rb");
+    if (!f) {
+        BMT_LOG_ERROR("couldn't load tokenizer: %s", json_path);
+        exit(EXIT_FAILURE);
+    }
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* json = (char*)malloc(file_size + 1);
+    fread(json, 1, file_size, f);
+    json[file_size] = '\0';
+    fclose(f);
+
+    t->max_token_length = 1;
+
+    const char* p = strstr(json, "\"vocab\"");
+    if (p) {
+        p += 7;
+        json_skip_ws(&p);
+        if (*p == ':') p++;
+        json_skip_ws(&p);
+        if (*p == '{') {
+            p++;
+            while (*p) {
+                json_skip_ws(&p);
+                if (*p == '}') { p++; break; }
+                if (*p == ',') { p++; continue; }
+
+                char token_buf[512];
+                int tlen = json_parse_string(&p, token_buf, sizeof(token_buf));
+                if (tlen < 0) break;
+                json_skip_ws(&p);
+                if (*p == ':') p++;
+                int id = json_parse_int(&p);
+                if (id < 0 || id >= vocab_size) continue;
+
+                int slen = strlen(token_buf);
+                t->vocab[id] = (char*)malloc(slen + 1);
+                memcpy(t->vocab[id], token_buf, slen + 1);
+                if (slen > (int)t->max_token_length) t->max_token_length = slen;
+            }
+        }
+    }
+
+    for (int i = 0; i < vocab_size; i++) {
+        if (!t->vocab[i]) {
+            t->vocab[i] = (char*)malloc(1);
+            t->vocab[i][0] = '\0';
+        }
+    }
+
+    t->sorted_vocab = malloc(t->vocab_size * sizeof(bm_token_index_t));
+    for (int i = 0; i < t->vocab_size; i++) {
+        t->sorted_vocab[i].str = t->vocab[i];
+        t->sorted_vocab[i].id = i;
+    }
+    qsort(t->sorted_vocab, t->vocab_size, sizeof(bm_token_index_t), compare_tokens);
+
+    p = strstr(json, "\"merges\"");
+    if (p) {
+        p += 8;
+        json_skip_ws(&p);
+        if (*p == ':') p++;
+        json_skip_ws(&p);
+        if (*p == '[') {
+            p++;
+            int rank = 0;
+            while (*p) {
+                json_skip_ws(&p);
+                if (*p == ']') { p++; break; }
+                if (*p == ',') { p++; continue; }
+
+                char merge_buf[1024];
+                int mlen = json_parse_string(&p, merge_buf, sizeof(merge_buf));
+                if (mlen < 0) break;
+
+                char* space = strchr(merge_buf, ' ');
+                if (space) {
+                    *space = '\0';
+                    char merged[1024];
+                    int p1len = strlen(merge_buf);
+                    int p2len = strlen(space + 1);
+                    memcpy(merged, merge_buf, p1len);
+                    memcpy(merged + p1len, space + 1, p2len + 1);
+                    int id = man_bsearch(merged, t->sorted_vocab, t->vocab_size);
+                    if (id >= 0) {
+                        t->vocab_scores[id] = -(float)rank;
+                    }
+                }
+                rank++;
+                json_skip_ws(&p);
+                if (*p == ',') p++;
+            }
+        }
+    }
+
+    free(json);
+
+    t->decoded_vocab = (char**)malloc(vocab_size * sizeof(char*));
+    for (int i = 0; i < vocab_size; i++) {
+        t->decoded_vocab[i] = decode_token_b2u(t, t->vocab[i]);
+    }
+}
+
+void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
+    char json_path[512];
+    snprintf(json_path, sizeof(json_path), "%s/tokenizer.json", path);
+    FILE* f = fopen(json_path, "rb");
+    if (f) {
+        fclose(f);
+        bm_tokenizer_init_from_json(t, json_path, vocab_size);
+        return;
+    }
+    bm_tokenizer_init_from_bin(t, path, vocab_size);
+}
+
 void bm_tokenizer_free(bm_tokenizer_t* t) {
     for (int i = 0; i < t->vocab_size; i++) free(t->vocab[i]);
     free(t->vocab);
@@ -155,6 +358,7 @@ void bm_tokenizer_free(bm_tokenizer_t* t) {
 }
 
 char* bm_tokenizer_decode(bm_tokenizer_t* t, int prev_token, int token) {
+    (void)prev_token;
     if (t->decoded_vocab && token >= 0 && token < t->vocab_size) {
         return t->decoded_vocab[token];
     }
