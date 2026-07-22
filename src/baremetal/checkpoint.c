@@ -66,12 +66,12 @@ int bmt_checkpoint_load(bm_model_t* model, const char* path) {
     fclose(file);
 
     if (read_count != total_floats) {
-        BMT_LOG_ERROR("Read %zu floats, expected %d", read_count, model->n_parameters);
+        BMT_LOG_ERROR("Read %zu floats, expected %zu", read_count, model->n_parameters);
         bmt_model_free_buffers(model);
         return -1;
     }
 
-    BMT_LOG_INFO("Loaded checkpoint: %s (%d params)", path, model->n_parameters);
+    BMT_LOG_INFO("Loaded checkpoint: %s (%zu params)", path, model->n_parameters);
     return 0;
 }
 
@@ -124,7 +124,7 @@ int bmt_checkpoint_load_legacy_llama2c(bm_model_t* model, const char* path) {
     memcpy(dst, src, model->n_parameters * sizeof(float));
 
     munmap(data, file_size);
-    BMT_LOG_INFO("Loaded legacy llama2.c checkpoint: %s (%d params)", path, model->n_parameters);
+    BMT_LOG_INFO("Loaded legacy llama2.c checkpoint: %s (%zu params)", path, model->n_parameters);
     return 0;
 }
 
