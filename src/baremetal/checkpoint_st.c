@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -18,6 +19,7 @@ typedef struct {
     size_t data_length;
     int    n_dims;
     int    shape[4];
+    int    is_bf16;
 } bmt_st_entry_t;
 
 typedef struct {
@@ -52,6 +54,13 @@ static int bmt_st_parse_header(const char* json, size_t len, bmt_st_entry_t** ou
             if (!skip) break;
             p = skip + 1;
             continue;
+        }
+
+        entries[n].is_bf16 = 0;
+        const char* dt = strstr(p, "\"dtype\"");
+        if (dt) {
+            dt = strstr(dt, ":");
+            if (dt && strstr(dt, "BF16")) entries[n].is_bf16 = 1;
         }
 
         // find data_offsets
@@ -139,14 +148,22 @@ static void bmt_st_close(bmt_st_file_t* sf) {
     free(sf);
 }
 
-static float* bmt_st_get_tensor(bmt_st_file_t* sf, const char* name, size_t* out_size) {
+static void* bmt_st_get_tensor(bmt_st_file_t* sf, const char* name, size_t* out_size, int* out_is_bf16) {
     for (int i = 0; i < sf->n_entries; i++) {
         if (strcmp(sf->entries[i].name, name) == 0) {
             *out_size = sf->entries[i].data_length;
-            return (float*)((char*)sf->data + sf->entries[i].data_offset);
+            if (out_is_bf16) *out_is_bf16 = sf->entries[i].is_bf16;
+            return (char*)sf->data + sf->entries[i].data_offset;
         }
     }
     return NULL;
+}
+
+static float bf16_to_f32(uint16_t bf16) {
+    uint32_t f32 = ((uint32_t)bf16) << 16;
+    float result;
+    memcpy(&result, &f32, sizeof(float));
+    return result;
 }
 
 int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
@@ -273,59 +290,99 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
     #define CPT(name, ptr, count) do { \
         for (int _i = 0; _i < n_st; _i++) { \
-            float* src = bmt_st_get_tensor(st_files[_i], name, &sz); \
-            if (src) { memcpy(ptr, src, sz < (count)*sizeof(float) ? sz : (count)*sizeof(float)); break; } \
+            int _bf16 = 0; \
+            void* _raw = bmt_st_get_tensor(st_files[_i], name, &sz, &_bf16); \
+            if (_raw) { \
+                if (_bf16) { \
+                    uint16_t* _src = (uint16_t*)_raw; \
+                    size_t _n = ((size_t)(count) < sz/2 ? (size_t)(count) : sz/2); \
+                    for (size_t _j = 0; _j < _n; _j++) (ptr)[_j] = bf16_to_f32(_src[_j]); \
+                } else { \
+                    memcpy(ptr, _raw, sz < (count)*sizeof(float) ? sz : (count)*sizeof(float)); \
+                } \
+                break; \
+            } \
         } \
     } while(0)
 
     CPT("model.embed_tokens.weight", w, V * D);
     w += V * D;
 
-    for (int l = 0; l < L; l++) {
-        char buf[256];
+    // Group weights by type to match model.c layout
+    char buf[256];
 
+    // ln1w: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.input_layernorm.weight", l);
         CPT(buf, w, D); w += D;
+    }
 
-        // Q, K, V (separate for GQA)
+    // qw: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.q_proj.weight", l);
         CPT(buf, w, NH * HD * D); w += NH * HD * D;
+    }
+
+    // kw: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.k_proj.weight", l);
         CPT(buf, w, model->n_kv_heads * HD * D); w += model->n_kv_heads * HD * D;
+    }
+
+    // vw: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.v_proj.weight", l);
         CPT(buf, w, model->n_kv_heads * HD * D); w += model->n_kv_heads * HD * D;
+    }
 
-        // QK norm
-        if (arch.has_qk_norm) {
+    // QK norm
+    if (arch.has_qk_norm) {
+        for (int l = 0; l < L; l++) {
             snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.q_norm.weight", l);
             CPT(buf, w, HD); w += HD;
+        }
+        for (int l = 0; l < L; l++) {
             snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.k_norm.weight", l);
             CPT(buf, w, model->n_kv_heads * HD); w += model->n_kv_heads * HD;
         }
+    }
 
-        // Output projection
+    // attprojw: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.o_proj.weight", l);
         CPT(buf, w, D * NH * HD); w += NH * HD * D;
+    }
 
-        // post_attention_layernorm
+    // ln2w: all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.post_attention_layernorm.weight", l);
         CPT(buf, w, D); w += D;
+    }
 
-        // FFN gate (w1)
+    // fcw (gate): all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.mlp.gate_proj.weight", l);
         CPT(buf, w, H * D); w += H * D;
+    }
 
-        // FFN up (w3)
+    // fcw3 (up): all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.mlp.up_proj.weight", l);
         CPT(buf, w, H * D); w += H * D;
+    }
 
-        // FFN down (w2)
+    // fcprojw (down): all layers
+    for (int l = 0; l < L; l++) {
         snprintf(buf, sizeof(buf), "model.layers.%d.mlp.down_proj.weight", l);
         CPT(buf, w, D * H); w += D * H;
+    }
 
-        if (arch.has_ffn_post_norm) {
+    if (arch.has_ffn_post_norm) {
+        for (int l = 0; l < L; l++) {
             snprintf(buf, sizeof(buf), "model.layers.%d.pre_feedforward_layernorm.weight", l);
             CPT(buf, w, D); w += D;
+        }
+        for (int l = 0; l < L; l++) {
             snprintf(buf, sizeof(buf), "model.layers.%d.post_feedforward_layernorm.weight", l);
             CPT(buf, w, D); w += D;
         }
