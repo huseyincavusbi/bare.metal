@@ -12,9 +12,12 @@ typedef struct bm_tokenizer_s {
     char**            vocab;
     float*            vocab_scores;
     bm_token_index_t* sorted_vocab;
+    char**            decoded_vocab;
     int               vocab_size;
     unsigned int      max_token_length;
     unsigned char     byte_pieces[512];
+    int               b2u[256];
+    unsigned char     u2b[512];
 } bm_tokenizer_t;
 
 void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size);
