@@ -149,14 +149,16 @@ def main():
     ]
     print(f"[run] cmd:      {' '.join(cmd)}")
     result = subprocess.run(cmd, check=False)
-    if tmp_ctx is not None and not args.keep_files:
-        tmp_ctx.cleanup()
 
     if result.returncode != 0:
+        if tmp_ctx is not None and not args.keep_files:
+            tmp_ctx.cleanup()
         print(f"[run] baremetal exited with code {result.returncode}", file=sys.stderr)
         sys.exit(result.returncode)
 
     if not output_path.exists():
+        if tmp_ctx is not None and not args.keep_files:
+            tmp_ctx.cleanup()
         print(f"[run] error: C side did not produce {output_path}", file=sys.stderr)
         sys.exit(1)
 
@@ -172,6 +174,9 @@ def main():
     print(f"[run] generated_ids ({len(gen_ids)}): {gen_ids}")
     text = tok.decode(gen_ids, skip_special_tokens=True)
     print(f"[run] generated_text:\n{text}")
+
+    if tmp_ctx is not None and not args.keep_files:
+        tmp_ctx.cleanup()
 
 
 if __name__ == "__main__":
