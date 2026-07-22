@@ -230,23 +230,27 @@ kernel void rope_forward(
     constant int& head_size [[buffer(2)]],
     constant int& pos [[buffer(3)]],
     constant float& theta [[buffer(4)]],
+    constant int& n_kv_heads [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     int h = (int)gid;
     device float* qh = q + h * head_size;
-    device float* kh = k + h * head_size;
+    int hd2 = head_size / 2;
 
-    for (int i = 0; i < head_size; i += 2) {
-        float freq = 1.0f / pow(theta, (float)i / (float)head_size);
+    for (int i = 0; i < hd2; i++) {
+        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
         float cosv = cos((float)pos * freq);
         float sinv = sin((float)pos * freq);
 
-        float q0 = qh[i], q1 = qh[i+1];
-        qh[i]   = q0 * cosv - q1 * sinv;
-        qh[i+1] = q0 * sinv + q1 * cosv;
+        float q0 = qh[i], q1 = qh[i + hd2];
+        qh[i]      = q0 * cosv - q1 * sinv;
+        qh[i + hd2] = q0 * sinv + q1 * cosv;
 
-        float k0 = kh[i], k1 = kh[i+1];
-        kh[i]   = k0 * cosv - k1 * sinv;
-        kh[i+1] = k0 * sinv + k1 * cosv;
+        if (h < n_kv_heads) {
+            device float* kh = k + h * head_size;
+            float k0 = kh[i], k1 = kh[i + hd2];
+            kh[i]      = k0 * cosv - k1 * sinv;
+            kh[i + hd2] = k0 * sinv + k1 * cosv;
+        }
     }
 }
