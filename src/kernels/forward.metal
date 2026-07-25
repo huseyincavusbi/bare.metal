@@ -161,6 +161,70 @@ kernel void layernorm_forward(
 }
 
 // ----------------------------------------------------------------
+// layernorm_forward_v2 - warp-reduced, single pass
+// ----------------------------------------------------------------
+kernel void layernorm_forward_v2(
+    device const float* inp [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant int* p [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    device const float* bias [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)tgid.x;
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+    if (row >= N) return;
+    const device float* inp_row = inp + row * C;
+    device float* out_row = out + row * C;
+
+    float local_sum = 0.0f;
+    for (int j = tid; j < C; j += tptg) local_sum += inp_row[j];
+    for (int off = 16; off > 0; off >>= 1)
+        local_sum += simd_shuffle_down(local_sum, (ushort)off);
+
+    threadgroup float shared_buf[32];
+    if (tid % 32 == 0) shared_buf[tid / 32] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? shared_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) shared_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mean = shared_buf[0] / (float)C;
+
+    float local_sq = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float d = inp_row[j] - mean;
+        local_sq += d * d;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_sq += simd_shuffle_down(local_sq, (ushort)off);
+    if (tid % 32 == 0) shared_buf[tid / 32] = local_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? shared_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) shared_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float var = shared_buf[0] / (float)C;
+    float inv_std = 1.0f / sqrt(var + eps);
+
+    for (int j = tid; j < C; j += tptg) {
+        float n = (inp_row[j] - mean) * inv_std;
+        out_row[j] = n * weight[j] + bias[j];
+    }
+}
+
+// ----------------------------------------------------------------
 // rmsnorm_forward
 // ----------------------------------------------------------------
 kernel void rmsnorm_forward(
@@ -184,6 +248,100 @@ kernel void rmsnorm_forward(
     float inv_rms = 1.0f / sqrt(ss + eps);
     for (int j = 0; j < C; j++)
         out_row[j] = inp_row[j] * inv_rms * weight[j];
+}
+
+// ----------------------------------------------------------------
+// rmsnorm_forward_v2 - warp-reduced
+// ----------------------------------------------------------------
+kernel void rmsnorm_forward_v2(
+    device const float* inp [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant int* p [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)tgid.x;
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+    if (row >= N) return;
+    const device float* inp_row = inp + row * C;
+    device float* out_row = out + row * C;
+
+    float local_ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = inp_row[j];
+        local_ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_ss += simd_shuffle_down(local_ss, (ushort)off);
+
+    threadgroup float shared_buf[32];
+    if (tid % 32 == 0) shared_buf[tid / 32] = local_ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? shared_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) shared_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ss = shared_buf[0] / (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    for (int j = tid; j < C; j += tptg)
+        out_row[j] = inp_row[j] * inv_rms * weight[j];
+}
+
+// ----------------------------------------------------------------
+// residual_rmsnorm_forward - fused residual add + RMSNorm
+// out = rmsnorm(x + residual, weight, eps)
+// Saves one D-element buffer roundtrip vs separate add + norm.
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_forward(
+    device float* x [[buffer(0)]],
+    device const float* residual [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* p [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)tgid.x;
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+    if (row >= N) return;
+
+    float local_ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = x[row * C + j] + residual[row * C + j];
+        x[row * C + j] = v;
+        local_ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_ss += simd_shuffle_down(local_ss, (ushort)off);
+
+    threadgroup float shared_buf[32];
+    if (tid % 32 == 0) shared_buf[tid / 32] = local_ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? shared_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) shared_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ss = shared_buf[0] / (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    for (int j = tid; j < C; j += tptg)
+        out[row * C + j] = x[row * C + j] * inv_rms * weight[j];
 }
 
 // ----------------------------------------------------------------
@@ -360,19 +518,50 @@ kernel void attention_forward(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    if (tid == 0) {
-        float maxval = -INFINITY;
-        for (int t = 0; t < S; t++) {
-            if (scores[t] > maxval) maxval = scores[t];
-        }
-        float sum = 0.0f;
-        for (int t = 0; t < S; t++) {
-            scores[t] = exp(scores[t] - maxval);
-            sum += scores[t];
-        }
-        float inv_sum = 1.0f / sum;
-        for (int t = 0; t < S; t++) scores[t] *= inv_sum;
+    threadgroup float reduce_buf[32];
+
+    float local_max = -INFINITY;
+    for (int t = tid; t < S; t += tptg) {
+        if (scores[t] > local_max) local_max = scores[t];
     }
+    for (int off = 16; off > 0; off >>= 1) {
+        float other = simd_shuffle_down(local_max, (ushort)off);
+        if (other > local_max) local_max = other;
+    }
+    if (tid % 32 == 0) reduce_buf[tid / 32] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : -INFINITY;
+        for (int off = 16; off > 0; off >>= 1) {
+            float other = simd_shuffle_down(v, (ushort)off);
+            if (other > v) v = other;
+        }
+        if (tid == 0) reduce_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float global_max = reduce_buf[0];
+
+    float local_sum = 0.0f;
+    for (int t = tid; t < S; t += tptg) {
+        scores[t] = exp(scores[t] - global_max);
+        local_sum += scores[t];
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+        local_sum += simd_shuffle_down(local_sum, (ushort)off);
+    }
+    if (tid % 32 == 0) reduce_buf[tid / 32] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1) {
+            v += simd_shuffle_down(v, (ushort)off);
+        }
+        if (tid == 0) reduce_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_sum = 1.0f / reduce_buf[0];
+
+    for (int t = tid; t < S; t += tptg) scores[t] *= inv_sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (int i = tid; i < HD; i += tptg) {
@@ -382,4 +571,63 @@ kernel void attention_forward(
         }
         out[h * HD + i] = val;
     }
+}
+
+// ----------------------------------------------------------------
+// attention_forward_flash
+// Online Flash Attention: one threadgroup per query head, each
+// thread owns one output dimension. Iterates over K/V one key at a
+// time, accumulating running max/sum and weighted V output without
+// spilling scores to threadgroup memory. Tradeoff: each thread
+// recomputes the score dot product, but scores never touch shared
+// memory => better memory bandwidth and lower occupancy pressure.
+// Dispatch: grid=(NH*HD,1,1), threadgroup=(HD,1,1)
+// ----------------------------------------------------------------
+kernel void attention_forward_flash(
+    device const float* q [[buffer(0)]],
+    device const float* kv_cache [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant int* params [[buffer(3)]],
+    constant float& scale [[buffer(4)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    int NH = params[0], HD = params[1];
+    int KV = params[3], S = params[4];
+    int kv_mul = params[5], layer = params[6], MS = params[7];
+
+    int h = (int)tgid.x;
+    int i = (int)tid3.x;
+    if (h >= NH || i >= HD) return;
+
+    int kh = h / kv_mul;
+    int kv_off = layer * 2 * MS * KV;
+    const device float* k_cache = kv_cache + kv_off;
+    const device float* v_cache = kv_cache + kv_off + MS * KV;
+    const device float* qh = q + h * HD;
+
+    threadgroup float q_shared[256];
+    if (i < HD) q_shared[i] = qh[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float out_val = 0.0f;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+
+    for (int t = 0; t < S; t++) {
+        float score = 0.0f;
+        for (int j = 0; j < HD; j++) {
+            score += q_shared[j] * k_cache[t * KV + kh * HD + j];
+        }
+        score *= scale;
+
+        float new_max = fast::max(running_max, score);
+        float exp_old = fast::exp(running_max - new_max);
+        float exp_new = fast::exp(score - new_max);
+        running_sum = running_sum * exp_old + exp_new;
+        out_val = out_val * exp_old + exp_new * v_cache[t * KV + kh * HD + i];
+        running_max = new_max;
+    }
+
+    out[h * HD + i] = out_val / running_sum;
 }

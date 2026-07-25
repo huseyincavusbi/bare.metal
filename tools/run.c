@@ -126,11 +126,15 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_NAIVE, "matmul_forward_naive");
     bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_TILED, "matmul_forward_tiled");
     bmk_register(g_reg, BMK_OP_NORM_RMS, BMK_VARIANT_NAIVE, "rmsnorm_forward");
+    bmk_register(g_reg, BMK_OP_NORM_RMS, BMK_VARIANT_TILED, "rmsnorm_forward_v2");
     bmk_register(g_reg, BMK_OP_NORM_LAYER, BMK_VARIANT_NAIVE, "layernorm_forward");
+    bmk_register(g_reg, BMK_OP_NORM_LAYER, BMK_VARIANT_TILED, "layernorm_forward_v2");
     bmk_register(g_reg, BMK_OP_ACT_GELU, BMK_VARIANT_NAIVE, "gelu_forward");
     bmk_register(g_reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
     bmk_register(g_reg, BMK_OP_POS_ENC_ROPE, BMK_VARIANT_NAIVE, "rope_forward");
     bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_NAIVE, "attention_forward");
+    bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_FLASH, "attention_forward_flash");
+    bmk_register(g_reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
@@ -160,7 +164,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,D,D),_n,5,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,D,D),_n,5,256,1,1,256,1,1); \
     }while(0)
     #define L(inp,wgt,bias) do{ \
         memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
@@ -168,9 +172,17 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bbs),(bias),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bbs); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(bmk_select(g_reg,BMK_OP_NORM_LAYER,1,D,D),_n,6,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(bmk_select(g_reg,BMK_OP_NORM_LAYER,1,D,D),_n,6,256,1,1,256,1,1); \
     }while(0)
     #define N(inp,wgt,bias) do{ if(nm==BM_NORM_LAYERNORM)L(inp,wgt,bias);else R(inp,wgt); }while(0)
+    #define RN(inp,res,wgt) do{ \
+        memcpy(backend_buffer_map(bo2),(inp),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bbs),(res),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
+        memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
+        backend_buffer_unmap(bo2); backend_buffer_unmap(bbs); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
+        backend_buffer_t*_rn[]={bo2,bbs,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_FUSED_RESIDUAL_NORM,1,D,D),_rn,6,256,1,1,256,1,1); \
+    }while(0)
     #define G(inp,N) do{ \
         memcpy(backend_buffer_map(bi),(inp),(N)*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
@@ -301,7 +313,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
 
 B();
             backend_buffer_t* att_bufs[] = {bq, bkvc, bo2, bp, bf};
-            D(bmk_select(g_reg,BMK_OP_ATTENTION,1,D,NH*HD), att_bufs, 5, NH*256, 1, 1, 256, 1, 1);
+            D(bmk_select(g_reg,BMK_OP_ATTENTION,1,D,NH*HD), att_bufs, 5, NH*HD, 1, 1, HD, 1, 1);
             C();
 
             B();
@@ -313,15 +325,20 @@ B();
             C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
 
-            for(int i=0;i<D;i++)x[i]+=b[i];
-            if(m->arch.has_ffn_post_norm){
-                B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
-                memcpy(x,backend_buffer_map(bo),D*sizeof(float));
-            }
-            if(m->arch.has_ffn_post_norm){
-                B();N(x,m->pre_ffn_w+l*D,NULL);C();
-            }else{
-                B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
+            if(nm == BM_NORM_RMSNORM && !m->arch.has_ffn_post_norm) {
+                B();RN(x,b,m->ln2w+l*D);C();
+                memcpy(x,backend_buffer_map(bo2),D*sizeof(float));
+            } else {
+                for(int i=0;i<D;i++)x[i]+=b[i];
+                if(m->arch.has_ffn_post_norm){
+                    B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
+                    memcpy(x,backend_buffer_map(bo),D*sizeof(float));
+                }
+                if(m->arch.has_ffn_post_norm){
+                    B();N(x,m->pre_ffn_w+l*D,NULL);C();
+                }else{
+                    B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
+                }
             }
             
             if(m->arch.gated_mlp){

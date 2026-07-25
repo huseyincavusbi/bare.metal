@@ -60,6 +60,23 @@ backend_kernel_t* bmk_select(bmk_registry_t* reg, bmk_op_type_t op,
         }
     }
 
+    if (op == BMK_OP_NORM_RMS || op == BMK_OP_NORM_LAYER) {
+        for (int i = 0; i < opr->n_entries; i++) {
+            if (opr->entries[i].variant == BMK_VARIANT_TILED &&
+                in_dim >= 256) {
+                return opr->entries[i].kernel;
+            }
+        }
+    }
+
+    if (op == BMK_OP_ATTENTION) {
+        for (int i = 0; i < opr->n_entries; i++) {
+            if (opr->entries[i].variant == BMK_VARIANT_FLASH) {
+                return opr->entries[i].kernel;
+            }
+        }
+    }
+
     for (int i = 0; i < opr->n_entries; i++) {
         if (opr->entries[i].variant == BMK_VARIANT_NAIVE) {
             return opr->entries[i].kernel;
