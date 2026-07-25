@@ -47,6 +47,7 @@ int bmk_register(bmk_registry_t* reg, bmk_op_type_t op,
 
 backend_kernel_t* bmk_select(bmk_registry_t* reg, bmk_op_type_t op,
                              int batch, int in_dim, int out_dim) {
+    (void)batch;
     if (!reg || op < 0 || op >= BMK_OP_COUNT) return NULL;
     bmk_op_registry_t* opr = &reg->ops[op];
     if (opr->n_entries == 0) return NULL;
