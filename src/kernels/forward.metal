@@ -34,6 +34,67 @@ kernel void matmul_forward_naive(
 }
 
 // ----------------------------------------------------------------
+// matmul_forward_tiled
+// Tiled GEMM with threadgroup shared memory for input reuse.
+// One threadgroup computes BN output elements, reusing one shared
+// input chunk (BK elements) across all BN threads. This eliminates
+// redundant input reads: naive reads OC*C input; tiled reads (OC/BN)*C.
+// Dispatch: grid=(ceil(OC/BN)*BN, BT, 1), threadgroup=(BN, 1, 1)
+// ----------------------------------------------------------------
+#define MM_BN 32
+#define MM_BK 32
+
+kernel void matmul_forward_tiled(
+    device const float* inp [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x;
+
+    int bt = (int)tgid.y;
+    int oc_start = (int)tgid.x * MM_BN;
+    int oc = oc_start + tid;
+    if (bt >= BT || oc >= OC) return;
+
+    threadgroup float A_s[MM_BK];
+    threadgroup float B_s[MM_BN * MM_BK];
+
+    float val = has_bias ? bias[oc] : 0.0f;
+
+    for (int kk = 0; kk < C; kk += MM_BK) {
+        int actual_bk = min(MM_BK, C - kk);
+
+        for (int i = tid; i < actual_bk; i += MM_BN) {
+            A_s[i] = inp[bt * C + kk + i];
+        }
+
+        for (int i = tid; i < MM_BN * actual_bk; i += MM_BN) {
+            int n = i / actual_bk;
+            int k = i % actual_bk;
+            int woc = oc_start + n;
+            if (woc < OC) {
+                B_s[n * MM_BK + k] = weight[woc * C + kk + k];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int k = 0; k < actual_bk; k++) {
+            val += A_s[k] * B_s[tid * MM_BK + k];
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    out[bt * OC + oc] = val;
+}
+
+// ----------------------------------------------------------------
 // softmax_forward
 // ----------------------------------------------------------------
 kernel void softmax_forward(
