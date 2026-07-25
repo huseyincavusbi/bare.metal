@@ -15,6 +15,7 @@ typedef enum {
     BMK_OP_POS_ENC_ROPE,
     BMK_OP_ATTENTION,
     BMK_OP_FUSED_RESIDUAL_NORM,
+    BMK_OP_FUSED_CLASSIFIER,
     BMK_OP_COUNT
 } bmk_op_type_t;
 

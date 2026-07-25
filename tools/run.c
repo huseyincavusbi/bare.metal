@@ -135,6 +135,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_NAIVE, "attention_forward");
     bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_FLASH, "attention_forward_flash");
     bmk_register(g_reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
+    bmk_register(g_reg, BMK_OP_FUSED_CLASSIFIER, BMK_VARIANT_NAIVE, "rmsnorm_matmul_forward");
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
@@ -370,9 +371,23 @@ B();
             }
             for(int i=0;i<D;i++)x[i]+=b[i];
         }
-        B();N(x,m->lnfw,m->lnfb);C();
-        B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
-        memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
+        if(nm == BM_NORM_RMSNORM) {
+            B();
+            memcpy(backend_buffer_map(bi), x, D*sizeof(float));
+            memcpy(backend_buffer_map(bbs), m->lnfw, D*sizeof(float));
+            memcpy(backend_buffer_map(bw), m->wcls, D*V*sizeof(float));
+            memcpy(backend_buffer_map(bp), (int[]){D, V}, 2*sizeof(int));
+            backend_buffer_unmap(bi); backend_buffer_unmap(bbs); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
+            int _gtx = (V+255)&~255;
+            backend_buffer_t* _fc[] = {bi, bbs, bw, bo, bp, beps};
+            D(bmk_select(g_reg,BMK_OP_FUSED_CLASSIFIER,1,D,V), _fc, 6, _gtx, 1, 1, 256, 1, 1);
+            C();
+            memcpy(logits, backend_buffer_map(bo), V*sizeof(float));
+        } else {
+            B();N(x,m->lnfw,m->lnfb);C();
+            B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
+            memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
+        }
 
         if (pos < n_prompt + 3) {
             float max_logit = -INFINITY, min_logit = INFINITY;
