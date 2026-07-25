@@ -20,6 +20,7 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/tokenizer.c \
              src/baremetal/graph.c \
              src/baremetal/compiler.c \
+             src/baremetal/scheduler.c \
              src/kernels/registry.c \
              tools/cli.c \
              tools/run.c
