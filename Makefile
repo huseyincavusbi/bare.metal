@@ -46,6 +46,7 @@ dirs:
 	@mkdir -p build/src/backend/metal
 	@mkdir -p build/tools
 	@mkdir -p build/kernels
+	@mkdir -p build/src/kernels
 
 $(BINARY): $(OBJS) $(METAL_BIN)
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDFLAGS)
