@@ -4,6 +4,7 @@
 #include "baremetal/tokenizer.h"
 #include "backend/backend.h"
 #include "backend/metal/device.h"
+#include "kernels/registry.h"
 #include "utils/log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +16,7 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-static backend_kernel_t *km,*km_t,*kr,*kl,*kg,*ks,*kp,*ka;
+static bmk_registry_t* g_reg;
 static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps,*bbs;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
@@ -121,14 +122,15 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                   bm_token_cb_t callback, void* user_data) {
     if (n_prompt <= 0 || !prompt_ids) return -1;
     g_be=ctx->backend_ctx;
-    km=backend_kernel_create(g_be,"matmul_forward_naive");
-    km_t=backend_kernel_create(g_be,"matmul_forward_tiled");
-    kr=backend_kernel_create(g_be,"rmsnorm_forward");
-    kl=backend_kernel_create(g_be,"layernorm_forward");
-    kg=backend_kernel_create(g_be,"gelu_forward");
-    ks=backend_kernel_create(g_be,"swiglu_forward");
-    kp=backend_kernel_create(g_be,"rope_forward");
-    ka=backend_kernel_create(g_be,"attention_forward");
+    g_reg = bmk_registry_create(g_be);
+    bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_NAIVE, "matmul_forward_naive");
+    bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_TILED, "matmul_forward_tiled");
+    bmk_register(g_reg, BMK_OP_NORM_RMS, BMK_VARIANT_NAIVE, "rmsnorm_forward");
+    bmk_register(g_reg, BMK_OP_NORM_LAYER, BMK_VARIANT_NAIVE, "layernorm_forward");
+    bmk_register(g_reg, BMK_OP_ACT_GELU, BMK_VARIANT_NAIVE, "gelu_forward");
+    bmk_register(g_reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
+    bmk_register(g_reg, BMK_OP_POS_ENC_ROPE, BMK_VARIANT_NAIVE, "rope_forward");
+    bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_NAIVE, "attention_forward");
     int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
     int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
     int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
@@ -150,7 +152,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     memcpy(backend_buffer_map(bw),(float*)(wgt)+(woff),OC*CC*sizeof(float)); \
     backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
     int _gtx=((OC)+31)&~31; \
-    backend_buffer_t*_a[]={bi,bw,bbs,(outbuf),bp}; D(km_t,_a,5,_gtx,BT,1,32,1,1); \
+    backend_buffer_t*_a[]={bi,bw,bbs,(outbuf),bp}; D(bmk_select(g_reg,BMK_OP_MATMUL,BT,CC,OC),_a,5,_gtx,BT,1,32,1,1); \
 }while(0)
 #define E(inp,wgt,woff,BT,CC,OC) E2(bo,inp,wgt,woff,BT,CC,OC)
     #define R(inp,wgt) do{ \
@@ -158,7 +160,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(kr,_n,5,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,D,D),_n,5,1,1,1,1,1,1); \
     }while(0)
     #define L(inp,wgt,bias) do{ \
         memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
@@ -166,7 +168,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bbs),(bias),D*sizeof(float)); \
         memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bbs); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(kl,_n,6,1,1,1,1,1,1); \
+        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(bmk_select(g_reg,BMK_OP_NORM_LAYER,1,D,D),_n,6,1,1,1,1,1,1); \
     }while(0)
     #define N(inp,wgt,bias) do{ if(nm==BM_NORM_LAYERNORM)L(inp,wgt,bias);else R(inp,wgt); }while(0)
     #define G(inp,N) do{ \
@@ -174,7 +176,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bp); \
         int _tx = (N) < 256 ? (N) : 256; \
-        backend_buffer_t*_g[]={bi,bo,bp}; D(kg,_g,3,(N),1,1,_tx,1,1); \
+        backend_buffer_t*_g[]={bi,bo,bp}; D(bmk_select(g_reg,BMK_OP_ACT_GELU,1,(N),(N)),_g,3,(N),1,1,_tx,1,1); \
     }while(0)
     #define S(gate,up,N) do{ \
         memcpy(backend_buffer_map(bi),(gate),(N)*sizeof(float)); \
@@ -182,7 +184,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
         backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
         int _tx = (N) < 256 ? (N) : 256; \
-        backend_buffer_t*_s[]={bi,bw,bo,bp}; D(ks,_s,4,(N),1,1,_tx,1,1); \
+        backend_buffer_t*_s[]={bi,bw,bo,bp}; D(bmk_select(g_reg,BMK_OP_ACT_SWIGLU,1,(N),(N)),_s,4,(N),1,1,_tx,1,1); \
     }while(0)
 
     float*x=calloc(D,sizeof(float)),*b=calloc(D,sizeof(float)),*logits=calloc(V,sizeof(float));
@@ -248,7 +250,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 for(int h=0;h<NH;h++)memcpy(backend_buffer_map(bw)+h*HD,qnw,HD*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){NH,HD},2*sizeof(int));
                 backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-                backend_buffer_t*_qn[]={bi,bw,bo,bp,beps}; D(kr,_qn,5,NH,1,1,1,1,1);
+                backend_buffer_t*_qn[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,HD,HD),_qn,5,NH,1,1,1,1,1);
                 C();
                 memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
                 B();
@@ -257,7 +259,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 memcpy(backend_buffer_map(bw),knw,KV*sizeof(float));
                 memcpy(backend_buffer_map(bp),(int[]){m->n_kv_heads,HD},2*sizeof(int));
                 backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-                backend_buffer_t*_kn[]={bi,bw,bo,bp,beps}; D(kr,_kn,5,m->n_kv_heads,1,1,1,1,1);
+                backend_buffer_t*_kn[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,HD,HD),_kn,5,m->n_kv_heads,1,1,1,1,1);
                 C();
                 memcpy(_k,backend_buffer_map(bo),KV*sizeof(float));
                 memcpy(backend_buffer_map(bq),_q,NH*HD*sizeof(float));
@@ -272,7 +274,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                 backend_buffer_unmap(br); backend_buffer_unmap(bf);
                 B();
                 backend_buffer_t *_rp[]={bq,bk,br,bf,btheta,bnkv};
-                D(kp,_rp,6,MAX(NH,m->n_kv_heads),1,1,1,1,1);
+                D(bmk_select(g_reg,BMK_OP_POS_ENC_ROPE,1,HD,HD),_rp,6,MAX(NH,m->n_kv_heads),1,1,1,1,1);
                 C();
                 memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
                 memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
@@ -299,14 +301,15 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
 
 B();
             backend_buffer_t* att_bufs[] = {bq, bkvc, bo2, bp, bf};
-            D(ka, att_bufs, 5, NH*256, 1, 1, 256, 1, 1);
+            D(bmk_select(g_reg,BMK_OP_ATTENTION,1,D,NH*HD), att_bufs, 5, NH*256, 1, 1, 256, 1, 1);
             C();
 
             B();
             int _pp[]={1,NH*HD,D,0}; memcpy(backend_buffer_map(bp),_pp,4*sizeof(int));
             memcpy(backend_buffer_map(bw),m->attprojw+l*NH*HD*D,D*NH*HD*sizeof(float));
             backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-            backend_buffer_t* _pa[]={bo2,bw,bbs,bo,bp}; D(km,_pa,5,1,D,1,1,1,1);
+            int _gtx2=(D+31)&~31;
+            backend_buffer_t* _pa[]={bo2,bw,bbs,bo,bp}; D(bmk_select(g_reg,BMK_OP_MATMUL,1,NH*HD,D),_pa,5,_gtx2,1,1,32,1,1);
             C();
             memcpy(b,backend_buffer_map(bo),D*sizeof(float));
 
@@ -392,7 +395,6 @@ B();
     free(x);free(b);free(logits);free(hb);free(hb2);free(kvc);
     backend_buffer_free(bkvc);
     backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bo2);backend_buffer_free(bp);backend_buffer_free(beps);
-    backend_kernel_destroy(km);backend_kernel_destroy(kr);backend_kernel_destroy(kl);
-    backend_kernel_destroy(kg);backend_kernel_destroy(ks);backend_kernel_destroy(kp);backend_kernel_destroy(ka);
+    bmk_registry_destroy(g_reg);
     return 0;
 }
