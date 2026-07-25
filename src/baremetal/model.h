@@ -41,6 +41,8 @@ struct bm_model_s {
     float*   k_norm_w;
     float*   pre_ffn_w;
     float*   ffn_post_w;
+
+    void*    graph;
 };
 
 int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);
