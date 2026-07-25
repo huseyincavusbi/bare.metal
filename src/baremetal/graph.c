@@ -116,66 +116,60 @@ void bmt_graph_build(bm_model_t* m) {
 
         // RoPE
         if (m->arch.pos_enc == BM_POS_ROPE) {
-            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 1, (int[]){HD}, 1, (float[]){m->arch.rope_theta});
+            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, m->n_kv_heads, NH}, 1, (float[]){m->arch.rope_theta});
         }
 
         // Attention
         int t_attn_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){NH*HD});
-        // We pass t_k and t_v as inputs to attention for simplicity in the graph, though KV cache handles history.
-        bmt_graph_add_node(g, BMK_OP_ATTENTION, 3, (int[]){t_q, t_k, t_v}, t_attn_out, 4, (int[]){NH, HD, NKV, KV}, 0, NULL);
+        bmt_graph_add_node(g, BMK_OP_ATTENTION, 3, (int[]){t_q, t_k, t_v}, t_attn_out, 8, (int[]){NH, HD, NKV, KV, 1, m->kv_mul, l, m->arch.max_seq_len}, 0, NULL);
 
         // Attn Proj
         int t_attprojw = bmt_graph_add_weight(g, m->attprojw + l*NH*HD*D, 2, (int[]){D, NH*HD});
         int t_proj_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_attn_out, t_attprojw}, t_proj_out, 3, (int[]){1, NH*HD, D}, 0, NULL);
 
-        // Residual Add 1
-        int t_res1 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
-        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_proj_out}, t_res1, 1, (int[]){D}, 0, NULL);
-        t_x = t_res1; // x is now updated
+        // Residual Add 1 (in-place on t_x)
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_proj_out}, t_x, 1, (int[]){D}, 0, NULL);
         
-        // Norm 2 (ln2)
+        // Norm 2
+        int t_ln2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
         int t_ln2w = bmt_graph_add_weight(g, m->ln2w + l*D, 1, (int[]){D});
-        int t_ln2b = m->ln2b ? bmt_graph_add_weight(g, m->ln2b + l*D, 1, (int[]){D}) : -1;
-        int t_norm2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
-        
         if (m->arch.norm == BM_NORM_RMSNORM) {
-            bmt_graph_add_node(g, norm_op, 2, (int[]){t_x, t_ln2w}, t_norm2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+            bmt_graph_add_node(g, BMK_OP_NORM_RMS, 2, (int[]){t_x, t_ln2w}, t_ln2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
         } else {
-            bmt_graph_add_node(g, norm_op, 3, (int[]){t_x, t_ln2w, t_ln2b}, t_norm2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+            int t_ln2b = m->ln2b ? bmt_graph_add_weight(g, m->ln2b + l*D, 1, (int[]){D}) : -1;
+            bmt_graph_add_node(g, BMK_OP_NORM_LAYER, 3, (int[]){t_x, t_ln2w, t_ln2b}, t_ln2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
         }
         
-        // MLP
-        int t_fcw = bmt_graph_add_weight(g, m->fcw + l*H*D, 2, (int[]){H, D});
-        int t_fc_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
-        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_x, t_fcw}, t_fc_out, 3, (int[]){1, D, H}, 0, NULL);
-
-        int t_mlp_act = t_fc_out;
+        // FFN
+        int t_fcw_out;
         if (m->arch.gated_mlp) {
-            int t_fcw3 = bmt_graph_add_weight(g, m->fcw3 + l*H*D, 2, (int[]){H, D});
-            int t_fc3_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
-            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_x, t_fcw3}, t_fc3_out, 3, (int[]){1, D, H}, 0, NULL);
+            int t_fcw = bmt_graph_add_weight(g, m->fcw + l*H*D, 2, (int[]){D, H});
+            int t_fcw3 = bmt_graph_add_weight(g, m->fcw3 + l*H*D, 2, (int[]){D, H});
+            t_fcw_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
+            int t_fcw3_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
             
-            t_mlp_act = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw}, t_fcw_out, 3, (int[]){1, D, H}, 0, NULL);
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw3}, t_fcw3_out, 3, (int[]){1, D, H}, 0, NULL);
+            
             if (m->arch.activation == BM_ACT_SWIGLU) {
-                bmt_graph_add_node(g, BMK_OP_ACT_SWIGLU, 2, (int[]){t_fc_out, t_fc3_out}, t_mlp_act, 1, (int[]){H}, 0, NULL);
+                bmt_graph_add_node(g, BMK_OP_ACT_SWIGLU, 2, (int[]){t_fcw_out, t_fcw3_out}, t_fcw_out, 1, (int[]){H}, 0, NULL);
             } else {
-                bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fc_out}, t_mlp_act, 1, (int[]){H}, 0, NULL);
-                // Would need a MUL op for gated GELU, but omitting for brevity since SwiGLU is main path.
+                bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fcw_out}, t_fcw_out, 1, (int[]){H}, 0, NULL);
             }
         } else {
-            t_mlp_act = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
-            bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fc_out}, t_mlp_act, 1, (int[]){H}, 0, NULL);
+            int t_fcw = bmt_graph_add_weight(g, m->fcw + l*H*D, 2, (int[]){D, H});
+            t_fcw_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){H});
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw}, t_fcw_out, 3, (int[]){1, D, H}, 0, NULL);
+            bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fcw_out}, t_fcw_out, 1, (int[]){H}, 0, NULL);
         }
-
-        int t_fcprojw = bmt_graph_add_weight(g, m->fcprojw + l*D*H, 2, (int[]){D, H});
-        int t_mlp_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
-        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_mlp_act, t_fcprojw}, t_mlp_out, 3, (int[]){1, H, D}, 0, NULL);
-
-        // Residual Add 2
-        int t_res2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
-        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_mlp_out}, t_res2, 1, (int[]){D}, 0, NULL);
-        t_x = t_res2;
+        
+        int t_fcprojw = bmt_graph_add_weight(g, m->fcprojw + l*D*H, 2, (int[]){H, D});
+        int t_ffn_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_fcw_out, t_fcprojw}, t_ffn_out, 3, (int[]){1, H, D}, 0, NULL);
+        
+        // Residual Add 2 (in-place on t_x)
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_ffn_out}, t_x, 1, (int[]){D}, 0, NULL);
     }
 
     // Final Classifier

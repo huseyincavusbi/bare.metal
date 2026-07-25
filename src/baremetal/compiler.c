@@ -21,27 +21,18 @@ void bmt_compiler_run(bmt_graph_t* graph) {
             }
 
             if (add_node && add_node->op_type == BMK_OP_ADD) {
-                int usage_count = 0;
-                for (int j = 0; j < graph->n_nodes; j++) {
-                    for (int k = 0; k < graph->nodes[j].n_inputs; k++) {
-                        if (graph->nodes[j].inputs[k] == in_tensor_id) usage_count++;
-                    }
-                }
-                
-                if (usage_count == 1) {
-                    int x_id = add_node->inputs[0];
-                    int add_val_id = add_node->inputs[1];
-                    int weight_id = norm_node->inputs[1];
+                int x_id = add_node->inputs[0];
+                int add_val_id = add_node->inputs[1];
+                int weight_id = norm_node->inputs[1];
 
-                    norm_node->op_type = BMK_OP_FUSED_RESIDUAL_NORM;
-                    norm_node->n_inputs = 3;
-                    norm_node->inputs[0] = x_id;
-                    norm_node->inputs[1] = add_val_id;
-                    norm_node->inputs[2] = weight_id;
-                    
-                    add_node->op_type = BMK_OP_COUNT; // Dead node
-                    fused_count++;
-                }
+                norm_node->op_type = BMK_OP_FUSED_RESIDUAL_NORM;
+                norm_node->n_inputs = 3;
+                norm_node->inputs[0] = x_id;
+                norm_node->inputs[1] = add_val_id;
+                norm_node->inputs[2] = weight_id;
+                
+                add_node->op_type = BMK_OP_COUNT; // Dead node
+                fused_count++;
             }
         }
     }

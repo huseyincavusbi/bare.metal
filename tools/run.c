@@ -16,8 +16,6 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-static bmk_registry_t* g_reg;
-static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps,*bbs;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
 #define D(kn,bufs,n,gx,gy,gz,tx,ty,tz) do{backend_encode_dispatch(enc,kn,bufs,NULL,n,gx,gy,gz,tx,ty,tz);}while(0)
@@ -121,274 +119,32 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
                   uint64_t seed,
                   bm_token_cb_t callback, void* user_data) {
     if (n_prompt <= 0 || !prompt_ids) return -1;
-    g_be=ctx->backend_ctx;
-    g_reg = bmk_registry_create(g_be);
-    bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_NAIVE, "matmul_forward_naive");
-    bmk_register(g_reg, BMK_OP_MATMUL, BMK_VARIANT_TILED, "matmul_forward_tiled");
-    bmk_register(g_reg, BMK_OP_NORM_RMS, BMK_VARIANT_NAIVE, "rmsnorm_forward");
-    bmk_register(g_reg, BMK_OP_NORM_RMS, BMK_VARIANT_TILED, "rmsnorm_forward_v2");
-    bmk_register(g_reg, BMK_OP_NORM_LAYER, BMK_VARIANT_NAIVE, "layernorm_forward");
-    bmk_register(g_reg, BMK_OP_NORM_LAYER, BMK_VARIANT_TILED, "layernorm_forward_v2");
-    bmk_register(g_reg, BMK_OP_ACT_GELU, BMK_VARIANT_NAIVE, "gelu_forward");
-    bmk_register(g_reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
-    bmk_register(g_reg, BMK_OP_POS_ENC_ROPE, BMK_VARIANT_NAIVE, "rope_forward");
-    bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_NAIVE, "attention_forward");
-    bmk_register(g_reg, BMK_OP_ATTENTION, BMK_VARIANT_FLASH, "attention_forward_flash");
-    bmk_register(g_reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
-    bmk_register(g_reg, BMK_OP_FUSED_CLASSIFIER, BMK_VARIANT_NAIVE, "rmsnorm_matmul_forward");
-    int D=m->arch.dim,H=m->arch.hidden_dim,NH=m->arch.n_heads,HD=m->head_size;
-    int KV=m->kv_dim,KM=m->kv_mul,NKV=m->n_kv_heads,L=m->arch.n_layers,V=m->arch.vocab_size;
-    int MS=m->arch.max_seq_len,nm=m->arch.norm,at=m->arch.activation,pt=m->arch.pos_enc;
-    if (MS > 1024) MS = 1024;
-    float sc=1.0f/sqrtf((float)HD);
-    int max_dim=MAX(D,MAX(H,V));
-    bi=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    bw=backend_buffer_alloc(g_be,MAX(V,3*NH*HD)*MAX(D,H)*sizeof(float));
-    bo=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    bp=backend_buffer_alloc(g_be,8*sizeof(int));
-    beps=backend_buffer_alloc(g_be,sizeof(float));
-    bo2=backend_buffer_alloc(g_be,max_dim*sizeof(float));
-    bbs=backend_buffer_alloc(g_be,D*sizeof(float));
-    *(float*)backend_buffer_map(beps)=1e-5f;
-
-#define E2(outbuf,inp,wgt,woff,BT,CC,OC) do{ \
-    int _p[]={BT,CC,OC,0}; memcpy(backend_buffer_map(bp),_p,4*sizeof(int)); \
-    memcpy(backend_buffer_map(bi),(inp),BT*CC*sizeof(float)); \
-    memcpy(backend_buffer_map(bw),(float*)(wgt)+(woff),OC*CC*sizeof(float)); \
-    backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-    int _gtx=((OC)+31)&~31; \
-    backend_buffer_t*_a[]={bi,bw,bbs,(outbuf),bp}; D(bmk_select(g_reg,BMK_OP_MATMUL,BT,CC,OC),_a,5,_gtx,BT,1,32,1,1); \
-}while(0)
-#define E(inp,wgt,woff,BT,CC,OC) E2(bo,inp,wgt,woff,BT,CC,OC)
-    #define R(inp,wgt) do{ \
-        memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
-        backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,D,D),_n,5,256,1,1,256,1,1); \
-    }while(0)
-    #define L(inp,wgt,bias) do{ \
-        memcpy(backend_buffer_map(bi),(inp),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bbs),(bias),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
-        backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bbs); backend_buffer_unmap(bp); \
-        backend_buffer_t*_n[]={bi,bw,bo,bp,beps,bbs}; D(bmk_select(g_reg,BMK_OP_NORM_LAYER,1,D,D),_n,6,256,1,1,256,1,1); \
-    }while(0)
-    #define N(inp,wgt,bias) do{ if(nm==BM_NORM_LAYERNORM)L(inp,wgt,bias);else R(inp,wgt); }while(0)
-    #define RN(inp,res,wgt) do{ \
-        memcpy(backend_buffer_map(bo2),(inp),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bbs),(res),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bw),(wgt),D*sizeof(float)); \
-        memcpy(backend_buffer_map(bp),(int[]){1,D},2*sizeof(int)); \
-        backend_buffer_unmap(bo2); backend_buffer_unmap(bbs); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-        backend_buffer_t*_rn[]={bo2,bbs,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_FUSED_RESIDUAL_NORM,1,D,D),_rn,6,256,1,1,256,1,1); \
-    }while(0)
-    #define G(inp,N) do{ \
-        memcpy(backend_buffer_map(bi),(inp),(N)*sizeof(float)); \
-        memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
-        backend_buffer_unmap(bi); backend_buffer_unmap(bp); \
-        int _tx = (N) < 256 ? (N) : 256; \
-        backend_buffer_t*_g[]={bi,bo,bp}; D(bmk_select(g_reg,BMK_OP_ACT_GELU,1,(N),(N)),_g,3,(N),1,1,_tx,1,1); \
-    }while(0)
-    #define S(gate,up,N) do{ \
-        memcpy(backend_buffer_map(bi),(gate),(N)*sizeof(float)); \
-        memcpy(backend_buffer_map(bw),(up),(N)*sizeof(float)); \
-        memcpy(backend_buffer_map(bp),(int[]){N},sizeof(int)); \
-        backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-        int _tx = (N) < 256 ? (N) : 256; \
-        backend_buffer_t*_s[]={bi,bw,bo,bp}; D(bmk_select(g_reg,BMK_OP_ACT_SWIGLU,1,(N),(N)),_s,4,(N),1,1,_tx,1,1); \
-    }while(0)
-
-    float*x=calloc(D,sizeof(float)),*b=calloc(D,sizeof(float)),*logits=calloc(V,sizeof(float));
-    float*hb=calloc(H,sizeof(float)),*hb2=calloc(H,sizeof(float));
-    float*kvc=calloc(L*2*MS*KV,sizeof(float));
-    backend_buffer_t* bkvc=backend_buffer_alloc(g_be,L*2*MS*KV*sizeof(float));
-    backend_encoder_t*enc;
-    backend_buffer_t *bq=backend_buffer_alloc(g_be,NH*HD*sizeof(float));
-    backend_buffer_t *bk=backend_buffer_alloc(g_be,KV*sizeof(float));
-    backend_buffer_t *bv=backend_buffer_alloc(g_be,KV*sizeof(float));
-    backend_buffer_t *br=backend_buffer_alloc(g_be,4*sizeof(int));
-    backend_buffer_t *bf=backend_buffer_alloc(g_be,sizeof(float));
-    backend_buffer_t *btheta=backend_buffer_alloc(g_be,sizeof(float));
-    backend_buffer_t *bnkv=backend_buffer_alloc(g_be,sizeof(int));
-    *(float*)backend_buffer_map(btheta)=m->arch.rope_theta;
-    *(int*)backend_buffer_map(bnkv)=m->n_kv_heads;
+    
+    // 1. Compile model (Builds DAG and fuses ops)
+    bm_compile(m);
+    
+    // 2. Create session (Initializes scheduler, allocates Metal buffers)
+    bm_session_t* sess = bm_create_session(ctx, m);
+    if (!sess) return -1;
+    
     if (seed == 0) seed = (uint64_t)time(NULL);
     unsigned int rng_state = (unsigned int)seed;
-
+    
     int next_token = -1;
-    for(int pos=0;pos<steps;pos++){
+    for (int pos = 0; pos < steps; pos++) {
         int token;
         if (pos < n_prompt) {
             token = prompt_ids[pos];
         } else {
             token = next_token;
         }
-
-        float*wte=m->token_embedding_table;
-        memcpy(x,wte+token*D,D*sizeof(float));
-        if (pos == 0) {
-            FILE* ef = fopen("debug/embed.bin", "wb");
-            if (ef) { fwrite(x, sizeof(float), D, ef); fclose(ef); }
-        }
-        if(m->arch.embed_scale){float esc=sqrtf((float)D);for(int i=0;i<D;i++)x[i]*=esc;}
-        if(pt==BM_POS_LEARNED&&m->wpe)for(int i=0;i<D;i++)x[i]+=m->wpe[pos*D+i];
-
-        for(int l=0;l<L;l++){
-            B(); N(x,m->ln1w+l*D,m->ln1b+l*D); C();
-            memcpy(b,backend_buffer_map(bo),D*sizeof(float));
-
-            float _q[NH*HD],_k[KV],_v[KV];
-            B();E2(bq,b,m->qw+l*NH*HD*D,0,1,D,NH*HD);C();
-            B();E2(bk,b,m->kw+l*NKV*HD*D,0,1,D,KV);C();
-            B();E2(bv,b,m->vw+l*NKV*HD*D,0,1,D,KV);C();
-            memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
-            memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
-            memcpy(_v,backend_buffer_map(bv),KV*sizeof(float));
-
-            if (pos == 0 && l == 0) {
-                FILE* f = fopen("debug/l0_q.bin", "wb");
-                if (f) { fwrite(_q, sizeof(float), NH*HD, f); fclose(f); }
-                f = fopen("debug/l0_k.bin", "wb");
-                if (f) { fwrite(_k, sizeof(float), KV, f); fclose(f); }
-                f = fopen("debug/l0_v.bin", "wb");
-                if (f) { fwrite(_v, sizeof(float), KV, f); fclose(f); }
-            }
-
-            if(m->arch.has_qk_norm){
-                B();
-                float* qnw=m->q_norm_w+l*HD;
-                memcpy(backend_buffer_map(bi),_q,NH*HD*sizeof(float));
-                for(int h=0;h<NH;h++)memcpy(backend_buffer_map(bw)+h*HD,qnw,HD*sizeof(float));
-                memcpy(backend_buffer_map(bp),(int[]){NH,HD},2*sizeof(int));
-                backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-                backend_buffer_t*_qn[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,HD,HD),_qn,5,NH,1,1,1,1,1);
-                C();
-                memcpy(_q,backend_buffer_map(bo),NH*HD*sizeof(float));
-                B();
-                float*knw=m->k_norm_w+l*m->n_kv_heads*HD;
-                memcpy(backend_buffer_map(bi),_k,KV*sizeof(float));
-                memcpy(backend_buffer_map(bw),knw,KV*sizeof(float));
-                memcpy(backend_buffer_map(bp),(int[]){m->n_kv_heads,HD},2*sizeof(int));
-                backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-                backend_buffer_t*_kn[]={bi,bw,bo,bp,beps}; D(bmk_select(g_reg,BMK_OP_NORM_RMS,1,HD,HD),_kn,5,m->n_kv_heads,1,1,1,1,1);
-                C();
-                memcpy(_k,backend_buffer_map(bo),KV*sizeof(float));
-                memcpy(backend_buffer_map(bq),_q,NH*HD*sizeof(float));
-                memcpy(backend_buffer_map(bk),_k,KV*sizeof(float));
-                backend_buffer_unmap(bq); backend_buffer_unmap(bk);
-            }
-
-            if(pt==BM_POS_ROPE){
-                *(int*)backend_buffer_map(br)=HD;
-                int ps=pos;
-                *(int*)backend_buffer_map(bf)=ps;
-                backend_buffer_unmap(br); backend_buffer_unmap(bf);
-                B();
-                backend_buffer_t *_rp[]={bq,bk,br,bf,btheta,bnkv};
-                D(bmk_select(g_reg,BMK_OP_POS_ENC_ROPE,1,HD,HD),_rp,6,MAX(NH,m->n_kv_heads),1,1,1,1,1);
-                C();
-                memcpy(_q,backend_buffer_map(bq),NH*HD*sizeof(float));
-                memcpy(_k,backend_buffer_map(bk),KV*sizeof(float));
-            }
-
-            float*kk=kvc+l*2*MS*KV,*kv=kk+MS*KV;
-            memcpy(kk+pos*KV,_k,KV*sizeof(float));
-            memcpy(kv+pos*KV,_v,KV*sizeof(float));
-
-            float* kvc_gpu = (float*)backend_buffer_map(bkvc);
-            memcpy(kvc_gpu + l*2*MS*KV + pos*KV, _k, KV*sizeof(float));
-            memcpy(kvc_gpu + l*2*MS*KV + MS*KV + pos*KV, _v, KV*sizeof(float));
-            backend_buffer_unmap(bkvc);
-
-            int S=pos+1;
-            memcpy(backend_buffer_map(bq), _q, NH*HD*sizeof(float));
-            backend_buffer_unmap(bq);
-
-            int att_params[8] = {NH, HD, NKV, KV, S, KM, l, MS};
-            memcpy(backend_buffer_map(bp), att_params, 8*sizeof(int));
-            backend_buffer_unmap(bp);
-            *(float*)backend_buffer_map(bf) = sc;
-            backend_buffer_unmap(bf);
-
-B();
-            backend_buffer_t* att_bufs[] = {bq, bkvc, bo2, bp, bf};
-            D(bmk_select(g_reg,BMK_OP_ATTENTION,1,D,NH*HD), att_bufs, 5, NH*HD, 1, 1, HD, 1, 1);
-            C();
-
-            B();
-            int _pp[]={1,NH*HD,D,0}; memcpy(backend_buffer_map(bp),_pp,4*sizeof(int));
-            memcpy(backend_buffer_map(bw),m->attprojw+l*NH*HD*D,D*NH*HD*sizeof(float));
-            backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-            int _gtx2=(D+31)&~31;
-            backend_buffer_t* _pa[]={bo2,bw,bbs,bo,bp}; D(bmk_select(g_reg,BMK_OP_MATMUL,1,NH*HD,D),_pa,5,_gtx2,1,1,32,1,1);
-            C();
-            memcpy(b,backend_buffer_map(bo),D*sizeof(float));
-
-            if(nm == BM_NORM_RMSNORM && !m->arch.has_ffn_post_norm) {
-                B();RN(x,b,m->ln2w+l*D);C();
-                memcpy(x,backend_buffer_map(bo2),D*sizeof(float));
-            } else {
-                for(int i=0;i<D;i++)x[i]+=b[i];
-                if(m->arch.has_ffn_post_norm){
-                    B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
-                    memcpy(x,backend_buffer_map(bo),D*sizeof(float));
-                }
-                if(m->arch.has_ffn_post_norm){
-                    B();N(x,m->pre_ffn_w+l*D,NULL);C();
-                }else{
-                    B();N(x,m->ln2w+l*D,m->ln2b+l*D);C();
-                }
-            }
-            
-            if(m->arch.gated_mlp){
-                float ffn_in[D];
-                memcpy(ffn_in,backend_buffer_map(bo),D*sizeof(float));
-                B();E(ffn_in,m->fcw+l*H*D,0,1,D,H);C();
-                memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-                B();E(ffn_in,m->fcw3+l*H*D,0,1,D,H);C();
-                memcpy(hb2,backend_buffer_map(bo),H*sizeof(float));
-                if(at==BM_ACT_SWIGLU){
-                    B();S(hb,hb2,H);C();
-                    memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-                }else{
-                    B();G(hb,H);C();
-                    memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-                    for(int i=0;i<H;i++) hb[i] *= hb2[i];
-                }
-            }else{
-                B();E(backend_buffer_map(bo),m->fcw+l*H*D,0,1,D,H);C();
-                memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-                B();G(hb,H);C();
-                memcpy(hb,backend_buffer_map(bo),H*sizeof(float));
-            }
-            B();E(hb,m->fcprojw+l*D*H,0,1,H,D);C();
-            memcpy(b,backend_buffer_map(bo),D*sizeof(float));
-            if(m->arch.has_ffn_post_norm){
-                B();N(b,m->ffn_post_w+l*D,NULL);C();
-                memcpy(b,backend_buffer_map(bo),D*sizeof(float));
-            }
-            for(int i=0;i<D;i++)x[i]+=b[i];
-        }
-        if(nm == BM_NORM_RMSNORM) {
-            B();
-            memcpy(backend_buffer_map(bi), x, D*sizeof(float));
-            memcpy(backend_buffer_map(bbs), m->lnfw, D*sizeof(float));
-            memcpy(backend_buffer_map(bw), m->wcls, D*V*sizeof(float));
-            memcpy(backend_buffer_map(bp), (int[]){D, V}, 2*sizeof(int));
-            backend_buffer_unmap(bi); backend_buffer_unmap(bbs); backend_buffer_unmap(bw); backend_buffer_unmap(bp);
-            int _gtx = (V+255)&~255;
-            backend_buffer_t* _fc[] = {bi, bbs, bw, bo, bp, beps};
-            D(bmk_select(g_reg,BMK_OP_FUSED_CLASSIFIER,1,D,V), _fc, 6, _gtx, 1, 1, 256, 1, 1);
-            C();
-            memcpy(logits, backend_buffer_map(bo), V*sizeof(float));
-        } else {
-            B();N(x,m->lnfw,m->lnfb);C();
-            B();E(backend_buffer_map(bo),m->wcls,0,1,D,V);C();
-            memcpy(logits,backend_buffer_map(bo),V*sizeof(float));
-        }
-
+        
+        // 3. Step forward
+        float* logits = bm_step(sess, token);
+        
+        int V = m->arch.vocab_size;
+        
+        // 4. Debug output
         if (pos < n_prompt + 3) {
             float max_logit = -INFINITY, min_logit = INFINITY;
             for (int i = 0; i < V; i++) {
@@ -404,13 +160,9 @@ B();
             for (int i = 0; i < 5; i++) fprintf(stderr, " %d(%.2f)", sorted[i].idx, sorted[i].val);
             fprintf(stderr, "]");
             free(sorted);
-
-            char fname[64];
-            snprintf(fname, sizeof(fname), "debug/logits_pos%d.bin", pos);
-            FILE* lf = fopen(fname, "wb");
-            if (lf) { fwrite(logits, sizeof(float), V, lf); fclose(lf); }
         }
 
+        // 5. Sample next token
         if (pos >= n_prompt - 1) {
             next_token = sample_topk_topp(logits, V, temperature, top_k, top_p, rng_state++);
             if (callback) callback(next_token, user_data);
@@ -418,15 +170,11 @@ B();
                 fprintf(stderr, " [gen token %d at pos %d]", next_token, pos);
             }
         }
-        fprintf(stderr,"\r[step %d/%d]", pos + 1, steps);
+        fprintf(stderr, "\r[step %d/%d]", pos + 1, steps);
         fflush(stderr);
     }
     printf("\n");
-    backend_buffer_free(bq);backend_buffer_free(bk);backend_buffer_free(bv);
-    backend_buffer_free(br);backend_buffer_free(bf);backend_buffer_free(bnkv);
-    free(x);free(b);free(logits);free(hb);free(hb2);free(kvc);
-    backend_buffer_free(bkvc);
-    backend_buffer_free(bi);backend_buffer_free(bw);backend_buffer_free(bo);backend_buffer_free(bo2);backend_buffer_free(bp);backend_buffer_free(beps);
-    bmk_registry_destroy(g_reg);
+    
+    bm_destroy_session(sess);
     return 0;
 }

@@ -114,7 +114,7 @@ void           bm_autotune(bm_model_t* model, int warmup, int iterations);
 
 bm_session_t*  bm_create_session(bm_context_t* ctx, bm_model_t* model);
 float*         bm_forward(bm_session_t* sess, const int* tokens, int n_tokens);
-int            bm_step(bm_session_t* sess, int token);
+float*         bm_step(bm_session_t* sess, int token);
 void           bm_reset_session(bm_session_t* sess);
 void           bm_destroy_session(bm_session_t* sess);
 
