@@ -631,3 +631,64 @@ kernel void attention_forward_flash(
 
     out[h * HD + i] = out_val / running_sum;
 }
+
+// ----------------------------------------------------------------
+// rmsnorm_matmul_forward - fused classifier
+// Computes out = matmul(rmsnorm(inp, norm_weight, eps), wcls)
+// Saves a D-element VRAM roundtrip.
+// ----------------------------------------------------------------
+kernel void rmsnorm_matmul_forward(
+    device const float* inp [[buffer(0)]],
+    device const float* norm_weight [[buffer(1)]],
+    device const float* wcls [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* p [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int C = p[0], V = p[1];
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+
+    threadgroup float shared_x[4096];
+
+    float local_ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = inp[j];
+        shared_x[j] = v;
+        local_ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_ss += simd_shuffle_down(local_ss, (ushort)off);
+
+    threadgroup float reduce_buf[32];
+    if (tid % 32 == 0) reduce_buf[tid / 32] = local_ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) reduce_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv_rms = 1.0f / sqrt((reduce_buf[0] / (float)C) + eps);
+
+    for (int j = tid; j < C; j += tptg) {
+        shared_x[j] = shared_x[j] * inv_rms * norm_weight[j];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int global_id = (int)tgid.x * tptg + tid;
+    if (global_id >= V) return;
+
+    const device float* wrow = wcls + global_id * C;
+    float val = 0.0f;
+    for (int j = 0; j < C; j++) {
+        val += shared_x[j] * wrow[j];
+    }
+    out[global_id] = val;
+}
+
