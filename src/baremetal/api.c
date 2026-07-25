@@ -57,12 +57,6 @@ void bm_compile(bm_model_t* model) {
 }
 void bm_autotune(bm_model_t* model, int warmup, int iterations) { (void)model; (void)warmup; (void)iterations; }
 
-bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) { (void)ctx; (void)model; return NULL; }
-float* bm_forward(bm_session_t* sess, const int* tokens, int n_tokens) { (void)sess; (void)tokens; (void)n_tokens; return NULL; }
-int bm_step(bm_session_t* sess, int token) { (void)sess; (void)token; return 0; }
-void bm_reset_session(bm_session_t* sess) { (void)sess; }
-void bm_destroy_session(bm_session_t* sess) { free(sess); }
-
 bm_sampler_t* bm_create_sampler(int vocab_size, float temp, float topp, uint64_t seed) { (void)vocab_size; (void)temp; (void)topp; (void)seed; return NULL; }
 int bm_sample(bm_sampler_t* sampler, const float* logits) { (void)sampler; (void)logits; return 0; }
 void bm_destroy_sampler(bm_sampler_t* sampler) { free(sampler); }
