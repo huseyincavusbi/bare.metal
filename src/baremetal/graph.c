@@ -130,13 +130,20 @@ void bmt_graph_build(bm_model_t* m) {
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_attn_out, t_attprojw}, t_proj_out, 3, (int[]){1, NH*HD, D}, 0, NULL);
 
         // Residual Add 1
-        // We use a pseudo-op for residual add, or we can just model it as a fusion target.
-        // Let's model it as a naive FUSED_RESIDUAL_NORM for now, or just leave it as separate nodes to be fused later.
-        // For 1.17 we just build the naive graph.
         int t_res1 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
-        // Wait, we don't have a simple ADD op in registry yet, but we will add it.
-        bmt_graph_add_node(g, BMK_OP_FUSED_RESIDUAL_NORM, 3, (int[]){t_x, t_proj_out, bmt_graph_add_weight(g, m->ln2w + l*D, 1, (int[]){D})}, t_res1, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_proj_out}, t_res1, 1, (int[]){D}, 0, NULL);
         t_x = t_res1; // x is now updated
+        
+        // Norm 2 (ln2)
+        int t_ln2w = bmt_graph_add_weight(g, m->ln2w + l*D, 1, (int[]){D});
+        int t_ln2b = m->ln2b ? bmt_graph_add_weight(g, m->ln2b + l*D, 1, (int[]){D}) : -1;
+        int t_norm2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
+        
+        if (m->arch.norm == BM_NORM_RMSNORM) {
+            bmt_graph_add_node(g, norm_op, 2, (int[]){t_x, t_ln2w}, t_norm2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+        } else {
+            bmt_graph_add_node(g, norm_op, 3, (int[]){t_x, t_ln2w, t_ln2b}, t_norm2, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+        }
         
         // MLP
         int t_fcw = bmt_graph_add_weight(g, m->fcw + l*H*D, 2, (int[]){H, D});
@@ -165,16 +172,25 @@ void bmt_graph_build(bm_model_t* m) {
         int t_mlp_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_mlp_act, t_fcprojw}, t_mlp_out, 3, (int[]){1, H, D}, 0, NULL);
 
-        // Residual Add 2 (Wait, we can't use FUSED_RESIDUAL_NORM because the next op is the first norm of the NEXT layer, or final norm).
-        // Let's just assume we have an ADD op.
+        // Residual Add 2
+        int t_res2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_mlp_out}, t_res2, 1, (int[]){D}, 0, NULL);
+        t_x = t_res2;
     }
 
     // Final Classifier
     int t_lnfw = bmt_graph_add_weight(g, m->lnfw, 1, (int[]){D});
+    int t_lnfb = m->lnfb ? bmt_graph_add_weight(g, m->lnfb, 1, (int[]){D}) : -1;
+    int t_norm_f = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){D});
+    
+    bmk_op_type_t norm_op = m->arch.norm == BM_NORM_RMSNORM ? BMK_OP_NORM_RMS : BMK_OP_NORM_LAYER;
+    if (m->arch.norm == BM_NORM_RMSNORM) {
+        bmt_graph_add_node(g, norm_op, 2, (int[]){t_x, t_lnfw}, t_norm_f, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+    } else {
+        bmt_graph_add_node(g, norm_op, 3, (int[]){t_x, t_lnfw, t_lnfb}, t_norm_f, 2, (int[]){1, D}, 1, (float[]){1e-5f});
+    }
+
     int t_wcls = bmt_graph_add_weight(g, m->wcls, 2, (int[]){V, D});
     int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){V});
-    
-    if (m->arch.norm == BM_NORM_RMSNORM) {
-        bmt_graph_add_node(g, BMK_OP_FUSED_CLASSIFIER, 3, (int[]){t_x, t_lnfw, t_wcls}, t_logits, 2, (int[]){D, V}, 1, (float[]){1e-5f});
-    }
+    bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm_f, t_wcls}, t_logits, 3, (int[]){1, D, V}, 0, NULL);
 }

@@ -48,10 +48,12 @@ void bm_destroy_model(bm_model_t* model) {
 }
 
 #include "baremetal/graph.h"
+#include "baremetal/compiler.h"
 
 void bm_compile(bm_model_t* model) {
     if (!model) return;
     bmt_graph_build(model);
+    bmt_compiler_run(model->graph);
 }
 void bm_autotune(bm_model_t* model, int warmup, int iterations) { (void)model; (void)warmup; (void)iterations; }
 
