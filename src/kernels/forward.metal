@@ -24,7 +24,7 @@ kernel void matmul_forward_naive(
     uint2 gid [[thread_position_in_grid]])
 {
     int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
-    int bt = gid.x, oc = gid.y;
+    int bt = gid.y, oc = gid.x;
     if (bt >= BT || oc >= OC) return;
     float val = has_bias ? bias[oc] : 0.0f;
     const device float* inp_bt = inp + bt * C;
