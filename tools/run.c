@@ -15,7 +15,7 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-static backend_kernel_t *km,*kr,*kl,*kg,*ks,*kp,*ka;
+static backend_kernel_t *km,*km_t,*kr,*kl,*kg,*ks,*kp,*ka;
 static backend_buffer_t *bi,*bw,*bo,*bo2,*bp,*beps,*bbs;
 static backend_ctx_t* g_be;
 #define B() do{enc=backend_encode_begin(g_be);}while(0)
@@ -122,6 +122,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     if (n_prompt <= 0 || !prompt_ids) return -1;
     g_be=ctx->backend_ctx;
     km=backend_kernel_create(g_be,"matmul_forward_naive");
+    km_t=backend_kernel_create(g_be,"matmul_forward_tiled");
     kr=backend_kernel_create(g_be,"rmsnorm_forward");
     kl=backend_kernel_create(g_be,"layernorm_forward");
     kg=backend_kernel_create(g_be,"gelu_forward");
@@ -148,7 +149,8 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
     memcpy(backend_buffer_map(bi),(inp),BT*CC*sizeof(float)); \
     memcpy(backend_buffer_map(bw),(float*)(wgt)+(woff),OC*CC*sizeof(float)); \
     backend_buffer_unmap(bi); backend_buffer_unmap(bw); backend_buffer_unmap(bp); \
-    backend_buffer_t*_a[]={bi,bw,bbs,(outbuf),bp}; D(km,_a,5,BT,OC,1,1,1,1); \
+    int _gtx=((OC)+31)&~31; \
+    backend_buffer_t*_a[]={bi,bw,bbs,(outbuf),bp}; D(km_t,_a,5,_gtx,BT,1,32,1,1); \
 }while(0)
 #define E(inp,wgt,woff,BT,CC,OC) E2(bo,inp,wgt,woff,BT,CC,OC)
     #define R(inp,wgt) do{ \
