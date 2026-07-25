@@ -47,7 +47,12 @@ void bm_destroy_model(bm_model_t* model) {
     free(model);
 }
 
-void bm_compile(bm_model_t* model) { (void)model; }
+#include "baremetal/graph.h"
+
+void bm_compile(bm_model_t* model) {
+    if (!model) return;
+    bmt_graph_build(model);
+}
 void bm_autotune(bm_model_t* model, int warmup, int iterations) { (void)model; (void)warmup; (void)iterations; }
 
 bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) { (void)ctx; (void)model; return NULL; }
