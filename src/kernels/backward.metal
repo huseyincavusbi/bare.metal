@@ -121,3 +121,53 @@ kernel void rmsnorm_backward_w(
     }
     gw[j] = acc;
 }
+
+// ----------------------------------------------------------------
+// rope_backward
+// Forward (rotate_half, Llama style): for each head h, hd2 = HD/2,
+//   freq = 1/theta^(2i/HD); c=cos(pos*freq), s=sin(pos*freq)
+//   out[i]    = x[i]*c - x[i+hd2]*s
+//   out[i+hd2] = x[i]*s + x[i+hd2]*c
+// Backward = transposed rotation R^T (= R(-theta), orthogonal): reads the
+// upstream grad gout and writes g. Independent of the forward input values
+// (only cos/sin + gout). No weights -> grad_input only.
+// One thread per head (matches forward). Grid = NH.
+// buffers: [0]=gout_q [1]=gout_k [2]=gq [3]=gk
+//          [4]=head_size [5]=pos [6]=theta [7]=n_kv_heads
+// ----------------------------------------------------------------
+kernel void rope_backward(
+    device const float* gout_q [[buffer(0)]],
+    device const float* gout_k [[buffer(1)]],
+    device float* gq           [[buffer(2)]],
+    device float* gk           [[buffer(3)]],
+    constant int& head_size    [[buffer(4)]],
+    constant int& pos          [[buffer(5)]],
+    constant float& theta      [[buffer(6)]],
+    constant int& n_kv_heads   [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int h = (int)gid;
+    int hd2 = head_size / 2;
+    device const float* gqin = gout_q + h * head_size;
+    device float* gqout = gq + h * head_size;
+    for (int i = 0; i < hd2; i++) {
+        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float c = cos((float)pos * freq);
+        float s = sin((float)pos * freq);
+        float g0 = gqin[i], g1 = gqin[i + hd2];
+        gqout[i]      =  g0 * c + g1 * s;          /* R^T row 0 */
+        gqout[i + hd2] = -g0 * s + g1 * c;         /* R^T row 1 */
+    }
+    if (h < n_kv_heads) {
+        device const float* gkin = gout_k + h * head_size;
+        device float* gkout = gk + h * head_size;
+        for (int i = 0; i < hd2; i++) {
+            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float c = cos((float)pos * freq);
+            float s = sin((float)pos * freq);
+            float g0 = gkin[i], g1 = gkin[i + hd2];
+            gkout[i]      =  g0 * c + g1 * s;
+            gkout[i + hd2] = -g0 * s + g1 * c;
+        }
+    }
+}
