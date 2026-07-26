@@ -254,3 +254,25 @@ kernel void xent_backward(
         gr[j] = (p_j - (j == tgt ? 1.0f : 0.0f)) * invN;
     }
 }
+
+// ----------------------------------------------------------------
+// embedding_backward
+// Forward: out[t] = wte[token[t]]   (row lookup, [V,D] table)
+// Backward: grad_wte[token[t]] += grad_out[t]  (scatter-add; tokens repeat,
+//          so accumulation across positions -> atomic float adds).
+// gwte MUST be zeroed before dispatch. One thread per (t, d) element.
+// buffers: [0]=tokens[T] [1]=gout[T,D] [2]=gwte[V,D] (atomic)  [3]=D
+// grid = T*D
+// ----------------------------------------------------------------
+kernel void embedding_backward(
+    device const int* tokens  [[buffer(0)]],
+    device const float* gout  [[buffer(1)]],
+    device atomic_float* gwte [[buffer(2)]],
+    constant int& D           [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int t = (int)gid / D;
+    int d = (int)gid - t * D;
+    int tok = tokens[t];
+    atomic_fetch_add_explicit(gwte + tok * D + d, gout[t * D + d], memory_order_relaxed);
+}
