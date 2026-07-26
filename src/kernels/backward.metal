@@ -23,8 +23,9 @@ kernel void matmul_backward_inp(
     for (int oc = 0; oc < OC; oc++) {
         acc += gout[bt * OC + oc] * w[oc * C + i];
     }
-    ginp[bt * C + i] = acc;
+    ginp[bt * C + i] += acc;   /* accumulate: shared activation grads (e.g. t_norm1 read by Q/K/V) */
 }
+
 
 // ----------------------------------------------------------------
 // matmul_backward_w
@@ -87,7 +88,7 @@ kernel void rmsnorm_backward_x(
 
     for (int j = 0; j < C; j++) {
         float n = xr[j] * inv_rms;
-        gxr[j] = inv_rms * (gr[j] * w[j] - n * c1);
+        gxr[j] += inv_rms * (gr[j] * w[j] - n * c1);   /* accumulate (residual stream has multiple producers) */
     }
 }
 
