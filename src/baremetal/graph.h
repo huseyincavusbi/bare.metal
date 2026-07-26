@@ -21,6 +21,7 @@ typedef struct {
     int dims[BMT_MAX_TENSOR_DIMS];
     int n_dims;
     void* weight_ptr;
+    int   quantized;   /* 1 = upload as Q8 blocks, dispatch via matmul_forward_q8 */
 } bmt_tensor_t;
 
 typedef struct {

@@ -1,4 +1,5 @@
 #include "baremetal/scheduler.h"
+#include "baremetal/quant.h"
 #include "utils/log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@ struct bmt_scheduler_s {
     
     backend_buffer_t* bkvc;
     backend_buffer_t* dummy_bias;
+    backend_kernel_t* q8_kernel;   /* matmul_forward_q8, used for quantized weights */
     
     int max_seq_len;
     int kv_dim;
@@ -34,17 +36,27 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     for (int i = 0; i < graph->n_tensors; i++) {
         bmt_tensor_t* t = &graph->tensors[i];
         
-        size_t size = 1;
-        for (int d = 0; d < t->n_dims; d++) size *= t->dims[d];
-        if (size == 0) size = 1024;
-        size *= sizeof(float);
+        size_t n_elems = 1;
+        for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
+        if (n_elems == 0) n_elems = 1024;
+        size_t fp32_bytes = n_elems * sizeof(float);
         
-        sched->buffers[i] = backend_buffer_alloc(backend, size);
+        int do_q8 = (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr && t->quantized
+                     && t->n_dims == 2 && (t->dims[1] % 32 == 0));
         
-        if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr) {
-            void* dst = backend_buffer_map(sched->buffers[i]);
-            memcpy(dst, t->weight_ptr, size);
+        if (do_q8) {
+            size_t qbytes = bmt_q8_bytes(n_elems);
+            sched->buffers[i] = backend_buffer_alloc(backend, qbytes);
+            q8_block_t* dst = (q8_block_t*)backend_buffer_map(sched->buffers[i]);
+            bmt_quantize_q8((const float*)t->weight_ptr, dst, n_elems);
             backend_buffer_unmap(sched->buffers[i]);
+        } else {
+            sched->buffers[i] = backend_buffer_alloc(backend, fp32_bytes);
+            if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr) {
+                void* dst = backend_buffer_map(sched->buffers[i]);
+                memcpy(dst, t->weight_ptr, fp32_bytes);
+                backend_buffer_unmap(sched->buffers[i]);
+            }
         }
     }
     
@@ -70,6 +82,8 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     memset(db, 0, 131072 * sizeof(float));
     backend_buffer_unmap(sched->dummy_bias);
     
+    sched->q8_kernel = backend_kernel_create(backend, "matmul_forward_q8");
+    
     return sched;
 }
 
@@ -91,6 +105,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     free(sched->nkv_bufs);
     backend_buffer_free(sched->bkvc);
     backend_buffer_free(sched->dummy_bias);
+    if (sched->q8_kernel) backend_kernel_destroy(sched->q8_kernel);
     free(sched);
 }
 
@@ -130,7 +145,13 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             continue;
         }
 
-        backend_kernel_t* kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
+        backend_kernel_t* kn;
+        if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
+            && sched->graph->tensors[node->inputs[1]].quantized && sched->q8_kernel) {
+            kn = sched->q8_kernel;   /* quantized weight -> Q8 dequantizing matmul */
+        } else {
+            kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
+        }
         if (!kn) continue;
         
         int* p = backend_buffer_map(sched->param_bufs[i]);

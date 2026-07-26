@@ -34,6 +34,7 @@ static void print_usage(const char* prog) {
     printf("  -p, --topp <float>          Top-p threshold (default: 0.9)\n");
     printf("  -n, --steps <int>           Max generation steps (default: 256)\n");
     printf("  -s, --seed <int>            RNG seed (default: time-based)\n");
+    printf("      --quant <q8>            Quantize matmul weights to Q8 (default: off/fp32)\n");
 }
 
 static int cmd_test_dispatch(void) {
@@ -370,6 +371,7 @@ int main(int argc, char** argv) {
         int top_k = 40;
         float top_p = 0.9f;
         uint64_t seed = 0;
+        int quant = 0;
 
         for (int i = 3; i < argc; i++) {
             if (argv[i][0] == '-' && argv[i][1] == '-') {
@@ -378,6 +380,7 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--top-k") == 0 && i+1 < argc) top_k = atoi(argv[++i]);
                 else if (strcmp(argv[i], "--top-p") == 0 && i+1 < argc) top_p = (float)atof(argv[++i]);
                 else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = (uint64_t)atoll(argv[++i]);
+                else if (strcmp(argv[i], "--quant") == 0 && i+1 < argc) { const char* q = argv[++i]; quant = (strcmp(q, "q8") == 0); }
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -392,6 +395,7 @@ int main(int argc, char** argv) {
         bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
         bm_model_t* model = calloc(1, sizeof(*model));
         bm_load_weights(model, model_dir);
+        model->quantized = quant;
         bm_print_model_info(model);
 
         bm_tokenizer_t tok;

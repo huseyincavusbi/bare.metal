@@ -187,4 +187,17 @@ void bmt_graph_build(bm_model_t* m) {
     int t_wcls = bmt_graph_add_weight(g, m->wcls, 2, (int[]){V, D});
     int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 1, (int[]){V});
     bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm_f, t_wcls}, t_logits, 3, (int[]){1, D, V}, 0, NULL);
+
+    /* Q8: mark every per-layer matmul weight tensor for quantized upload.
+     * Skip the classifier weight (m->wcls): the compiler fuses it into
+     * FUSED_CLASSIFIER, whose kernel reads fp32. Guard contraction dim % 32. */
+    if (m->quantized) {
+        for (int i = 0; i < g->n_nodes; i++) {
+            bmt_node_t* n = &g->nodes[i];
+            if (n->op_type != BMK_OP_MATMUL || n->n_inputs < 2) continue;
+            bmt_tensor_t* wt = &g->tensors[n->inputs[1]];
+            if (wt->type != BMT_TENSOR_TYPE_WEIGHT || wt->weight_ptr == (void*)m->wcls) continue;
+            if (wt->n_dims == 2 && (wt->dims[1] % 32 == 0)) wt->quantized = 1;
+        }
+    }
 }
