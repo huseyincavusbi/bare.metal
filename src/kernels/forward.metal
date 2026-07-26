@@ -749,18 +749,18 @@ kernel void attention_forward_seq(
     constant float& scale   [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
-    int NH = p[0], S = p[1], HD = p[2], kv_mul = p[4];
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
     int h = (int)gid / S;
     int i = (int)gid - h * S;
     if (h >= NH || i >= S) return;
     int kh = h / kv_mul;
-    const device float* qi = Q + (h * S + i) * HD;
+    const device float* qi = Q + (i * NH + h) * HD;   /* [S,NH,HD] layout */
 
     thread float sc[ATTN_MAXS_FWD], pr[ATTN_MAXS_FWD];
     int n = i + 1;
     float mx = -INFINITY;
     for (int j = 0; j < n; j++) {
-        const device float* kj = K + (kh * S + j) * HD;
+        const device float* kj = K + (j * NKV + kh) * HD;
         float s = 0.0f;
         for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
         sc[j] = s * scale;
@@ -771,10 +771,10 @@ kernel void attention_forward_seq(
     float inv = 1.0f / sum;
     for (int j = 0; j < n; j++) pr[j] *= inv;
 
-    device float* oi = out + (h * S + i) * HD;
+    device float* oi = out + (i * NH + h) * HD;
     for (int d = 0; d < HD; d++) {
         float acc = 0.0f;
-        for (int j = 0; j < n; j++) acc += pr[j] * V[(kh * S + j) * HD + d];
+        for (int j = 0; j < n; j++) acc += pr[j] * V[(j * NKV + kh) * HD + d];
         oi[d] = acc;
     }
 }

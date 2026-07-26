@@ -306,14 +306,14 @@ kernel void attention_backward(
     constant float& scale     [[buffer(8)]],
     uint gid [[thread_position_in_grid]])
 {
-    int NH = p[0], S = p[1], HD = p[2], kv_mul = p[4];
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
     int h = (int)gid / S;
     int i = (int)gid - h * S;
     if (h >= NH || i >= S) return;
     int kh = h / kv_mul;
 
-    const device float* qi = Q   + (h  * S + i) * HD;
-    const device float* gi = gout + (h  * S + i) * HD;
+    const device float* qi = Q   + (i * NH + h) * HD;   /* [S,NH,HD] layout */
+    const device float* gi = gout + (i * NH + h) * HD;
 
     thread float scores[ATTN_MAXS], pr[ATTN_MAXS], gp[ATTN_MAXS], gs[ATTN_MAXS];
     int n = i + 1;   // causal: j in [0, i]
@@ -321,7 +321,7 @@ kernel void attention_backward(
     // forward: scores[j] = (qi . K[kh,j]) * scale ; softmax -> pr[j]
     float mx = -INFINITY;
     for (int j = 0; j < n; j++) {
-        const device float* kj = K + (kh * S + j) * HD;
+        const device float* kj = K + (j * NKV + kh) * HD;
         float s = 0.0f;
         for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
         s *= scale;
@@ -336,7 +336,7 @@ kernel void attention_backward(
     // grad_p[j] = gi . V[kh,j] ; gp_dot_p = sum_j p[j]*grad_p[j]
     float gp_dot_p = 0.0f;
     for (int j = 0; j < n; j++) {
-        const device float* vj = V + (kh * S + j) * HD;
+        const device float* vj = V + (j * NKV + kh) * HD;
         float dp = 0.0f;
         for (int d = 0; d < HD; d++) dp += gi[d] * vj[d];
         gp[j] = dp;
@@ -346,10 +346,10 @@ kernel void attention_backward(
     for (int j = 0; j < n; j++) gs[j] = pr[j] * (gp[j] - gp_dot_p);
 
     // grad_Q[h,i,d] = scale * sum_j gscore[j]*K[kh,j,d]   (scale: scores = Q.K * scale)
-    device float* gqi = gQ + (h * S + i) * HD;
+    device float* gqi = gQ + (i * NH + h) * HD;   /* [S,NH,HD] */
     for (int d = 0; d < HD; d++) {
         float acc = 0.0f;
-        for (int j = 0; j < n; j++) acc += gs[j] * K[(kh * S + j) * HD + d];
+        for (int j = 0; j < n; j++) acc += gs[j] * K[(j * NKV + kh) * HD + d];
         gqi[d] = acc * scale;
     }
 
@@ -357,8 +357,8 @@ kernel void attention_backward(
     // scale on grad_K only (scores carry scale); grad_V has no scale (V is linear in out).
     for (int j = 0; j < n; j++) {
         for (int d = 0; d < HD; d++) {
-            atomic_fetch_add_explicit(gK + (kh * S + j) * HD + d, scale * gs[j] * qi[d], memory_order_relaxed);
-            atomic_fetch_add_explicit(gV + (kh * S + j) * HD + d, pr[j] * gi[d], memory_order_relaxed);
+            atomic_fetch_add_explicit(gK + (j * NKV + kh) * HD + d, scale * gs[j] * qi[d], memory_order_relaxed);
+            atomic_fetch_add_explicit(gV + (j * NKV + kh) * HD + d, pr[j] * gi[d], memory_order_relaxed);
         }
     }
 }
