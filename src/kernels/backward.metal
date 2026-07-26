@@ -48,3 +48,76 @@ kernel void matmul_backward_w(
     }
     gw[oc * C + i] = acc;
 }
+
+// ----------------------------------------------------------------
+// rmsnorm_backward_x
+// Forward: ss = sum(x^2)/C ; inv_rms = 1/sqrt(ss+eps) ; n[j]=x[j]*inv_rms
+//          out[j] = n[j]*w[j]
+// Backward wrt input (per row, row length C):
+//   c1 = (1/C) * sum_j gout[j]*out[j]
+//   grad_x[j] = inv_rms * (gout[j]*w[j] - n[j]*c1)
+// One thread per row (matches forward rmsnorm naive convention).
+// buffers: [0]=gout[N,C] [1]=w[C] [2]=x[N,C] [3]=gx[N,C]  params[4]=[N,C]  eps[5]
+// ----------------------------------------------------------------
+kernel void rmsnorm_backward_x(
+    device const float* gout [[buffer(0)]],
+    device const float* w    [[buffer(1)]],
+    device const float* x    [[buffer(2)]],
+    device float* gx         [[buffer(3)]],
+    constant int* p          [[buffer(4)]],
+    constant float& eps      [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)gid;
+    if (row >= N) return;
+    const device float* xr = x + row * C;
+    const device float* gr = gout + row * C;
+    device float* gxr = gx + row * C;
+
+    float ss = 0.0f;
+    for (int j = 0; j < C; j++) ss += xr[j] * xr[j];
+    ss /= (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    // c1 = (1/C) * sum_j gout[j]*out[j], with out[j] = x[j]*inv_rms*w[j]
+    float c1 = 0.0f;
+    for (int j = 0; j < C; j++) c1 += gr[j] * xr[j] * inv_rms * w[j];
+    c1 /= (float)C;
+
+    for (int j = 0; j < C; j++) {
+        float n = xr[j] * inv_rms;
+        gxr[j] = inv_rms * (gr[j] * w[j] - n * c1);
+    }
+}
+
+// ----------------------------------------------------------------
+// rmsnorm_backward_w
+// Backward wrt weight:  grad_w[j] = sum_row gout[row,j]*n[row,j]
+//   where n[row,j] = x[row,j]*inv_rms(row)
+// One thread per column j; loops over N rows accumulating. gw must be zeroed.
+// buffers: [0]=gout[N,C] [1]=x[N,C] [2]=gw[C]  params[3]=[N,C]  eps[4]
+// ----------------------------------------------------------------
+kernel void rmsnorm_backward_w(
+    device const float* gout [[buffer(0)]],
+    device const float* x    [[buffer(1)]],
+    device float* gw         [[buffer(2)]],
+    constant int* p          [[buffer(3)]],
+    constant float& eps      [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int j = (int)gid;
+    if (j >= C) return;
+    float acc = 0.0f;
+    for (int row = 0; row < N; row++) {
+        const device float* xr = x + row * C;
+        float ss = 0.0f;
+        for (int k = 0; k < C; k++) ss += xr[k] * xr[k];
+        ss /= (float)C;
+        float inv_rms = 1.0f / sqrt(ss + eps);
+        float n = xr[j] * inv_rms;
+        acc += gout[row * C + j] * n;
+    }
+    gw[j] = acc;
+}
