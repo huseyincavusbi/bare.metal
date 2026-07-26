@@ -33,6 +33,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_rope_bwd_seq;
     backend_kernel_t* k_gelu_bwd;
     backend_kernel_t* k_swiglu_bwd;
+    backend_kernel_t* k_xent;        /* xent_backward (loss seed) */
 
     int max_seq_len;
     int kv_dim;
@@ -122,6 +123,7 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     sched->k_rope_bwd_seq = backend_kernel_create(backend, "rope_backward_seq");
     sched->k_gelu_bwd = backend_kernel_create(backend, "gelu_backward");
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
+    sched->k_xent = backend_kernel_create(backend, "xent_backward");
 
     return sched;
 }
@@ -157,6 +159,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rope_bwd_seq) backend_kernel_destroy(sched->k_rope_bwd_seq);
     if (sched->k_gelu_bwd) backend_kernel_destroy(sched->k_gelu_bwd);
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
+    if (sched->k_xent) backend_kernel_destroy(sched->k_xent);
     free(sched);
 }
 
@@ -737,3 +740,39 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
     backend_encode_commit(enc);
     backend_encode_wait(enc);
 }
+
+float bmt_scheduler_xent_backward(bmt_scheduler_t* sched, int logits_id, const int* targets, int S, int V) {
+    if (!sched || !sched->k_xent || logits_id < 0 || logits_id >= sched->graph->n_tensors) return -1.0f;
+
+    /* compute loss on CPU for logging: loss = -mean log(softmax(logits)[target]) */
+    float* logits = backend_buffer_map(sched->buffers[logits_id]);
+    float loss = 0.0f;
+    for (int s = 0; s < S; s++) {
+        const float* lr = logits + s * V;
+        float mx = lr[0];
+        for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
+        float sum = 0.0f;
+        for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
+        loss += -(lr[targets[s]] - mx - logf(sum));
+    }
+    loss /= (float)S;
+    backend_buffer_unmap(sched->buffers[logits_id]);
+
+    /* dispatch xent_backward: grad_logits = (softmax - onehot)/N */
+    backend_buffer_t* b_tgt = backend_buffer_alloc(sched->backend, S * sizeof(int));
+    backend_buffer_t* b_par = backend_buffer_alloc(sched->backend, 16 * sizeof(int));
+    memcpy(backend_buffer_map(b_tgt), targets, S * sizeof(int)); backend_buffer_unmap(b_tgt);
+    int par[2] = {S, V};
+    memcpy(backend_buffer_map(b_par), par, sizeof(par)); backend_buffer_unmap(b_par);
+
+    backend_encoder_t* enc = backend_encode_begin(sched->backend);
+    backend_buffer_t* bufs[] = {sched->buffers[logits_id], b_tgt, sched->grad_buffers[logits_id], b_par};
+    backend_encode_dispatch(enc, sched->k_xent, bufs, NULL, 4, S, 1, 1, S, 1, 1);
+    backend_encode_commit(enc);
+    backend_encode_wait(enc);
+
+    backend_buffer_free(b_tgt);
+    backend_buffer_free(b_par);
+    return loss;
+}
+

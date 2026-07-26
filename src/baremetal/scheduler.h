@@ -19,6 +19,11 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S);
  * create; backward kernels that accumulate do so via atomics. */
 void bmt_scheduler_backward(bmt_scheduler_t* sched);
 
+/* Loss seed: dispatch xent_backward to fill grad_buffers[logits_id] from the
+ * forward logits + targets. Returns the cross-entropy loss (for logging).
+ * The trainer calls this between forward_train and backward. */
+float bmt_scheduler_xent_backward(bmt_scheduler_t* sched, int logits_id, const int* targets, int S, int V);
+
 void bmt_scheduler_set_input(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size);
 void bmt_scheduler_get_output(bmt_scheduler_t* sched, int tensor_id, void* data, size_t size);
 void bmt_scheduler_set_grad(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size);
