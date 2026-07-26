@@ -11,16 +11,22 @@ void bmt_compiler_run(bmt_graph_t* graph) {
         bmt_node_t* norm_node = &graph->nodes[i];
         if (norm_node->op_type == BMK_OP_NORM_RMS) {
             int in_tensor_id = norm_node->inputs[0];
-            
+
+            // Find the ADD that produces this norm's input. The residual
+            // stream tensor (t_x) is written in-place by every layer's ADD,
+            // so we must pick the NEAREST preceding ADD (scanning backwards),
+            // not the first node whose output matches. Skip dead nodes.
             bmt_node_t* add_node = NULL;
-            for (int j = 0; j < i; j++) {
-                if (graph->nodes[j].output == in_tensor_id) {
-                    add_node = &graph->nodes[j];
+            for (int j = i - 1; j >= 0; j--) {
+                bmt_node_t* cand = &graph->nodes[j];
+                if (cand->op_type == BMK_OP_COUNT) continue;
+                if (cand->output == in_tensor_id && cand->op_type == BMK_OP_ADD) {
+                    add_node = cand;
                     break;
                 }
             }
 
-            if (add_node && add_node->op_type == BMK_OP_ADD) {
+            if (add_node) {
                 int x_id = add_node->inputs[0];
                 int add_val_id = add_node->inputs[1];
                 int weight_id = norm_node->inputs[1];
@@ -30,7 +36,7 @@ void bmt_compiler_run(bmt_graph_t* graph) {
                 norm_node->inputs[0] = x_id;
                 norm_node->inputs[1] = add_val_id;
                 norm_node->inputs[2] = weight_id;
-                
+
                 add_node->op_type = BMK_OP_COUNT; // Dead node
                 fused_count++;
             }
@@ -44,9 +50,11 @@ void bmt_compiler_run(bmt_graph_t* graph) {
             int in_tensor_id = mm_node->inputs[0];
             
             bmt_node_t* norm_node = NULL;
-            for (int j = 0; j < i; j++) {
-                if (graph->nodes[j].output == in_tensor_id && graph->nodes[j].op_type == BMK_OP_NORM_RMS) {
-                    norm_node = &graph->nodes[j];
+            for (int j = i - 1; j >= 0; j--) {
+                bmt_node_t* cand = &graph->nodes[j];
+                if (cand->op_type == BMK_OP_COUNT) continue;
+                if (cand->output == in_tensor_id && cand->op_type == BMK_OP_NORM_RMS) {
+                    norm_node = cand;
                     break;
                 }
             }
