@@ -730,3 +730,52 @@ kernel void rmsnorm_matmul_forward(
     out[global_id] = val;
 }
 
+// ----------------------------------------------------------------
+// attention_forward_seq (training forward: full sequence, causal, GQA)
+// Counterpart to attention_backward. For each query pos i, head h (kh=h/kv_mul):
+//   scores[j] = (Q[h,i] . K[kh,j]) * scale,  j in [0,i]   (causal)
+//   p = softmax(scores);  out[h,i] = sum_j p[j] * V[kh,j]
+// One thread per (h,i), loops over HD. Grid = NH*S.
+// buffers: [0]=Q[NH,S,HD] [1]=K[NKV,S,HD] [2]=V [3]=out[NH,S,HD]
+//          [4]=params[NH,S,HD,NKV,kv_mul]  [5]=scale
+// ----------------------------------------------------------------
+#define ATTN_MAXS_FWD 256
+kernel void attention_forward_seq(
+    device const float* Q   [[buffer(0)]],
+    device const float* K   [[buffer(1)]],
+    device const float* V   [[buffer(2)]],
+    device float* out       [[buffer(3)]],
+    constant int* p         [[buffer(4)]],
+    constant float& scale   [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int NH = p[0], S = p[1], HD = p[2], kv_mul = p[4];
+    int h = (int)gid / S;
+    int i = (int)gid - h * S;
+    if (h >= NH || i >= S) return;
+    int kh = h / kv_mul;
+    const device float* qi = Q + (h * S + i) * HD;
+
+    thread float sc[ATTN_MAXS_FWD], pr[ATTN_MAXS_FWD];
+    int n = i + 1;
+    float mx = -INFINITY;
+    for (int j = 0; j < n; j++) {
+        const device float* kj = K + (kh * S + j) * HD;
+        float s = 0.0f;
+        for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
+        sc[j] = s * scale;
+        if (sc[j] > mx) mx = sc[j];
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) { pr[j] = exp(sc[j] - mx); sum += pr[j]; }
+    float inv = 1.0f / sum;
+    for (int j = 0; j < n; j++) pr[j] *= inv;
+
+    device float* oi = out + (h * S + i) * HD;
+    for (int d = 0; d < HD; d++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; j++) acc += pr[j] * V[(kh * S + j) * HD + d];
+        oi[d] = acc;
+    }
+}
+
