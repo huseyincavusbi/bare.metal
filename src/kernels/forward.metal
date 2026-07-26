@@ -779,3 +779,44 @@ kernel void attention_forward_seq(
     }
 }
 
+// ----------------------------------------------------------------
+// rope_forward_seq (training forward RoPE, full sequence, [S,NH,HD] layout)
+// For each (position s, head h): freq=1/theta^(2i/HD); apply rotation by pos=s.
+//   qh[i]    = qh[i]*c - qh[i+hd2]*s ;  qh[i+hd2] = qh[i]*s + qh[i+hd2]*c
+// In-place on q and k. One thread per (s,h). Grid = S*NH.
+// buffers: [0]=q[S,NH,HD] [1]=k[S,NKV,HD]  [2]=params{head_size,n_kv_heads,S,NH}  [3]=theta
+// ----------------------------------------------------------------
+kernel void rope_forward_seq(
+    device float* q            [[buffer(0)]],
+    device float* k            [[buffer(1)]],
+    constant int* p            [[buffer(2)]],
+    constant float& theta      [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int head_size = p[0], n_kv_heads = p[1], S = p[2], NH = p[3];
+    int s = (int)gid / NH;
+    int h = (int)gid - s * NH;
+    if (s >= S || h >= NH) return;
+    int hd2 = head_size / 2;
+    device float* qh = q + (s * NH + h) * head_size;
+    for (int i = 0; i < hd2; i++) {
+        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float c = cos((float)s * freq);
+        float s_ = sin((float)s * freq);
+        float q0 = qh[i], q1 = qh[i + hd2];
+        qh[i]      = q0 * c - q1 * s_;
+        qh[i + hd2] = q0 * s_ + q1 * c;
+    }
+    if (h < n_kv_heads) {
+        device float* kh = k + (s * n_kv_heads + h) * head_size;
+        for (int i = 0; i < hd2; i++) {
+            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float c = cos((float)s * freq);
+            float s_ = sin((float)s * freq);
+            float k0 = kh[i], k1 = kh[i + hd2];
+            kh[i]      = k0 * c - k1 * s_;
+            kh[i + hd2] = k0 * s_ + k1 * c;
+        }
+    }
+}
+

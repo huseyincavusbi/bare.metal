@@ -362,3 +362,49 @@ kernel void attention_backward(
         }
     }
 }
+
+// ----------------------------------------------------------------
+// rope_backward_seq (training backward RoPE, full sequence, [S,NH,HD] layout)
+// Backward = transposed rotation R^T by pos=s. Independent of forward input values.
+//   gq[i]    = gout_q[i]*c + gout_q[i+hd2]*s ;  gq[i+hd2] = -gout_q[i]*s + gout_q[i+hd2]*c
+// One thread per (s,h). Grid = S*NH.
+// buffers: [0]=gout_q[S,NH,HD] [1]=gout_k[S,NKV,HD] [2]=gq [3]=gk
+//          [4]=params{head_size,n_kv_heads,S,NH}  [5]=theta
+// ----------------------------------------------------------------
+kernel void rope_backward_seq(
+    device const float* gout_q [[buffer(0)]],
+    device const float* gout_k [[buffer(1)]],
+    device float* gq           [[buffer(2)]],
+    device float* gk           [[buffer(3)]],
+    constant int* p           [[buffer(4)]],
+    constant float& theta      [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int head_size = p[0], n_kv_heads = p[1], S = p[2], NH = p[3];
+    int s = (int)gid / NH;
+    int h = (int)gid - s * NH;
+    if (s >= S || h >= NH) return;
+    int hd2 = head_size / 2;
+    const device float* gqin = gout_q + (s * NH + h) * head_size;
+    device float* gqout = gq + (s * NH + h) * head_size;
+    for (int i = 0; i < hd2; i++) {
+        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float c = cos((float)s * freq);
+        float s_ = sin((float)s * freq);
+        float g0 = gqin[i], g1 = gqin[i + hd2];
+        gqout[i]      =  g0 * c + g1 * s_;
+        gqout[i + hd2] = -g0 * s_ + g1 * c;
+    }
+    if (h < n_kv_heads) {
+        const device float* gkin = gout_k + (s * n_kv_heads + h) * head_size;
+        device float* gkout = gk + (s * n_kv_heads + h) * head_size;
+        for (int i = 0; i < hd2; i++) {
+            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float c = cos((float)s * freq);
+            float s_ = sin((float)s * freq);
+            float g0 = gkin[i], g1 = gkin[i + hd2];
+            gkout[i]      =  g0 * c + g1 * s_;
+            gkout[i + hd2] = -g0 * s_ + g1 * c;
+        }
+    }
+}
