@@ -20,7 +20,13 @@ struct bmt_scheduler_s {
     backend_buffer_t* bkvc;
     backend_buffer_t* dummy_bias;
     backend_kernel_t* q8_kernel;   /* matmul_forward_q8, used for quantized weights */
-    
+
+    backend_buffer_t** grad_buffers;       /* per-tensor fp32 grad (zeroed at create) */
+    backend_kernel_t* k_mm_bwd_inp;        /* matmul_backward_inp */
+    backend_kernel_t* k_mm_bwd_w;          /* matmul_backward_w   */
+    backend_kernel_t* k_rms_bwd_x;         /* rmsnorm_backward_x */
+    backend_kernel_t* k_rms_bwd_w;         /* rmsnorm_backward_w */
+
     int max_seq_len;
     int kv_dim;
     int n_layers;
@@ -59,7 +65,21 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
             }
         }
     }
-    
+
+    /* Gradient buffers: one per tensor, always fp32-sized (grads are fp32 even
+     * for Q8 weights), zeroed (backward kernels accumulate via atomics where
+     * multiple producers write the same grad, e.g. residual stream). */
+    sched->grad_buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
+    for (int i = 0; i < graph->n_tensors; i++) {
+        bmt_tensor_t* t = &graph->tensors[i];
+        size_t n_elems = 1;
+        for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
+        if (n_elems == 0) n_elems = 1024;
+        sched->grad_buffers[i] = backend_buffer_alloc(backend, n_elems * sizeof(float));
+        memset(backend_buffer_map(sched->grad_buffers[i]), 0, n_elems * sizeof(float));
+        backend_buffer_unmap(sched->grad_buffers[i]);
+    }
+
     sched->param_bufs = malloc(graph->n_nodes * sizeof(backend_buffer_t*));
     sched->eps_bufs = malloc(graph->n_nodes * sizeof(backend_buffer_t*));
     sched->pos_bufs = malloc(graph->n_nodes * sizeof(backend_buffer_t*));
@@ -83,7 +103,11 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     backend_buffer_unmap(sched->dummy_bias);
     
     sched->q8_kernel = backend_kernel_create(backend, "matmul_forward_q8");
-    
+    sched->k_mm_bwd_inp = backend_kernel_create(backend, "matmul_backward_inp");
+    sched->k_mm_bwd_w   = backend_kernel_create(backend, "matmul_backward_w");
+    sched->k_rms_bwd_x  = backend_kernel_create(backend, "rmsnorm_backward_x");
+    sched->k_rms_bwd_w  = backend_kernel_create(backend, "rmsnorm_backward_w");
+
     return sched;
 }
 
@@ -91,8 +115,10 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (!sched) return;
     for (int i = 0; i < sched->graph->n_tensors; i++) {
         if (sched->buffers[i]) backend_buffer_free(sched->buffers[i]);
+        if (sched->grad_buffers[i]) backend_buffer_free(sched->grad_buffers[i]);
     }
     free(sched->buffers);
+    free(sched->grad_buffers);
     for (int i = 0; i < sched->graph->n_nodes; i++) {
         backend_buffer_free(sched->param_bufs[i]);
         backend_buffer_free(sched->eps_bufs[i]);
@@ -106,6 +132,10 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     backend_buffer_free(sched->bkvc);
     backend_buffer_free(sched->dummy_bias);
     if (sched->q8_kernel) backend_kernel_destroy(sched->q8_kernel);
+    if (sched->k_mm_bwd_inp) backend_kernel_destroy(sched->k_mm_bwd_inp);
+    if (sched->k_mm_bwd_w)   backend_kernel_destroy(sched->k_mm_bwd_w);
+    if (sched->k_rms_bwd_x)  backend_kernel_destroy(sched->k_rms_bwd_x);
+    if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     free(sched);
 }
 
@@ -318,6 +348,7 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
         
         if (node->op_type == BMK_OP_MATMUL) {
             gtx = (p3 + 31) & ~31;
+            gty = p1;   /* BT (batch*time) -- inference uses BT=1, training uses BT>1 */
             ttx = 32;
         } else if (node->op_type == BMK_OP_NORM_RMS || node->op_type == BMK_OP_FUSED_RESIDUAL_NORM || node->op_type == BMK_OP_NORM_LAYER) {
             gtx = 256;
@@ -355,4 +386,87 @@ void bmt_scheduler_get_output(bmt_scheduler_t* sched, int tensor_id, void* data,
     void* src = backend_buffer_map(sched->buffers[tensor_id]);
     memcpy(data, src, size);
     backend_buffer_unmap(sched->buffers[tensor_id]);
+}
+
+void bmt_scheduler_set_grad(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size) {
+    if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors || !data) return;
+    void* dst = backend_buffer_map(sched->grad_buffers[tensor_id]);
+    memcpy(dst, data, size);
+    backend_buffer_unmap(sched->grad_buffers[tensor_id]);
+}
+
+void bmt_scheduler_get_grad(bmt_scheduler_t* sched, int tensor_id, void* data, size_t size) {
+    if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors || !data) return;
+    void* src = backend_buffer_map(sched->grad_buffers[tensor_id]);
+    memcpy(data, src, size);
+    backend_buffer_unmap(sched->grad_buffers[tensor_id]);
+}
+
+void bmt_scheduler_backward(bmt_scheduler_t* sched) {
+    backend_encoder_t* enc = backend_encode_begin(sched->backend);
+
+    for (int i = sched->graph->n_nodes - 1; i >= 0; i--) {
+        bmt_node_t* node = &sched->graph->nodes[i];
+        if (node->op_type == BMK_OP_COUNT) continue;
+
+        /* ADD backward on CPU: z = x + y -> dz/dx = dz/dy = 1, so both input
+         * grads += grad_out (accumulate, since residual grads have multiple
+         * downstream producers). */
+        if (node->op_type == BMK_OP_ADD) {
+            backend_encode_commit(enc);
+            backend_encode_wait(enc);
+            float* gz = backend_buffer_map(sched->grad_buffers[node->output]);
+            float* g0 = backend_buffer_map(sched->grad_buffers[node->inputs[0]]);
+            float* g1 = backend_buffer_map(sched->grad_buffers[node->inputs[1]]);
+            int D = node->params[0];
+            for (int d = 0; d < D; d++) { g0[d] += gz[d]; g1[d] += gz[d]; }
+            backend_buffer_unmap(sched->grad_buffers[node->output]);
+            backend_buffer_unmap(sched->grad_buffers[node->inputs[0]]);
+            backend_buffer_unmap(sched->grad_buffers[node->inputs[1]]);
+            enc = backend_encode_begin(sched->backend);
+            continue;
+        }
+
+        if (node->op_type == BMK_OP_MATMUL) {
+            int BT = node->params[0], C = node->params[1], OC = node->params[2];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0]=BT; p[1]=C; p[2]=OC;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            /* grad_inp = matmul_backward_inp(gout, w) ; grid (C,BT) tgroup 32 */
+            backend_buffer_t* b1[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[1]],
+                                      sched->grad_buffers[node->inputs[0]], sched->param_bufs[i]};
+            backend_encode_dispatch(enc, sched->k_mm_bwd_inp, b1, NULL, 4, C,BT,1, 32,1,1);
+            /* grad_w = matmul_backward_w(gout, inp) ; grid (C,OC) tgroup 32 */
+            backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
+                                      sched->grad_buffers[node->inputs[1]], sched->param_bufs[i]};
+            backend_encode_dispatch(enc, sched->k_mm_bwd_w, b2, NULL, 4, C,OC,1, 32,1,1);
+            continue;
+        }
+
+        if (node->op_type == BMK_OP_NORM_RMS) {
+            int N = node->params[0], C = node->params[1];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0]=N; p[1]=C;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            float* ef = backend_buffer_map(sched->eps_bufs[i]);
+            ef[0] = node->fparams[0];
+            backend_buffer_unmap(sched->eps_bufs[i]);
+            int tn = N < 256 ? N : 256;
+            /* grad_x = rmsnorm_backward_x(gout, w, x) ; grid (N) */
+            backend_buffer_t* b1[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[1]],
+                                     sched->buffers[node->inputs[0]], sched->grad_buffers[node->inputs[0]],
+                                     sched->param_bufs[i], sched->eps_bufs[i]};
+            backend_encode_dispatch(enc, sched->k_rms_bwd_x, b1, NULL, 6, N,1,1, tn,1,1);
+            /* grad_w = rmsnorm_backward_w(gout, x) ; grid (C) */
+            backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
+                                      sched->grad_buffers[node->inputs[1]], sched->param_bufs[i], sched->eps_bufs[i]};
+            int tc = C < 256 ? C : 256;
+            backend_encode_dispatch(enc, sched->k_rms_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
+            continue;
+        }
+        /* rope/attention/activations/fused backward not yet wired into the walk */
+    }
+
+    backend_encode_commit(enc);
+    backend_encode_wait(enc);
 }
