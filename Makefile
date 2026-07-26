@@ -22,6 +22,7 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/compiler.c \
              src/baremetal/scheduler.c \
              src/baremetal/session.c \
+              src/baremetal/quant.c \
              src/kernels/registry.c \
              tools/cli.c \
              tools/run.c

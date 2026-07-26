@@ -95,6 +95,44 @@ kernel void matmul_forward_tiled(
 }
 
 // ----------------------------------------------------------------
+// Q8_0 quantized matmul forward
+// Weight tensor stored as q8_block_t blocks (fp32 scale + 32 int8),
+// 36 bytes per 32 weights. Dequantizes on the fly: w = q * scale.
+// Layout: weight[oc] is a row of (C/32) blocks. C must be a multiple of 32.
+// Same thread/grid convention as the fp32 naive kernel: gid.x=oc, gid.y=bt.
+// ----------------------------------------------------------------
+typedef struct {
+    float scale;
+    char  q[32];
+} q8_block_metal;  // 36 bytes — must match C q8_block_t layout
+
+kernel void matmul_forward_q8(
+    device const float* inp [[buffer(0)]],
+    device const q8_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int nblocks = C / 32;
+    int bt = gid.y, oc = gid.x;
+    if (bt >= BT || oc >= OC) return;
+    float val = has_bias ? bias[oc] : 0.0f;
+    const device float* inp_bt = inp + bt * C;
+    const device q8_block_metal* wrow = weight + (size_t)oc * nblocks;
+    for (int b = 0; b < nblocks; b++) {
+        float s = wrow[b].scale;
+        const device char* qb = wrow[b].q;
+        const device float* xb = inp_bt + b * 32;
+        for (int i = 0; i < 32; i++) {
+            val += xb[i] * ((float)qb[i] * s);
+        }
+    }
+    out[bt * OC + oc] = val;
+}
+
+// ----------------------------------------------------------------
 // softmax_forward
 // ----------------------------------------------------------------
 kernel void softmax_forward(
