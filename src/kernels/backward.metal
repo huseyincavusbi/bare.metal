@@ -276,3 +276,88 @@ kernel void embedding_backward(
     int tok = tokens[t];
     atomic_fetch_add_explicit(gwte + tok * D + d, gout[t * D + d], memory_order_relaxed);
 }
+
+// ----------------------------------------------------------------
+// attention_backward (causal + GQA + full softmax, sequence mode)
+// Forward (per query pos i, head h, kh=h/kv_mul):
+//   scores[j] = (Q[h,i] . K[kh,j]) * scale,  j in [0,i]   (causal)
+//   p = softmax(scores);  out[h,i] = sum_j p[j] * V[kh,j]
+// Backward (given gout[h,i]):
+//   grad_p[j]  = gout[h,i] . V[kh,j]
+//   gscore[j]  = p[j] * (grad_p[j] - sum_k p[k]*grad_p[k])   (softmax bwd)
+//   grad_Q[h,i] = sum_{j<=i} gscore[j] * K[kh,j]             (local)
+//   grad_K[kh,j]+= gscore[j] * Q[h,i]        (accumulate i>=j, atomic)
+//   grad_V[kh,j]+= p[j]     * gout[h,i]      (accumulate i>=j, atomic)
+// One thread per (h,i). gradK/gradV must be zeroed. MAXS bounds S.
+// buffers: [0]=gout[NH,S,HD] [1]=Q [2]=K[NKV,S,HD] [3]=V [4]=gQ [5]=gK(atomic) [6]=gV(atomic)
+//          [7]=params[NH,S,HD,NKV,kv_mul]  [8]=scale
+// ----------------------------------------------------------------
+#define ATTN_MAXS 256
+kernel void attention_backward(
+    device const float* gout  [[buffer(0)]],
+    device const float* Q     [[buffer(1)]],
+    device const float* K     [[buffer(2)]],
+    device const float* V     [[buffer(3)]],
+    device float* gQ          [[buffer(4)]],
+    device atomic_float* gK   [[buffer(5)]],
+    device atomic_float* gV   [[buffer(6)]],
+    constant int* p           [[buffer(7)]],
+    constant float& scale     [[buffer(8)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int NH = p[0], S = p[1], HD = p[2], kv_mul = p[4];
+    int h = (int)gid / S;
+    int i = (int)gid - h * S;
+    if (h >= NH || i >= S) return;
+    int kh = h / kv_mul;
+
+    const device float* qi = Q   + (h  * S + i) * HD;
+    const device float* gi = gout + (h  * S + i) * HD;
+
+    thread float scores[ATTN_MAXS], pr[ATTN_MAXS], gp[ATTN_MAXS], gs[ATTN_MAXS];
+    int n = i + 1;   // causal: j in [0, i]
+
+    // forward: scores[j] = (qi . K[kh,j]) * scale ; softmax -> pr[j]
+    float mx = -INFINITY;
+    for (int j = 0; j < n; j++) {
+        const device float* kj = K + (kh * S + j) * HD;
+        float s = 0.0f;
+        for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
+        s *= scale;
+        scores[j] = s;
+        if (s > mx) mx = s;
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) { pr[j] = exp(scores[j] - mx); sum += pr[j]; }
+    float inv = 1.0f / sum;
+    for (int j = 0; j < n; j++) pr[j] *= inv;
+
+    // grad_p[j] = gi . V[kh,j] ; gp_dot_p = sum_j p[j]*grad_p[j]
+    float gp_dot_p = 0.0f;
+    for (int j = 0; j < n; j++) {
+        const device float* vj = V + (kh * S + j) * HD;
+        float dp = 0.0f;
+        for (int d = 0; d < HD; d++) dp += gi[d] * vj[d];
+        gp[j] = dp;
+        gp_dot_p += pr[j] * dp;
+    }
+    // gscore[j] = p[j]*(grad_p[j] - gp_dot_p)
+    for (int j = 0; j < n; j++) gs[j] = pr[j] * (gp[j] - gp_dot_p);
+
+    // grad_Q[h,i,d] = scale * sum_j gscore[j]*K[kh,j,d]   (scale: scores = Q.K * scale)
+    device float* gqi = gQ + (h * S + i) * HD;
+    for (int d = 0; d < HD; d++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; j++) acc += gs[j] * K[(kh * S + j) * HD + d];
+        gqi[d] = acc * scale;
+    }
+
+    // grad_K[kh,j,d] += scale*gscore[j]*qi[d] ; grad_V[kh,j,d] += p[j]*gi[d]  (atomic, i>=j)
+    // scale on grad_K only (scores carry scale); grad_V has no scale (V is linear in out).
+    for (int j = 0; j < n; j++) {
+        for (int d = 0; d < HD; d++) {
+            atomic_fetch_add_explicit(gK + (kh * S + j) * HD + d, scale * gs[j] * qi[d], memory_order_relaxed);
+            atomic_fetch_add_explicit(gV + (kh * S + j) * HD + d, pr[j] * gi[d], memory_order_relaxed);
+        }
+    }
+}
