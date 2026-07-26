@@ -171,3 +171,52 @@ kernel void rope_backward(
         }
     }
 }
+
+// ----------------------------------------------------------------
+// gelu_backward (tanh approximation, matches forward gelu_forward)
+// Forward: u = 0.79788456*x*(1+0.044715*x^2); t=tanh(u); cdf=0.5*(1+t); out=x*cdf
+// Backward: grad_x = gout*(cdf + x*dcdx)
+//   dcdx = 0.5*(1-t^2) * 0.79788456*(1 + 3*0.044715*x^2)   [du/dx = 0.79788456*(1+3*0.044715*x^2)]
+// One thread per element. buffers: [0]=gout [1]=x [2]=gx  [3]=N
+// ----------------------------------------------------------------
+kernel void gelu_backward(
+    device const float* gout [[buffer(0)]],
+    device const float* x    [[buffer(1)]],
+    device float* gx         [[buffer(2)]],
+    constant int& N          [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid >= N) return;
+    float xv = x[gid];
+    float u = 0.79788456f * xv * (1.0f + 0.044715f * xv * xv);
+    float t = tanh(u);
+    float cdf = 0.5f * (1.0f + t);
+    float dcdx = 0.5f * (1.0f - t * t) * 0.79788456f * (1.0f + 3.0f * 0.044715f * xv * xv);
+    gx[gid] = gout[gid] * (cdf + xv * dcdx);
+}
+
+// ----------------------------------------------------------------
+// swiglu_backward
+// Forward: silu = x/(1+e^-x); out = silu*up   (x=gate, up=up projection)
+// Backward (s = sigmoid(x) = 1/(1+e^-x)):
+//   grad_gate = gout * up * s * (1 + x*(1-s))
+//   grad_up   = gout * silu = gout * (x*s)
+// One thread per element. buffers: [0]=gate [1]=up [2]=gout [3]=ggate [4]=gup  [5]=N
+// ----------------------------------------------------------------
+kernel void swiglu_backward(
+    device const float* gate [[buffer(0)]],
+    device const float* up   [[buffer(1)]],
+    device const float* gout [[buffer(2)]],
+    device float* ggate      [[buffer(3)]],
+    device float* gup        [[buffer(4)]],
+    constant int& N          [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid >= N) return;
+    float x = gate[gid];
+    float u = up[gid];
+    float g = gout[gid];
+    float s = 1.0f / (1.0f + exp(-x));
+    ggate[gid] = g * u * s * (1.0f + x * (1.0f - s));
+    gup[gid]   = g * (x * s);
+}
