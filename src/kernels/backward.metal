@@ -220,3 +220,37 @@ kernel void swiglu_backward(
     ggate[gid] = g * u * s * (1.0f + x * (1.0f - s));
     gup[gid]   = g * (x * s);
 }
+
+// ----------------------------------------------------------------
+// xent_backward (cross-entropy loss backward, the seed of the backward pass)
+// Forward: loss = -mean_n log(softmax(logits[n])[target[n]])
+//          = -(1/N) sum_n (logits[n,target] - logsumexp(logits[n]))
+// Backward: grad_logits[n,j] = (softmax(logits[n])[j] - 1[j==target[n]]) / N
+// Fused: one thread per row n. Pass 1 writes exp(x-max) into glogits + sums;
+// pass 2 normalizes to softmax and subtracts onehot, divides by N.
+// buffers: [0]=logits[N,V] [1]=targets[N] [2]=glogits[N,V]  params[3]=[N,V]
+// ----------------------------------------------------------------
+kernel void xent_backward(
+    device const float* logits [[buffer(0)]],
+    device const int*   targets[[buffer(1)]],
+    device float* glogits       [[buffer(2)]],
+    constant int* p             [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], V = p[1];
+    int n = (int)gid;
+    if (n >= N) return;
+    const device float* lr = logits + n * V;
+    device float* gr = glogits + n * V;
+    float mx = -INFINITY;
+    for (int j = 0; j < V; j++) if (lr[j] > mx) mx = lr[j];
+    float sum = 0.0f;
+    for (int j = 0; j < V; j++) { float e = exp(lr[j] - mx); gr[j] = e; sum += e; }
+    float inv = 1.0f / sum;
+    int tgt = targets[n];
+    float invN = 1.0f / (float)N;
+    for (int j = 0; j < V; j++) {
+        float p_j = gr[j] * inv;            /* softmax prob */
+        gr[j] = (p_j - (j == tgt ? 1.0f : 0.0f)) * invN;
+    }
+}
