@@ -201,3 +201,100 @@ void bmt_graph_build(bm_model_t* m) {
         }
     }
 }
+
+/* Training graph: same op structure as inference, but
+ *  - sequence length S baked into activation dims and matmul/norm/add params
+ *    (so buffer allocation is S-sized and the scheduler needs no batch override)
+ *  - attention/RoPE keep inference-param shape (forward_train overrides S there)
+ *  - residual ADDs write to NEW tensors (not in-place on t_x): in-place residual
+ *    would make the ADD backward self-add grad[t_x] += grad[t_x] (doubling it).
+ *  - no Q8 marking, no fusion (caller must NOT run bmt_compiler_run). */
+void bmt_graph_build_train(bm_model_t* m, int S) {
+    if (m->graph) bmt_graph_destroy(m->graph);
+    bmt_graph_t* g = bmt_graph_create();
+    m->graph = g;
+
+    int D  = m->arch.dim;
+    int H  = m->arch.hidden_dim;
+    int NH = m->arch.n_heads;
+    int HD = m->head_size;
+    int KV = m->kv_dim;
+    int NKV = m->n_kv_heads;
+    int V  = m->arch.vocab_size;
+    int L  = m->arch.n_layers;
+    float eps = 1e-5f;
+
+    int t_x = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+
+    for (int l = 0; l < L; l++) {
+        int t_ln1w = bmt_graph_add_weight(g, m->ln1w + l*D, 1, (int[]){D});
+        int t_norm1 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_NORM_RMS, 2, (int[]){t_x, t_ln1w}, t_norm1, 2, (int[]){S, D}, 1, (float[]){eps});
+
+        int t_qw = bmt_graph_add_weight(g, m->qw + l*NH*HD*D, 2, (int[]){NH*HD, D});
+        int t_kw = bmt_graph_add_weight(g, m->kw + l*NKV*HD*D, 2, (int[]){KV, D});
+        int t_vw = bmt_graph_add_weight(g, m->vw + l*NKV*HD*D, 2, (int[]){KV, D});
+        int t_q = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, NH*HD});
+        int t_k = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, KV});
+        int t_v = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, KV});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_qw}, t_q, 3, (int[]){S, D, NH*HD}, 0, NULL);
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_kw}, t_k, 3, (int[]){S, D, KV}, 0, NULL);
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_vw}, t_v, 3, (int[]){S, D, KV}, 0, NULL);
+
+        if (m->arch.pos_enc == BM_POS_ROPE) {
+            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, NKV, NH}, 1, (float[]){m->arch.rope_theta});
+        }
+
+        int t_attn_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, NH*HD});
+        bmt_graph_add_node(g, BMK_OP_ATTENTION, 3, (int[]){t_q, t_k, t_v}, t_attn_out, 8, (int[]){NH, HD, NKV, KV, 1, m->kv_mul, l, m->arch.max_seq_len}, 0, NULL);
+
+        int t_attprojw = bmt_graph_add_weight(g, m->attprojw + l*NH*HD*D, 2, (int[]){D, NH*HD});
+        int t_proj_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_attn_out, t_attprojw}, t_proj_out, 3, (int[]){S, NH*HD, D}, 0, NULL);
+
+        int t_res1 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_x, t_proj_out}, t_res1, 1, (int[]){S*D}, 0, NULL);
+
+
+        int t_ln2w = bmt_graph_add_weight(g, m->ln2w + l*D, 1, (int[]){D});
+        int t_ln2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_NORM_RMS, 2, (int[]){t_res1, t_ln2w}, t_ln2, 2, (int[]){S, D}, 1, (float[]){eps});
+
+        int t_fcw_out;
+        if (m->arch.gated_mlp) {
+            int t_fcw  = bmt_graph_add_weight(g, m->fcw  + l*H*D, 2, (int[]){H, D});
+            int t_fcw3 = bmt_graph_add_weight(g, m->fcw3 + l*H*D, 2, (int[]){H, D});
+            t_fcw_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, H});
+            int t_fcw3_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, H});
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw},  t_fcw_out,  3, (int[]){S, D, H}, 0, NULL);
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw3}, t_fcw3_out, 3, (int[]){S, D, H}, 0, NULL);
+            if (m->arch.activation == BM_ACT_SWIGLU) {
+                bmt_graph_add_node(g, BMK_OP_ACT_SWIGLU, 2, (int[]){t_fcw_out, t_fcw3_out}, t_fcw_out, 1, (int[]){S*H}, 0, NULL);
+            } else {
+                bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fcw_out}, t_fcw_out, 1, (int[]){S*H}, 0, NULL);
+            }
+        } else {
+            int t_fcw = bmt_graph_add_weight(g, m->fcw + l*H*D, 2, (int[]){H, D});
+            t_fcw_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, H});
+            bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_ln2, t_fcw}, t_fcw_out, 3, (int[]){S, D, H}, 0, NULL);
+            bmt_graph_add_node(g, BMK_OP_ACT_GELU, 1, (int[]){t_fcw_out}, t_fcw_out, 1, (int[]){S*H}, 0, NULL);
+        }
+
+        int t_fcprojw = bmt_graph_add_weight(g, m->fcprojw + l*D*H, 2, (int[]){D, H});
+        int t_ffn_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_fcw_out, t_fcprojw}, t_ffn_out, 3, (int[]){S, H, D}, 0, NULL);
+
+        int t_res2 = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+        bmt_graph_add_node(g, BMK_OP_ADD, 2, (int[]){t_res1, t_ffn_out}, t_res2, 1, (int[]){S*D}, 0, NULL);
+        t_x = t_res2;
+    }
+
+    int t_lnfw = bmt_graph_add_weight(g, m->lnfw, 1, (int[]){D});
+    int t_norm_f = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, D});
+    bmt_graph_add_node(g, BMK_OP_NORM_RMS, 2, (int[]){t_x, t_lnfw}, t_norm_f, 2, (int[]){S, D}, 1, (float[]){eps});
+
+    int t_wcls = bmt_graph_add_weight(g, m->wcls, 2, (int[]){V, D});
+    int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, V});
+    bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm_f, t_wcls}, t_logits, 3, (int[]){S, D, V}, 0, NULL);
+}
+

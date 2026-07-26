@@ -62,5 +62,6 @@ int bmt_graph_add_node(bmt_graph_t* graph, bmk_op_type_t op_type,
 // High-level API to build the graph for a model
 struct bm_model_s;
 void bmt_graph_build(struct bm_model_s* model);
+void bmt_graph_build_train(struct bm_model_s* model, int S);   /* training: S-sized, separate residuals, no fusion */
 
 #endif
