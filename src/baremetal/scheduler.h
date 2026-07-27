@@ -29,4 +29,10 @@ void bmt_scheduler_get_output(bmt_scheduler_t* sched, int tensor_id, void* data,
 void bmt_scheduler_set_grad(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size);
 void bmt_scheduler_get_grad(bmt_scheduler_t* sched, int tensor_id, void* data, size_t size);
 
+/* Direct buffer access for the trainer (embedding_backward / adamw dispatch
+ * need raw backend_buffer_t* to the forward activation and grad buffers).
+ * Keeps the scheduler struct opaque to everyone else. */
+backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id);
+backend_buffer_t* bmt_scheduler_get_grad_buffer(bmt_scheduler_t* sched, int tensor_id);
+
 #endif

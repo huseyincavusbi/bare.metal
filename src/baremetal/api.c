@@ -171,3 +171,14 @@ void bm_print_model_info(const bm_model_t* model) {
     printf("  weight_tie:  %s\n", a->weight_tie ? "yes" : "no");
     printf("  parameters:  %zu\n", model->n_parameters);
 }
+
+#ifdef BAREMETAL_TRAIN
+#include "baremetal/trainer.h"
+
+bm_trainer_t* bm_create_trainer(bm_context_t* ctx, bm_model_t* model,
+                                const bm_train_config_t* cfg) {
+    /* default sequence length 64 if config doesn't specify; trainer is built
+     * for a fixed S -- rebuild (destroy+create) to change it. */
+    return bmt_trainer_create(ctx, model, cfg, 64);
+}
+#endif /* BAREMETAL_TRAIN */

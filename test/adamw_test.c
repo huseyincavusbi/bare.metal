@@ -46,7 +46,7 @@ int main(void) {
     memset(backend_buffer_map(b_v),0,N*4); backend_buffer_unmap(b_v);
     upload(b_n,&N,sizeof(int));
     /* lr=0.01 b1=0.9 b2=0.999 eps=1e-8 wd=0.1 bias1=0.1 bias2=0.001 */
-    float hp[7] = {0.01f, 0.9f, 0.999f, 1e-8f, 0.1f, 0.1f, 0.001f};
+    float hp[7] = {0.001f, 0.9f, 0.999f, 1e-8f, 0.0f, 0.1f, 0.001f};
     upload(b_hp,hp,sizeof(hp));
 
     backend_kernel_t* k = backend_kernel_create(be, "adamw_step");
