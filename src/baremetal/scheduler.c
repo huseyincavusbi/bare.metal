@@ -776,3 +776,13 @@ float bmt_scheduler_xent_backward(bmt_scheduler_t* sched, int logits_id, const i
     return loss;
 }
 
+
+backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id) {
+    if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors) return NULL;
+    return sched->buffers[tensor_id];
+}
+
+backend_buffer_t* bmt_scheduler_get_grad_buffer(bmt_scheduler_t* sched, int tensor_id) {
+    if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors) return NULL;
+    return sched->grad_buffers[tensor_id];
+}

@@ -24,6 +24,7 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/session.c \
               src/baremetal/quant.c \
               src/baremetal/sampler.c \
+              src/baremetal/trainer.c \
              src/kernels/registry.c \
              tools/cli.c \
              tools/run.c
