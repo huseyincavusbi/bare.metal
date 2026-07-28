@@ -131,10 +131,11 @@ static void embed_backward(bm_trainer_t* t, const int* tokens, int S) {
     memcpy(backend_buffer_map(b_tok), tokens, S * sizeof(int));
     backend_buffer_unmap(b_tok);
 
-    /* grad_wte must be zeroed first (atomic accumulate); then embedding_backward */
+    /* grad_wte is already zeroed at the start of bm_train_step (all grad buffers).
+     * For tied weights, the classifier's matmul_backward_w already wrote its grad
+     * into the same buffer (wcls==wte). DO NOT zero here — the atomic scatter
+     * accumulates on top of the classifier contribution. */
     size_t VD = (size_t)t->model->arch.vocab_size * D;
-    memset(backend_buffer_map(bmt_scheduler_get_grad_buffer(t->sched, wte_id)), 0, VD * sizeof(float));
-    backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, wte_id));
     {
         backend_encoder_t* enc = backend_encode_begin(be);
         backend_buffer_t* bufs[] = { b_tok, bmt_scheduler_get_grad_buffer(t->sched, t->t_x_id),
@@ -179,17 +180,9 @@ static void adamw_apply(bm_trainer_t* t) {
     }
     backend_encode_commit(enc); backend_encode_wait(enc);
 
-    /* copy updated weights back to the CPU master (weight_buffer) so the next
-     * forward uses them, and so save_state can persist them. */
-    for (int i = 0; i < t->n_opt_states; i++) {
-        bmt_adamw_state_t* st = &t->opt_states[i];
-        int wid = st->grad_tensor_id;
-        memcpy(st->weight_ptr, backend_buffer_map(bmt_scheduler_get_buffer(t->sched, wid)), st->n_params * sizeof(float));
-        backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, wid));
-        /* zero the grad buffer for the next step */
-        memset(backend_buffer_map(bmt_scheduler_get_grad_buffer(t->sched, wid)), 0, st->n_params * sizeof(float));
-        backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, wid));
-    }
+    /* Weights stay on the GPU (the forward reads from GPU buffers, which AdamW
+     * updated in-place). No per-step copy-back to CPU — that was 272 host syncs.
+     * Grad buffers are already zeroed at the start of the next bm_train_step. */
 }
 
 float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
