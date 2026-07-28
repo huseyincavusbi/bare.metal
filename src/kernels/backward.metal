@@ -223,6 +223,26 @@ kernel void swiglu_backward(
 }
 
 // ----------------------------------------------------------------
+// add_backward (GPU, no host sync)
+// Forward: out = x + y
+// Backward: grad_x[i] += grad_out[i]; grad_y[i] += grad_out[i]
+// (accumulate, since residual grads have multiple producers)
+// One thread per element. buffers: [0]=gout [1]=gx(atomic) [2]=gy(atomic) [3]=N
+// ----------------------------------------------------------------
+kernel void add_backward(
+    device const float* gout [[buffer(0)]],
+    device atomic_float* gx  [[buffer(1)]],
+    device atomic_float* gy  [[buffer(2)]],
+    constant int& N          [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid >= N) return;
+    float g = gout[gid];
+    atomic_fetch_add_explicit(gx + gid, g, memory_order_relaxed);
+    atomic_fetch_add_explicit(gy + gid, g, memory_order_relaxed);
+}
+
+// ----------------------------------------------------------------
 // xent_backward (cross-entropy loss backward, the seed of the backward pass)
 // Forward: loss = -mean_n log(softmax(logits[n])[target[n]])
 //          = -(1/N) sum_n (logits[n,target] - logsumexp(logits[n]))

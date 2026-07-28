@@ -34,6 +34,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_gelu_bwd;
     backend_kernel_t* k_swiglu_bwd;
     backend_kernel_t* k_xent;        /* xent_backward (loss seed) */
+    backend_kernel_t* k_add_bwd;     /* add_backward (GPU, replaces CPU sync) */
 
     int max_seq_len;
     int kv_dim;
@@ -124,6 +125,7 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     sched->k_gelu_bwd = backend_kernel_create(backend, "gelu_backward");
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
     sched->k_xent = backend_kernel_create(backend, "xent_backward");
+    sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
 
     return sched;
 }
@@ -160,6 +162,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_gelu_bwd) backend_kernel_destroy(sched->k_gelu_bwd);
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
     if (sched->k_xent) backend_kernel_destroy(sched->k_xent);
+    if (sched->k_add_bwd) backend_kernel_destroy(sched->k_add_bwd);
     free(sched);
 }
 
@@ -606,21 +609,21 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
         bmt_node_t* node = &sched->graph->nodes[i];
         if (node->op_type == BMK_OP_COUNT) continue;
 
-        /* ADD backward on CPU: z = x + y -> dz/dx = dz/dy = 1, so both input
-         * grads += grad_out (accumulate, since residual grads have multiple
-         * downstream producers). */
+        /* ADD backward on GPU: grad_x += grad_out, grad_y += grad_out (atomic).
+         * No host sync — keeps the GPU pipeline full. */
         if (node->op_type == BMK_OP_ADD) {
-            backend_encode_commit(enc);
-            backend_encode_wait(enc);
-            float* gz = backend_buffer_map(sched->grad_buffers[node->output]);
-            float* g0 = backend_buffer_map(sched->grad_buffers[node->inputs[0]]);
-            float* g1 = backend_buffer_map(sched->grad_buffers[node->inputs[1]]);
-            int D = node->params[0];
-            for (int d = 0; d < D; d++) { g0[d] += gz[d]; g1[d] += gz[d]; }
-            backend_buffer_unmap(sched->grad_buffers[node->output]);
-            backend_buffer_unmap(sched->grad_buffers[node->inputs[0]]);
-            backend_buffer_unmap(sched->grad_buffers[node->inputs[1]]);
-            enc = backend_encode_begin(sched->backend);
+            int N = node->params[0];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0] = N;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            backend_buffer_t* bufs[] = {
+                sched->grad_buffers[node->output],
+                sched->grad_buffers[node->inputs[0]],
+                sched->grad_buffers[node->inputs[1]],
+                sched->param_bufs[i]
+            };
+            int ttx = N < 256 ? N : 256;
+            backend_encode_dispatch(enc, sched->k_add_bwd, bufs, NULL, 4, N,1,1, ttx,1,1);
             continue;
         }
 
