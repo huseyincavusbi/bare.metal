@@ -3,6 +3,7 @@
 #include "baremetal/graph.h"
 #include "baremetal/compiler.h"
 #include "baremetal/model.h"
+#include "baremetal/types.h"
 #include "kernels/registry.h"
 #include "backend/backend.h"
 #include "utils/log.h"
@@ -44,7 +45,8 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     bmk_register(t->reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
     bmk_register(t->reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
 
-    t->sched = bmt_scheduler_create(ctx->backend_ctx, t->reg, g, S, model->kv_dim, model->arch.n_layers);
+    t->sched = bmt_scheduler_create_with_precision(ctx->backend_ctx, t->reg, g, S, model->kv_dim, model->arch.n_layers, model->precision);
+    t->precision = model->precision;
 
     /* AdamW state: one entry per WEIGHT tensor in the graph. */
     t->n_opt_states = 0;
@@ -67,6 +69,14 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
         int* pp = backend_buffer_map(st->par);
         pp[0] = (int)n;
         backend_buffer_unmap(st->par);
+        /* For mixed precision: keep fp32 master copy for AdamW (2D weights only) */
+        if (t->precision != BM_PRECISION_FP32 && wt->n_dims >= 2) {
+            st->master_w = backend_buffer_alloc(ctx->backend_ctx, n * sizeof(float));
+            memcpy(backend_buffer_map(st->master_w), wt->weight_ptr, n * sizeof(float));
+            backend_buffer_unmap(st->master_w);
+        } else {
+            st->master_w = NULL;
+        }
     }
 
     t->k_adamw = backend_kernel_create(ctx->backend_ctx, "adamw_step");
@@ -87,6 +97,7 @@ void bm_destroy_trainer(bm_trainer_t* t) {
         backend_buffer_free(t->opt_states[i].m);
         backend_buffer_free(t->opt_states[i].v);
         backend_buffer_free(t->opt_states[i].par);
+        if (t->opt_states[i].master_w) backend_buffer_free(t->opt_states[i].master_w);
     }
     free(t->opt_states);
     if (t->k_adamw) backend_kernel_destroy(t->k_adamw);
@@ -119,7 +130,9 @@ void bm_save_state(bm_trainer_t* t, const char* path) {
         float* m_cpu = malloc(n * sizeof(float));
         float* v_cpu = malloc(n * sizeof(float));
 
-        float* w_gpu = backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        float* w_gpu = st->master_w
+            ? (float*)backend_buffer_map(st->master_w)
+            : (float*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
         float* m_gpu = backend_buffer_map(st->m);
         float* v_gpu = backend_buffer_map(st->v);
 
@@ -127,7 +140,8 @@ void bm_save_state(bm_trainer_t* t, const char* path) {
         memcpy(m_cpu, m_gpu, n * sizeof(float));
         memcpy(v_cpu, v_gpu, n * sizeof(float));
 
-        backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        if (st->master_w) backend_buffer_unmap(st->master_w);
+        else backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
         backend_buffer_unmap(st->m);
         backend_buffer_unmap(st->v);
 
@@ -192,7 +206,9 @@ void bm_load_state(bm_trainer_t* t, const char* path) {
             return;
         }
 
-        float* w_gpu = backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        float* w_gpu = st->master_w
+            ? (float*)backend_buffer_map(st->master_w)
+            : (float*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
         float* m_gpu = backend_buffer_map(st->m);
         float* v_gpu = backend_buffer_map(st->v);
 
@@ -200,7 +216,8 @@ void bm_load_state(bm_trainer_t* t, const char* path) {
         memcpy(m_gpu, m_cpu, n * sizeof(float));
         memcpy(v_gpu, v_cpu, n * sizeof(float));
 
-        backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        if (st->master_w) backend_buffer_unmap(st->master_w);
+        else backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
         backend_buffer_unmap(st->m);
         backend_buffer_unmap(st->v);
 
@@ -288,17 +305,40 @@ static void adamw_apply(bm_trainer_t* t) {
     for (int i = 0; i < t->n_opt_states; i++) {
         bmt_adamw_state_t* st = &t->opt_states[i];
         int wid = st->grad_tensor_id;
-        backend_buffer_t* b_w = bmt_scheduler_get_buffer(t->sched, wid);       /* fp32 master weight */
-        backend_buffer_t* b_g = bmt_scheduler_get_grad_buffer(t->sched, wid);  /* gradient */
+        backend_buffer_t* b_g = bmt_scheduler_get_grad_buffer(t->sched, wid);
         int n = (int)st->n_params;
+        /* In mixed precision: AdamW updates fp32 master, then we convert to bf16 working */
+        backend_buffer_t* b_w = st->master_w ? st->master_w : bmt_scheduler_get_buffer(t->sched, wid);
         backend_buffer_t* bufs[] = { b_w, b_g, st->m, st->v, st->par, t->k_adamw_hp };
         backend_encode_dispatch(enc, t->k_adamw, bufs, NULL, 6, n, 1, 1, n < 256 ? n : 256, 1, 1);
     }
     backend_encode_commit(enc); backend_encode_wait(enc);
 
-    /* Weights stay on the GPU (the forward reads from GPU buffers, which AdamW
-     * updated in-place). No per-step copy-back to CPU — that was 272 host syncs.
-     * Grad buffers are already zeroed at the start of the next bm_train_step. */
+    /* Mixed precision: convert fp32 master → bf16/fp16 working buffer.
+     * Only convert 2D weights (norm weights stay fp32 on GPU). */
+    if (t->precision != BM_PRECISION_FP32) {
+        bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
+        for (int i = 0; i < t->n_opt_states; i++) {
+            bmt_adamw_state_t* st = &t->opt_states[i];
+            int wid = st->grad_tensor_id;
+            if (!st->master_w) continue;
+            int n = (int)st->n_params;
+            float* master = (float*)backend_buffer_map(st->master_w);
+            if (t->precision == BM_PRECISION_BF16) {
+                bm_bf16_t* work = (bm_bf16_t*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, wid));
+                bm_f32_to_bf16_array(master, work, n);
+                backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, wid));
+            } else if (t->precision == BM_PRECISION_FP16) {
+                bm_fp16_t* work = (bm_fp16_t*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, wid));
+                for (int j = 0; j < n; j++) {
+                    __fp16 h = (__fp16)master[j];
+                    memcpy(&work[j], &h, sizeof(bm_fp16_t));
+                }
+                backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, wid));
+            }
+            backend_buffer_unmap(st->master_w);
+        }
+    }
 }
 
 float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
