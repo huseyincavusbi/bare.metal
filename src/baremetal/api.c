@@ -177,8 +177,7 @@ void bm_print_model_info(const bm_model_t* model) {
 
 bm_trainer_t* bm_create_trainer(bm_context_t* ctx, bm_model_t* model,
                                 const bm_train_config_t* cfg) {
-    /* default sequence length 64 if config doesn't specify; trainer is built
-     * for a fixed S -- rebuild (destroy+create) to change it. */
-    return bmt_trainer_create(ctx, model, cfg, 64);
+    int S = (cfg->seq_len > 0) ? cfg->seq_len : 64;
+    return bmt_trainer_create(ctx, model, cfg, S);
 }
 #endif /* BAREMETAL_TRAIN */

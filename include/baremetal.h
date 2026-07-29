@@ -82,6 +82,7 @@ typedef struct {
     int   warmup_steps;
     int   max_steps;
     int   use_master_weights;
+    int   seq_len;
 } bm_train_config_t;
 
 /* ---- Opaque types ---- */
