@@ -82,6 +82,7 @@ backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size) {
     backend_buffer_t* buf = calloc(1, sizeof(backend_buffer_t));
     buf->buffer = (__bridge_retained void*)buffer;
     buf->size   = size;
+    ctx->allocated_bytes += size;
     return buf;
 }
 
@@ -92,6 +93,11 @@ void backend_buffer_free(backend_buffer_t* buf) {
         (void)b;
     }
     free(buf);
+}
+
+size_t backend_get_allocated_memory(backend_ctx_t* ctx) {
+    if (!ctx) return 0;
+    return ctx->allocated_bytes;
 }
 
 void* backend_buffer_map(backend_buffer_t* buf) {
