@@ -28,6 +28,50 @@ kernel void matmul_backward_inp(
 
 
 // ----------------------------------------------------------------
+// matmul_backward_inp_bf16
+// Same as above but weight is bf16 (cast to float for compute).
+// ----------------------------------------------------------------
+#if __HAVE_BFLOAT__
+kernel void matmul_backward_inp_bf16(
+    device const float* gout [[buffer(0)]],
+    device const bfloat* w   [[buffer(1)]],
+    device float* ginp       [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int bt = gid.y, i = gid.x;
+    if (bt >= BT || i >= C) return;
+    float acc = 0.0f;
+    for (int oc = 0; oc < OC; oc++) {
+        acc += gout[bt * OC + oc] * (float)w[oc * C + i];
+    }
+    ginp[bt * C + i] += acc;
+}
+#endif
+
+// ----------------------------------------------------------------
+// matmul_backward_inp_fp16
+// ----------------------------------------------------------------
+kernel void matmul_backward_inp_fp16(
+    device const float* gout [[buffer(0)]],
+    device const half* w     [[buffer(1)]],
+    device float* ginp       [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int bt = gid.y, i = gid.x;
+    if (bt >= BT || i >= C) return;
+    float acc = 0.0f;
+    for (int oc = 0; oc < OC; oc++) {
+        acc += gout[bt * OC + oc] * (float)w[oc * C + i];
+    }
+    ginp[bt * C + i] += acc;
+}
+
+
+// ----------------------------------------------------------------
 // matmul_backward_w
 // Backward wrt weight:  grad_w[oc,i] = sum_bt gout[bt,oc] * inp[bt,i]
 // Grid: (C, OC) — one thread per (oc, i).

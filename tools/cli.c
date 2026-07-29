@@ -362,6 +362,7 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "  --lr <float>        Learning rate (default: 3e-4)\n");
         fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
         fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
+        fprintf(stderr, "  --precision <bf16|fp16|fp32>  Weight precision (default: fp32)\n");
         return 1;
     }
     const char* model_dir = argv[2];
@@ -374,6 +375,7 @@ static int cmd_train(int argc, char** argv) {
     float lr = 3e-4f;
     int save_every = 0;
     const char* resume_path = NULL;
+    const char* prec_str = NULL;
 
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
@@ -382,6 +384,7 @@ static int cmd_train(int argc, char** argv) {
         else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
+        else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
     }
 
     if (batch_size < 1) {
@@ -426,6 +429,12 @@ static int cmd_train(int argc, char** argv) {
     cfg.warmup_steps = 10;
     cfg.max_steps = max_steps;
     cfg.seq_len = seq_len;
+
+    if (prec_str) {
+        if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;
+        else if (strcmp(prec_str, "fp16") == 0) model->precision = BM_PRECISION_FP16;
+        else model->precision = BM_PRECISION_FP32;
+    }
 
     bm_trainer_t* trainer = bm_create_trainer(ctx, model, &cfg);
     if (!trainer) {
