@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include "baremetal/types.h"
 
 /* ---- Architecture descriptor ---- */
 
@@ -98,6 +99,7 @@ typedef struct bm_tokenizer_s    bm_tokenizer_t;
 
 bm_context_t*  bm_create(bm_device_t device);
 void           bm_destroy(bm_context_t* ctx);
+bm_precision_t bm_get_supported_precision(bm_context_t* ctx);
 
 /* ---- Model ---- */
 
