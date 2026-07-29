@@ -24,6 +24,8 @@ struct bmt_scheduler_s {
     backend_kernel_t* q8_kernel;   /* matmul_forward_q8, used for quantized weights */
     backend_kernel_t* bf16_kernel; /* matmul_forward_bf16 */
     backend_kernel_t* fp16_kernel; /* matmul_forward_fp16 */
+    backend_kernel_t* bf16_cls_kernel; /* rmsnorm_matmul_forward_bf16 */
+    backend_kernel_t* fp16_cls_kernel; /* rmsnorm_matmul_forward_fp16 */
 
     backend_buffer_t** grad_buffers;       /* per-tensor fp32 grad (zeroed at create) */
     backend_kernel_t* k_mm_bwd_inp;        /* matmul_backward_inp */
@@ -122,6 +124,8 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     sched->q8_kernel = backend_kernel_create(backend, "matmul_forward_q8");
     sched->bf16_kernel = backend_kernel_create(backend, "matmul_forward_bf16");
     sched->fp16_kernel = backend_kernel_create(backend, "matmul_forward_fp16");
+    sched->bf16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16");
+    sched->fp16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_fp16");
     sched->k_mm_bwd_inp = backend_kernel_create(backend, "matmul_backward_inp");
     sched->k_mm_bwd_w   = backend_kernel_create(backend, "matmul_backward_w");
     sched->k_rms_bwd_x  = backend_kernel_create(backend, "rmsnorm_backward_x");
@@ -164,6 +168,8 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->q8_kernel) backend_kernel_destroy(sched->q8_kernel);
     if (sched->bf16_kernel) backend_kernel_destroy(sched->bf16_kernel);
     if (sched->fp16_kernel) backend_kernel_destroy(sched->fp16_kernel);
+    if (sched->bf16_cls_kernel) backend_kernel_destroy(sched->bf16_cls_kernel);
+    if (sched->fp16_cls_kernel) backend_kernel_destroy(sched->fp16_cls_kernel);
     if (sched->k_mm_bwd_inp) backend_kernel_destroy(sched->k_mm_bwd_inp);
     if (sched->k_mm_bwd_w)   backend_kernel_destroy(sched->k_mm_bwd_w);
     if (sched->k_rms_bwd_x)  backend_kernel_destroy(sched->k_rms_bwd_x);
@@ -266,11 +272,15 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
         backend_kernel_t* kn;
         if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized && sched->q8_kernel) {
-            kn = sched->q8_kernel;   /* quantized weight -> Q8 dequantizing matmul */
+            kn = sched->q8_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_BF16 && sched->bf16_kernel) {
             kn = sched->bf16_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16 && sched->fp16_kernel) {
             kn = sched->fp16_kernel;
+        } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_BF16 && sched->bf16_cls_kernel) {
+            kn = sched->bf16_cls_kernel;
+        } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_FP16 && sched->fp16_cls_kernel) {
+            kn = sched->fp16_cls_kernel;
         } else {
             kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
         }
