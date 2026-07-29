@@ -6,6 +6,7 @@ struct backend_ctx_s {
     void* queue;
     void* library;
     int   supports_bf16;
+    size_t allocated_bytes;
 };
 
 struct backend_buffer_s {
