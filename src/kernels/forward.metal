@@ -432,6 +432,56 @@ kernel void residual_rmsnorm_forward(
 }
 
 // ----------------------------------------------------------------
+// residual_rmsnorm_forward_train
+// Training-safe variant: does NOT modify x in-place.
+// Computes y = x + residual on the fly, outputs rmsnorm(y, w).
+// Backward kernels recompute y the same way (no stored y buffer).
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_forward_train(
+    device const float* x [[buffer(0)]],
+    device const float* residual [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* p [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)tgid.x;
+    int tid = (int)tid3.x;
+    int tptg = (int)tptg3.x;
+    if (row >= N) return;
+
+    float local_ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = x[row * C + j] + residual[row * C + j];
+        local_ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_ss += simd_shuffle_down(local_ss, (ushort)off);
+
+    threadgroup float shared_buf[32];
+    if (tid % 32 == 0) shared_buf[tid / 32] = local_ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? shared_buf[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) shared_buf[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ss = shared_buf[0] / (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    for (int j = tid; j < C; j += tptg) {
+        float v = x[row * C + j] + residual[row * C + j];
+        out[row * C + j] = v * inv_rms * weight[j];
+    }
+}
+
+// ----------------------------------------------------------------
 // gelu_forward
 // ----------------------------------------------------------------
 kernel void gelu_forward(
