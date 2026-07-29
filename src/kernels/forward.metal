@@ -34,6 +34,54 @@ kernel void matmul_forward_naive(
 }
 
 // ----------------------------------------------------------------
+// matmul_forward_bf16
+// Same as naive but weights stored as bf16 (2x memory savings).
+// Reads bf16, casts to float for computation, outputs float.
+// ----------------------------------------------------------------
+#if __HAVE_BFLOAT__
+kernel void matmul_forward_bf16(
+    device const float* inp [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int bt = gid.y, oc = gid.x;
+    if (bt >= BT || oc >= OC) return;
+    float val = has_bias ? bias[oc] : 0.0f;
+    const device float* inp_bt = inp + bt * C;
+    const device bfloat* wrow = weight + oc * C;
+    for (int i = 0; i < C; i++) val += inp_bt[i] * (float)wrow[i];
+    out[bt * OC + oc] = val;
+}
+#endif
+
+// ----------------------------------------------------------------
+// matmul_forward_fp16
+// Same as naive but weights stored as fp16 (2x memory savings).
+// Reads half, casts to float for computation, outputs float.
+// ----------------------------------------------------------------
+kernel void matmul_forward_fp16(
+    device const float* inp [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int bt = gid.y, oc = gid.x;
+    if (bt >= BT || oc >= OC) return;
+    float val = has_bias ? bias[oc] : 0.0f;
+    const device float* inp_bt = inp + bt * C;
+    const device half* wrow = weight + oc * C;
+    for (int i = 0; i < C; i++) val += inp_bt[i] * (float)wrow[i];
+    out[bt * OC + oc] = val;
+}
+
+// ----------------------------------------------------------------
 // matmul_forward_tiled
 // Tiled GEMM with threadgroup shared memory for input reuse.
 // One threadgroup computes BN output elements, reusing one shared
