@@ -94,8 +94,119 @@ void bm_destroy_trainer(bm_trainer_t* t) {
     free(t);
 }
 
-void bm_load_state(bm_trainer_t* t, const char* path) { (void)t; (void)path; }
-void bm_save_state(bm_trainer_t* t, const char* path) { (void)t; (void)path; }
+void bm_save_state(bm_trainer_t* t, const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        BMT_LOG_ERROR("bm_save_state: cannot open %s", path);
+        return;
+    }
+
+    int step = t->step;
+    int n_states = t->n_opt_states;
+    fwrite(&step, sizeof(int), 1, f);
+    fwrite(&n_states, sizeof(int), 1, f);
+
+    for (int i = 0; i < n_states; i++) {
+        bmt_adamw_state_t* st = &t->opt_states[i];
+        size_t n = st->n_params;
+
+        float* w_cpu = malloc(n * sizeof(float));
+        float* m_cpu = malloc(n * sizeof(float));
+        float* v_cpu = malloc(n * sizeof(float));
+
+        float* w_gpu = backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        float* m_gpu = backend_buffer_map(st->m);
+        float* v_gpu = backend_buffer_map(st->v);
+
+        memcpy(w_cpu, w_gpu, n * sizeof(float));
+        memcpy(m_cpu, m_gpu, n * sizeof(float));
+        memcpy(v_cpu, v_gpu, n * sizeof(float));
+
+        backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        backend_buffer_unmap(st->m);
+        backend_buffer_unmap(st->v);
+
+        fwrite(&n, sizeof(size_t), 1, f);
+        fwrite(w_cpu, sizeof(float), n, f);
+        fwrite(m_cpu, sizeof(float), n, f);
+        fwrite(v_cpu, sizeof(float), n, f);
+
+        free(w_cpu);
+        free(m_cpu);
+        free(v_cpu);
+    }
+
+    fclose(f);
+    BMT_LOG_INFO("bm_save_state: saved step=%d, %d weight tensors to %s", step, n_states, path);
+}
+
+void bm_load_state(bm_trainer_t* t, const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        BMT_LOG_ERROR("bm_load_state: cannot open %s", path);
+        return;
+    }
+
+    int step, n_states;
+    if (fread(&step, sizeof(int), 1, f) != 1 ||
+        fread(&n_states, sizeof(int), 1, f) != 1) {
+        BMT_LOG_ERROR("bm_load_state: failed to read header");
+        fclose(f);
+        return;
+    }
+
+    if (n_states != t->n_opt_states) {
+        BMT_LOG_ERROR("bm_load_state: state has %d tensors, trainer has %d", n_states, t->n_opt_states);
+        fclose(f);
+        return;
+    }
+
+    t->step = step;
+
+    for (int i = 0; i < n_states; i++) {
+        bmt_adamw_state_t* st = &t->opt_states[i];
+        size_t n;
+        if (fread(&n, sizeof(size_t), 1, f) != 1 || n != st->n_params) {
+            BMT_LOG_ERROR("bm_load_state: tensor %d size mismatch", i);
+            fclose(f);
+            return;
+        }
+
+        float* w_cpu = malloc(n * sizeof(float));
+        float* m_cpu = malloc(n * sizeof(float));
+        float* v_cpu = malloc(n * sizeof(float));
+
+        if (fread(w_cpu, sizeof(float), n, f) != n ||
+            fread(m_cpu, sizeof(float), n, f) != n ||
+            fread(v_cpu, sizeof(float), n, f) != n) {
+            BMT_LOG_ERROR("bm_load_state: failed to read tensor %d data", i);
+            free(w_cpu);
+            free(m_cpu);
+            free(v_cpu);
+            fclose(f);
+            return;
+        }
+
+        float* w_gpu = backend_buffer_map(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        float* m_gpu = backend_buffer_map(st->m);
+        float* v_gpu = backend_buffer_map(st->v);
+
+        memcpy(w_gpu, w_cpu, n * sizeof(float));
+        memcpy(m_gpu, m_cpu, n * sizeof(float));
+        memcpy(v_gpu, v_cpu, n * sizeof(float));
+
+        backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, st->grad_tensor_id));
+        backend_buffer_unmap(st->m);
+        backend_buffer_unmap(st->v);
+
+        free(w_cpu);
+        free(m_cpu);
+        free(v_cpu);
+    }
+
+    fclose(f);
+    BMT_LOG_INFO("bm_load_state: loaded step=%d, %d weight tensors from %s", step, n_states, path);
+}
 
 /* find the graph weight tensor id for a given weight_ptr */
 static int find_wt_id(bmt_graph_t* g, void* ptr) {

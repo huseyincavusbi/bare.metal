@@ -18,6 +18,7 @@ extern int bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
                          int steps, float temperature, int top_k, float top_p,
                          uint64_t seed, bm_token_cb_t callback, void* user_data);
 
+#ifdef BAREMETAL_TRAIN
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
     printf("Usage: %s <command> [options]\n\n", prog);
@@ -26,6 +27,9 @@ static void print_usage(const char* prog) {
     printf("  run-tokens <model_dir> <prompt.bin> <output.bin>  Run with pre-tokenized input\n");
     printf("  tok-test <model_dir> <text>      Test tokenizer encode/decode\n");
     printf("  info <checkpoint>           Print model information\n");
+#ifdef BAREMETAL_TRAIN
+    printf("  train <model_dir> <data_file> <output_dir>  Train model on text data\n");
+#endif
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
     printf("  test-kernels                Test all forward kernels\n");
@@ -36,6 +40,7 @@ static void print_usage(const char* prog) {
     printf("  -s, --seed <int>            RNG seed (default: time-based)\n");
     printf("      --quant <q8>            Quantize matmul weights to Q8 (default: off/fp32)\n");
 }
+#endif
 
 static int cmd_test_dispatch(void) {
 #define TEST_N 8
@@ -341,6 +346,117 @@ static int cmd_tok_test(int argc, char** argv) {
     return 0;
 }
 
+#ifdef BAREMETAL_TRAIN
+static int cmd_train(int argc, char** argv) {
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s train <model_dir> <data_file> <output_dir> [options]\n", argv[0]);
+        fprintf(stderr, "  --steps <int>       Max training steps (default: 100)\n");
+        fprintf(stderr, "  --seq-len <int>     Sequence length S (default: 64)\n");
+        fprintf(stderr, "  --lr <float>        Learning rate (default: 3e-4)\n");
+        fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
+        fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
+        return 1;
+    }
+    const char* model_dir = argv[2];
+    const char* data_file = argv[3];
+    const char* output_dir = argv[4];
+
+    int max_steps = 100;
+    int seq_len = 64;
+    float lr = 3e-4f;
+    int save_every = 0;
+    const char* resume_path = NULL;
+
+    for (int i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--seq-len") == 0 && i+1 < argc) seq_len = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
+    }
+
+    bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+    bm_model_t* model = calloc(1, sizeof(*model));
+    bm_load_weights(model, model_dir);
+    bm_print_model_info(model);
+
+    bm_tokenizer_t tok;
+    bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
+
+    FILE* f = fopen(data_file, "r");
+    if (!f) {
+        fprintf(stderr, "Cannot open data file: %s\n", data_file);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* text = malloc(fsize + 1);
+    fread(text, 1, fsize, f);
+    text[fsize] = 0;
+    fclose(f);
+
+    int* tokens = malloc(fsize * sizeof(int));
+    int n_tokens = 0;
+    bm_tokenizer_encode(&tok, text, 0, 0, tokens, &n_tokens);
+    free(text);
+    fprintf(stderr, "[train] loaded %d tokens from %s\n", n_tokens, data_file);
+
+    bm_train_config_t cfg = {0};
+    cfg.learning_rate = lr;
+    cfg.beta1 = 0.9f;
+    cfg.beta2 = 0.95f;
+    cfg.epsilon = 1e-8f;
+    cfg.weight_decay = 0.0f;
+    cfg.grad_clip = 1.0f;
+    cfg.warmup_steps = 10;
+    cfg.max_steps = max_steps;
+    cfg.seq_len = seq_len;
+
+    bm_trainer_t* trainer = bm_create_trainer(ctx, model, &cfg);
+    if (!trainer) {
+        fprintf(stderr, "Failed to create trainer\n");
+        return 1;
+    }
+
+    if (resume_path) {
+        bm_load_state(trainer, resume_path);
+        fprintf(stderr, "[train] resumed from %s\n", resume_path);
+    }
+
+    int* inputs = malloc(seq_len * sizeof(int));
+    int* targets = malloc(seq_len * sizeof(int));
+    int pos = 0;
+
+    for (int step = 0; step < max_steps; step++) {
+        for (int i = 0; i < seq_len; i++) {
+            inputs[i] = tokens[pos % n_tokens];
+            targets[i] = tokens[(pos + 1) % n_tokens];
+            pos++;
+        }
+
+        float loss = bm_train_step(trainer, inputs, targets, 1, seq_len);
+        printf("step %d/%d: loss=%.4f\n", step + 1, max_steps, loss);
+
+        if (save_every > 0 && (step + 1) % save_every == 0) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s/checkpoint_%d.bin", output_dir, step + 1);
+            bm_save_state(trainer, path);
+            fprintf(stderr, "[train] saved checkpoint to %s\n", path);
+        }
+    }
+
+    free(inputs);
+    free(targets);
+    free(tokens);
+    bm_tokenizer_free(&tok);
+    bm_destroy_trainer(trainer);
+    bm_destroy_model(model);
+    bm_destroy(ctx);
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
     const char* cmd = argv[1];
@@ -350,6 +466,9 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "test-kernels") == 0) return cmd_test_kernels();
     if (strcmp(cmd, "run-tokens") == 0) return cmd_run_tokens(argc, argv);
     if (strcmp(cmd, "tok-test") == 0) return cmd_tok_test(argc, argv);
+#ifdef BAREMETAL_TRAIN
+    if (strcmp(cmd, "train") == 0) return cmd_train(argc, argv);
+#endif
 
     if (strcmp(cmd, "info") == 0) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
