@@ -548,7 +548,7 @@ int main(int argc, char** argv) {
             else if (strcmp(prec_str, "fp16") == 0) model->precision = BM_PRECISION_FP16;
             else model->precision = BM_PRECISION_FP32;
         } else {
-            model->precision = BM_PRECISION_FP32;
+            model->precision = bm_get_supported_precision(ctx);
         }
         bm_print_model_info(model);
 
