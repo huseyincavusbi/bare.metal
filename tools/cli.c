@@ -45,6 +45,7 @@ static void print_usage(const char* prog) {
     printf("  -n, --steps <int>           Max generation steps (default: 256)\n");
     printf("  -s, --seed <int>            RNG seed (default: time-based)\n");
     printf("      --quant <q8>            Quantize matmul weights to Q8 (default: off/fp32)\n");
+    printf("      --precision <bf16|fp16|fp32>  Weight precision (default: fp32)\n");
 }
 
 static int cmd_test_dispatch(void) {
@@ -507,6 +508,7 @@ int main(int argc, char** argv) {
         float top_p = 0.9f;
         uint64_t seed = 0;
         int quant = 0;
+        const char* prec_str = NULL;
 
         for (int i = 3; i < argc; i++) {
             if (argv[i][0] == '-' && argv[i][1] == '-') {
@@ -516,6 +518,7 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--top-p") == 0 && i+1 < argc) top_p = (float)atof(argv[++i]);
                 else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = (uint64_t)atoll(argv[++i]);
                 else if (strcmp(argv[i], "--quant") == 0 && i+1 < argc) { const char* q = argv[++i]; quant = (strcmp(q, "q8") == 0); }
+                else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -531,6 +534,13 @@ int main(int argc, char** argv) {
         bm_model_t* model = calloc(1, sizeof(*model));
         bm_load_weights(model, model_dir);
         model->quantized = quant;
+        if (prec_str) {
+            if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;
+            else if (strcmp(prec_str, "fp16") == 0) model->precision = BM_PRECISION_FP16;
+            else model->precision = BM_PRECISION_FP32;
+        } else {
+            model->precision = BM_PRECISION_FP32;
+        }
         bm_print_model_info(model);
 
         bm_tokenizer_t tok;

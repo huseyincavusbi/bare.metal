@@ -18,7 +18,15 @@ backend_ctx_t* backend_create(void) {
     ctx->device = (__bridge_retained void*)device;
     ctx->queue  = (__bridge_retained void*)[device newCommandQueue];
 
-    BMT_LOG_INFO("Metal device: %s", [[device name] UTF8String]);
+    if (@available(macOS 13.0, *)) {
+        ctx->supports_bf16 = [device supportsFamily:MTLGPUFamilyMetal3];
+    } else {
+        ctx->supports_bf16 = 0;
+    }
+
+    BMT_LOG_INFO("Metal device: %s (bf16: %s)",
+                 [[device name] UTF8String],
+                 ctx->supports_bf16 ? "yes" : "no");
 
     NSString* path = [[NSBundle mainBundle] pathForResource:@"default"
                                                      ofType:@"metallib"];

@@ -4,6 +4,8 @@
 #include "baremetal/checkpoint.h"
 #include "baremetal/sampler.h"
 #include "baremetal/tokenizer.h"
+#include "backend/backend.h"
+#include "backend/metal/device.h"
 #include "utils/log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,12 @@ bm_context_t* bm_create(bm_device_t device) {
 
 void bm_destroy(bm_context_t* ctx) {
     bmt_context_destroy(ctx);
+}
+
+bm_precision_t bm_get_supported_precision(bm_context_t* ctx) {
+    if (!ctx || !ctx->backend_ctx) return BM_PRECISION_FP32;
+    if (ctx->backend_ctx->supports_bf16) return BM_PRECISION_BF16;
+    return BM_PRECISION_FP16;
 }
 
 bm_model_t* bm_create_model(bm_context_t* ctx, const bm_arch_t* arch) {
@@ -169,6 +177,8 @@ void bm_print_model_info(const bm_model_t* model) {
     printf("  attention:   %s\n", a->attention == BM_ATTN_MHA ? "MHA" : "GQA");
     printf("  bias:        %s\n", a->bias ? "yes" : "no");
     printf("  weight_tie:  %s\n", a->weight_tie ? "yes" : "no");
+    printf("  precision:   %s\n", model->precision == BM_PRECISION_BF16 ? "bf16" :
+                                 model->precision == BM_PRECISION_FP16 ? "fp16" : "fp32");
     printf("  parameters:  %zu\n", model->n_parameters);
 }
 

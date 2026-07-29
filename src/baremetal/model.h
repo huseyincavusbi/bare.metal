@@ -6,6 +6,7 @@
 
 struct bm_model_s {
     bm_arch_t arch;
+    bm_precision_t precision;
 
     size_t   n_parameters;
 

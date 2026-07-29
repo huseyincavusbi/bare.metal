@@ -5,6 +5,7 @@ struct backend_ctx_s {
     void* device;
     void* queue;
     void* library;
+    int   supports_bf16;
 };
 
 struct backend_buffer_s {
