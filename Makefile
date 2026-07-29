@@ -6,7 +6,7 @@ BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
 
 CC      := clang
-CFLAGS  := -std=c11 -Wall -Wextra -O2 -I include -I src
+CFLAGS  := -std=c11 -Wall -Wextra -O2 -I include -I src -DBAREMETAL_TRAIN
 LDFLAGS := -framework Metal -framework Foundation
 
 OBJC_SRCS := src/backend/metal/device.m \
@@ -41,7 +41,6 @@ all: dirs baremetal
 
 baremetal: dirs $(BINARY)
 
-baremetal-train: CFLAGS += -DBAREMETAL_TRAIN
 baremetal-train: dirs $(BINARY_TRAIN)
 
 dirs:
