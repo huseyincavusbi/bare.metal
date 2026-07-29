@@ -8,7 +8,6 @@
 
 int bmt_checkpoint_load(bm_model_t* model, const char* path);
 int bmt_checkpoint_save(bm_model_t* model, const char* path);
-int bmt_checkpoint_load_legacy_llama2c(bm_model_t* model, const char* path);
 int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path);
 
 #endif
