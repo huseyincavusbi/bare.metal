@@ -18,7 +18,6 @@ extern int bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
                          int steps, float temperature, int top_k, float top_p,
                          uint64_t seed, bm_token_cb_t callback, void* user_data);
 
-#ifdef BAREMETAL_TRAIN
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
     printf("Usage: %s <command> [options]\n\n", prog);
@@ -40,7 +39,6 @@ static void print_usage(const char* prog) {
     printf("  -s, --seed <int>            RNG seed (default: time-based)\n");
     printf("      --quant <q8>            Quantize matmul weights to Q8 (default: off/fp32)\n");
 }
-#endif
 
 static int cmd_test_dispatch(void) {
 #define TEST_N 8

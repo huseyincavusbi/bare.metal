@@ -35,6 +35,8 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_swiglu_bwd;
     backend_kernel_t* k_xent;        /* xent_backward (loss seed) */
     backend_kernel_t* k_add_bwd;     /* add_backward (GPU, replaces CPU sync) */
+    backend_kernel_t* k_resnorm_bwd; /* residual_rmsnorm_backward (fused) */
+    backend_kernel_t* k_resnorm_bwd_w; /* residual_rmsnorm_backward_w (fused weight grad) */
 
     int max_seq_len;
     int kv_dim;
@@ -126,6 +128,8 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
     sched->k_xent = backend_kernel_create(backend, "xent_backward");
     sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
+    sched->k_resnorm_bwd = backend_kernel_create(backend, "residual_rmsnorm_backward");
+    sched->k_resnorm_bwd_w = backend_kernel_create(backend, "residual_rmsnorm_backward_w");
 
     return sched;
 }
@@ -163,6 +167,8 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
     if (sched->k_xent) backend_kernel_destroy(sched->k_xent);
     if (sched->k_add_bwd) backend_kernel_destroy(sched->k_add_bwd);
+    if (sched->k_resnorm_bwd) backend_kernel_destroy(sched->k_resnorm_bwd);
+    if (sched->k_resnorm_bwd_w) backend_kernel_destroy(sched->k_resnorm_bwd_w);
     free(sched);
 }
 
@@ -662,6 +668,40 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
                                       sched->grad_buffers[node->inputs[1]], sched->param_bufs[i], sched->eps_bufs[i]};
             int tc = C < 256 ? C : 256;
             backend_encode_dispatch(enc, sched->k_rms_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
+            continue;
+        }
+
+        if (node->op_type == BMK_OP_FUSED_RESIDUAL_NORM) {
+            int N = node->params[0], C = node->params[1];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0]=N; p[1]=C;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            float* ef = backend_buffer_map(sched->eps_bufs[i]);
+            ef[0] = node->fparams[0];
+            backend_buffer_unmap(sched->eps_bufs[i]);
+            int tn = N < 256 ? N : 256;
+            /* grad_x += grad_y; grad_residual += grad_y (fused) */
+            /* y is stored in buffers[inputs[0]] after forward (in-place) */
+            backend_buffer_t* b1[] = {
+                sched->grad_buffers[node->output],
+                sched->buffers[node->inputs[2]],
+                sched->buffers[node->inputs[0]],
+                sched->grad_buffers[node->inputs[0]],
+                sched->grad_buffers[node->inputs[1]],
+                sched->param_bufs[i],
+                sched->eps_bufs[i]
+            };
+            backend_encode_dispatch(enc, sched->k_resnorm_bwd, b1, NULL, 7, N,1,1, tn,1,1);
+            /* grad_w = residual_rmsnorm_backward_w(gout, y) where y is in buffers[inputs[0]] */
+            backend_buffer_t* b2[] = {
+                sched->grad_buffers[node->output],
+                sched->buffers[node->inputs[0]],
+                sched->grad_buffers[node->inputs[2]],
+                sched->param_bufs[i],
+                sched->eps_bufs[i]
+            };
+            int tc = C < 256 ? C : 256;
+            backend_encode_dispatch(enc, sched->k_resnorm_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
             continue;
         }
 

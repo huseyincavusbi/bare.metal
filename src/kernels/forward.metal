@@ -338,6 +338,7 @@ kernel void rmsnorm_forward_v2(
 // residual_rmsnorm_forward - fused residual add + RMSNorm
 // out = rmsnorm(x + residual, weight, eps)
 // Saves one D-element buffer roundtrip vs separate add + norm.
+// Modifies x in-place to store y = x + residual (for inference efficiency).
 // ----------------------------------------------------------------
 kernel void residual_rmsnorm_forward(
     device float* x [[buffer(0)]],
