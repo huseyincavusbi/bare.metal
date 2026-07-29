@@ -1,6 +1,7 @@
 #include "baremetal/trainer.h"
 #include "baremetal/context.h"
 #include "baremetal/graph.h"
+#include "baremetal/compiler.h"
 #include "baremetal/model.h"
 #include "kernels/registry.h"
 #include "backend/backend.h"
@@ -27,8 +28,11 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     t->step = 0;
     t->S = S;
 
-    /* build the training graph (separate residuals, no fusion, S-sized) */
+    /* build the training graph (separate residuals, S-sized) */
     bmt_graph_build_train(model, S);
+    /* TODO: fusion requires in-place residuals, but training uses separate
+     * residual tensors for backprop. Disable fusion for now. */
+    /* bmt_compiler_run(model->graph); */
     bmt_graph_t* g = (bmt_graph_t*)model->graph;
     t->t_x_id = 0;
     t->t_logits_id = g->n_tensors - 1;
@@ -37,6 +41,7 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     t->reg = bmk_registry_create(ctx->backend_ctx);
     bmk_register(t->reg, BMK_OP_MATMUL, BMK_VARIANT_NAIVE, "matmul_forward_naive");
     bmk_register(t->reg, BMK_OP_NORM_RMS, BMK_VARIANT_NAIVE, "rmsnorm_forward");
+    bmk_register(t->reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
     bmk_register(t->reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
 
     t->sched = bmt_scheduler_create(ctx->backend_ctx, t->reg, g, S, model->kv_dim, model->arch.n_layers);

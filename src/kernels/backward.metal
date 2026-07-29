@@ -428,3 +428,83 @@ kernel void rope_backward_seq(
         }
     }
 }
+
+// ----------------------------------------------------------------
+// residual_rmsnorm_backward
+// Fused backward for: y = x + residual; out = rmsnorm(y, weight)
+// Forward modifies x in-place to store y (for inference efficiency).
+// Backward reads y from x buffer (which contains y after forward).
+// Backward:
+//   grad_y = rmsnorm_backward_x(grad_out, weight, y)
+//   grad_x += grad_y; grad_residual += grad_y
+// One thread per row (matches rmsnorm_backward_x convention).
+// buffers: [0]=gout[N,C] [1]=w[C] [2]=y[N,C] (stored in x after forward)
+//          [3]=gx[N,C] [4]=gres[N,C] params[5]=[N,C] eps[6]
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_backward(
+    device const float* gout [[buffer(0)]],
+    device const float* w    [[buffer(1)]],
+    device const float* y    [[buffer(2)]],
+    device atomic_float* gx  [[buffer(3)]],
+    device atomic_float* gres [[buffer(4)]],
+    constant int* p          [[buffer(5)]],
+    constant float& eps      [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)gid;
+    if (row >= N) return;
+    const device float* yr = y + row * C;
+    const device float* gr = gout + row * C;
+
+    float ss = 0.0f;
+    for (int j = 0; j < C; j++) ss += yr[j] * yr[j];
+    ss /= (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    float c1 = 0.0f;
+    for (int j = 0; j < C; j++) c1 += gr[j] * yr[j] * inv_rms * w[j];
+    c1 /= (float)C;
+
+    for (int j = 0; j < C; j++) {
+        float n = yr[j] * inv_rms;
+        float gy = inv_rms * (gr[j] * w[j] - n * c1);
+        atomic_fetch_add_explicit(gx + row * C + j, gy, memory_order_relaxed);
+        atomic_fetch_add_explicit(gres + row * C + j, gy, memory_order_relaxed);
+    }
+}
+
+// ----------------------------------------------------------------
+// residual_rmsnorm_backward_w
+// Weight gradient for fused residual + rmsnorm.
+// Forward stores y = x + residual in x buffer (in-place).
+// grad_w[j] = sum_n gout[n,j] * y[n,j] * inv_rms[n]
+// One thread per weight element j.
+// buffers: [0]=gout[N,C] [1]=y[N,C] [2]=gw[C] params[3]=[N,C] eps[4]
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_backward_w(
+    device const float* gout [[buffer(0)]],
+    device const float* y    [[buffer(1)]],
+    device float* gw         [[buffer(2)]],
+    constant int* p          [[buffer(3)]],
+    constant float& eps      [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int j = (int)gid;
+    if (j >= C) return;
+
+    float acc = 0.0f;
+    for (int n = 0; n < N; n++) {
+        float y_val = y[n * C + j];
+        float ss = 0.0f;
+        for (int k = 0; k < C; k++) {
+            float yk = y[n * C + k];
+            ss += yk * yk;
+        }
+        ss /= (float)C;
+        float inv_rms = 1.0f / sqrt(ss + eps);
+        acc += gout[n * C + j] * y_val * inv_rms;
+    }
+    gw[j] = acc;
+}
