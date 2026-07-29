@@ -1,6 +1,7 @@
 #include "baremetal.h"
 #include "baremetal/model.h"
 #include "baremetal/tokenizer.h"
+#include "baremetal/context.h"
 #include "backend/backend.h"
 #include "backend/metal/device.h"
 #include "utils/log.h"
@@ -8,6 +9,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <sys/time.h>
+#include <mach/mach.h>
 
 extern int bm_run(bm_context_t* ctx, bm_model_t* model, const char* prompt,
                   int steps, float temperature, unsigned long long seed,
@@ -17,6 +20,27 @@ extern int bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
                          const int* prompt_ids, int n_prompt,
                          int steps, float temperature, int top_k, float top_p,
                          uint64_t seed, bm_token_cb_t callback, void* user_data);
+
+#ifdef BAREMETAL_TRAIN
+static double get_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+
+static size_t get_rss_mb(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        return info.resident_size / (1024 * 1024);
+    }
+    return 0;
+}
+
+static size_t get_gpu_memory_mb(bm_context_t* ctx) {
+    return backend_get_allocated_memory(ctx->backend_ctx) / (1024 * 1024);
+}
+#endif
 
 static void print_usage(const char* prog) {
     printf("bare.metal - LLM inference engine for Apple Silicon\n\n");
@@ -451,6 +475,7 @@ static int cmd_train(int argc, char** argv) {
     int* inputs = malloc(batch_tokens * sizeof(int));
     int* targets = malloc(batch_tokens * sizeof(int));
     int pos = 0;
+    double total_step_time = 0.0;
 
     for (int step = 0; step < max_steps; step++) {
         for (int b = 0; b < batch_size; b++) {
@@ -461,8 +486,15 @@ static int cmd_train(int argc, char** argv) {
             }
         }
 
+        double step_start = get_time_ms();
         float loss = bm_train_step(trainer, inputs, targets, batch_size, seq_len);
-        printf("step %d/%d: loss=%.4f\n", step + 1, max_steps, loss);
+        double step_ms = get_time_ms() - step_start;
+        total_step_time += step_ms;
+
+        size_t gpu_mem = get_gpu_memory_mb(ctx);
+        size_t rss = get_rss_mb();
+        printf("step %d/%d: loss=%.4f  step_ms=%.0f  gpu_mem=%.1fMB  rss=%zuMB\n",
+               step + 1, max_steps, loss, step_ms, (double)gpu_mem, rss);
 
         if (save_every > 0 && (step + 1) % save_every == 0) {
             char path[256];
@@ -471,6 +503,8 @@ static int cmd_train(int argc, char** argv) {
             fprintf(stderr, "[train] saved checkpoint to %s\n", path);
         }
     }
+
+    printf("Avg step time: %.1fms\n", total_step_time / max_steps);
 
     free(inputs);
     free(targets);
