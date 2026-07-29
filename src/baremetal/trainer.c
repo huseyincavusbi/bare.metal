@@ -302,14 +302,13 @@ static void adamw_apply(bm_trainer_t* t) {
 }
 
 float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
-    (void)B;   /* B=1 for now (single sequence of length T) */
     int S = T;
     if (S != t->S) {
         BMT_LOG_ERROR("bm_train_step: S=%d != trainer S=%d (rebuild trainer for new S)", S, t->S);
         return -1.0f;
     }
 
-    /* zero all grad buffers (the walk accumulates into them) */
+    /* zero all grad buffers once at the start (gradients accumulate across B sequences) */
     bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
     for (int i = 0; i < g->n_tensors; i++) {
         size_t n = 1;
@@ -319,23 +318,31 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, i));
     }
 
-    /* 1. embedding lookup + forward */
-    embed_lookup(t, inputs, S);
-    bmt_scheduler_forward_train(t->sched, S);
+    /* Sequential batching: process B sequences one at a time, accumulating gradients */
+    float total_loss = 0.0f;
+    for (int b = 0; b < B; b++) {
+        const int* seq_inputs = inputs + b * S;
+        const int* seq_targets = targets + b * S;
 
-    /* 2. loss seed (xent_backward fills grad_logits) */
-    float loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, targets, S, t->model->arch.vocab_size);
+        /* 1. embedding lookup + forward */
+        embed_lookup(t, seq_inputs, S);
+        bmt_scheduler_forward_train(t->sched, S);
 
-    /* 3. backward walk */
-    bmt_scheduler_backward(t->sched);
+        /* 2. loss seed (xent_backward fills grad_logits) */
+        float loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, seq_targets, S, t->model->arch.vocab_size);
+        total_loss += loss;
 
-    /* 4. embedding backward (scatter grad_x into grad_wte + tied sum) */
-    embed_backward(t, inputs, S);
+        /* 3. backward walk (gradients accumulate via atomic adds) */
+        bmt_scheduler_backward(t->sched);
 
-    /* 5. AdamW step */
+        /* 4. embedding backward (scatter grad_x into grad_wte + tied sum) */
+        embed_backward(t, seq_inputs, S);
+    }
+
+    /* 5. AdamW step (once per batch, after all B sequences) */
     adamw_apply(t);
 
-    return loss;
+    return total_loss / (float)B;
 }
 
 #endif /* BAREMETAL_TRAIN */

@@ -28,11 +28,18 @@ static void print_usage(const char* prog) {
     printf("  info <checkpoint>           Print model information\n");
 #ifdef BAREMETAL_TRAIN
     printf("  train <model_dir> <data_file> <output_dir>  Train model on text data\n");
+    printf("    Options:\n");
+    printf("      --steps <int>       Max training steps (default: 100)\n");
+    printf("      --seq-len <int>     Sequence length S (default: 64)\n");
+    printf("      --batch-size <int>  Batch size B (default: 1)\n");
+    printf("      --lr <float>        Learning rate (default: 3e-4)\n");
+    printf("      --save-every <int>  Save checkpoint every N steps (default: 0)\n");
+    printf("      --resume <path>     Resume from checkpoint\n");
 #endif
     printf("  test-dispatch               Test Metal kernel dispatch\n");
     printf("  test-matmul                 Test Metal matmul kernel\n");
     printf("  test-kernels                Test all forward kernels\n");
-    printf("\nOptions:\n");
+    printf("\nGlobal Options:\n");
     printf("  -t, --temperature <float>   Sampling temperature (default: 1.0)\n");
     printf("  -p, --topp <float>          Top-p threshold (default: 0.9)\n");
     printf("  -n, --steps <int>           Max generation steps (default: 256)\n");
@@ -350,6 +357,7 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "Usage: %s train <model_dir> <data_file> <output_dir> [options]\n", argv[0]);
         fprintf(stderr, "  --steps <int>       Max training steps (default: 100)\n");
         fprintf(stderr, "  --seq-len <int>     Sequence length S (default: 64)\n");
+        fprintf(stderr, "  --batch-size <int>  Batch size B (default: 1)\n");
         fprintf(stderr, "  --lr <float>        Learning rate (default: 3e-4)\n");
         fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
         fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
@@ -361,6 +369,7 @@ static int cmd_train(int argc, char** argv) {
 
     int max_steps = 100;
     int seq_len = 64;
+    int batch_size = 1;
     float lr = 3e-4f;
     int save_every = 0;
     const char* resume_path = NULL;
@@ -368,9 +377,15 @@ static int cmd_train(int argc, char** argv) {
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--seq-len") == 0 && i+1 < argc) seq_len = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--batch-size") == 0 && i+1 < argc) batch_size = atoi(argv[++i]);
         else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
+    }
+
+    if (batch_size < 1) {
+        fprintf(stderr, "Error: batch-size must be >= 1\n");
+        return 1;
     }
 
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
@@ -422,18 +437,21 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "[train] resumed from %s\n", resume_path);
     }
 
-    int* inputs = malloc(seq_len * sizeof(int));
-    int* targets = malloc(seq_len * sizeof(int));
+    int batch_tokens = batch_size * seq_len;
+    int* inputs = malloc(batch_tokens * sizeof(int));
+    int* targets = malloc(batch_tokens * sizeof(int));
     int pos = 0;
 
     for (int step = 0; step < max_steps; step++) {
-        for (int i = 0; i < seq_len; i++) {
-            inputs[i] = tokens[pos % n_tokens];
-            targets[i] = tokens[(pos + 1) % n_tokens];
-            pos++;
+        for (int b = 0; b < batch_size; b++) {
+            for (int i = 0; i < seq_len; i++) {
+                inputs[b * seq_len + i] = tokens[pos % n_tokens];
+                targets[b * seq_len + i] = tokens[(pos + 1) % n_tokens];
+                pos++;
+            }
         }
 
-        float loss = bm_train_step(trainer, inputs, targets, 1, seq_len);
+        float loss = bm_train_step(trainer, inputs, targets, batch_size, seq_len);
         printf("step %d/%d: loss=%.4f\n", step + 1, max_steps, loss);
 
         if (save_every > 0 && (step + 1) % save_every == 0) {
