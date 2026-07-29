@@ -31,8 +31,7 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
 
     /* build the training graph (separate residuals, S-sized) */
     bmt_graph_build_train(model, S);
-    /* TODO: fusion requires in-place residuals, but training uses separate
-     * residual tensors for backprop. Disable fusion for now. */
+    /* TODO: training fusion requires graph restructure (in-place residuals) */
     /* bmt_compiler_run(model->graph); */
     bmt_graph_t* g = (bmt_graph_t*)model->graph;
     t->t_x_id = 0;
@@ -317,7 +316,6 @@ static void adamw_apply(bm_trainer_t* t) {
     /* Mixed precision: convert fp32 master → bf16/fp16 working buffer.
      * Only convert 2D weights (norm weights stay fp32 on GPU). */
     if (t->precision != BM_PRECISION_FP32) {
-        bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
         for (int i = 0; i < t->n_opt_states; i++) {
             bmt_adamw_state_t* st = &t->opt_states[i];
             int wid = st->grad_tensor_id;

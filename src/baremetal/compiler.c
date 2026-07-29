@@ -27,6 +27,22 @@ void bmt_compiler_run(bmt_graph_t* graph) {
             }
 
             if (add_node) {
+                /* Only fuse if the ADD's output is used solely by this NORM.
+                 * In training graph, t_res1 is also read by the second ADD. */
+                int res_usage = 0;
+                for (int j = 0; j < graph->n_nodes; j++) {
+                    bmt_node_t* c = &graph->nodes[j];
+                    if (c->op_type == BMK_OP_COUNT) continue;
+                    for (int k = 0; k < c->n_inputs; k++)
+                        if (c->inputs[k] == in_tensor_id) res_usage++;
+                }
+                if (res_usage != 1) continue;
+
+                /* Don't fuse the final norm (before classifier) — it has no
+                 * preceding ADD in the training graph; the ADD is the second
+                 * residual of the last layer, and its inputs may be overwritten. */
+                if (i == graph->n_nodes - 2) continue;
+
                 int x_id = add_node->inputs[0];
                 int add_val_id = add_node->inputs[1];
                 int weight_id = norm_node->inputs[1];

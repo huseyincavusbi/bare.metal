@@ -552,3 +552,91 @@ kernel void residual_rmsnorm_backward_w(
     }
     gw[j] = acc;
 }
+
+// ----------------------------------------------------------------
+// residual_rmsnorm_backward_train
+// Training-safe: recomputes y = x + residual on the fly (no stored y).
+// Backward:
+//   grad_y = rmsnorm_backward_x(grad_out, weight, y)
+//   grad_x += grad_y; grad_residual += grad_y
+// One thread per row.
+// buffers: [0]=gout[N,C] [1]=w[C] [2]=x[N,C] [3]=residual[N,C]
+//          [4]=gx[N,C] [5]=gres[N,C] params[6]=[N,C] eps[7]
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_backward_train(
+    device const float* gout [[buffer(0)]],
+    device const float* w    [[buffer(1)]],
+    device const float* x    [[buffer(2)]],
+    device const float* residual [[buffer(3)]],
+    device atomic_float* gx  [[buffer(4)]],
+    device atomic_float* gres [[buffer(5)]],
+    constant int* p          [[buffer(6)]],
+    constant float& eps      [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int row = (int)gid;
+    if (row >= N) return;
+    const device float* xr = x + row * C;
+    const device float* rr = residual + row * C;
+    const device float* gr = gout + row * C;
+
+    float ss = 0.0f;
+    for (int j = 0; j < C; j++) {
+        float y = xr[j] + rr[j];
+        ss += y * y;
+    }
+    ss /= (float)C;
+    float inv_rms = 1.0f / sqrt(ss + eps);
+
+    float c1 = 0.0f;
+    for (int j = 0; j < C; j++) {
+        float y = xr[j] + rr[j];
+        c1 += gr[j] * y * inv_rms * w[j];
+    }
+    c1 /= (float)C;
+
+    for (int j = 0; j < C; j++) {
+        float y = xr[j] + rr[j];
+        float n = y * inv_rms;
+        float gy = inv_rms * (gr[j] * w[j] - n * c1);
+        atomic_fetch_add_explicit(gx + row * C + j, gy, memory_order_relaxed);
+        atomic_fetch_add_explicit(gres + row * C + j, gy, memory_order_relaxed);
+    }
+}
+
+// ----------------------------------------------------------------
+// residual_rmsnorm_backward_w_train
+// Training-safe: recomputes y = x + residual on the fly.
+// grad_w[j] = sum_n gout[n,j] * y[n,j] * inv_rms[n]
+// One thread per weight element j.
+// buffers: [0]=gout[N,C] [1]=x[N,C] [2]=residual[N,C] [3]=gw[C]
+//          params[4]=[N,C] eps[5]
+// ----------------------------------------------------------------
+kernel void residual_rmsnorm_backward_w_train(
+    device const float* gout [[buffer(0)]],
+    device const float* x    [[buffer(1)]],
+    device const float* residual [[buffer(2)]],
+    device float* gw         [[buffer(3)]],
+    constant int* p          [[buffer(4)]],
+    constant float& eps      [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], C = p[1];
+    int j = (int)gid;
+    if (j >= C) return;
+
+    float acc = 0.0f;
+    for (int n = 0; n < N; n++) {
+        float y_val = x[n * C + j] + residual[n * C + j];
+        float ss = 0.0f;
+        for (int k = 0; k < C; k++) {
+            float yk = x[n * C + k] + residual[n * C + k];
+            ss += yk * yk;
+        }
+        ss /= (float)C;
+        float inv_rms = 1.0f / sqrt(ss + eps);
+        acc += gout[n * C + j] * y_val * inv_rms;
+    }
+    gw[j] = acc;
+}

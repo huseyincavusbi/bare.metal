@@ -45,6 +45,9 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_add_bwd;     /* add_backward (GPU, replaces CPU sync) */
     backend_kernel_t* k_resnorm_bwd; /* residual_rmsnorm_backward (fused) */
     backend_kernel_t* k_resnorm_bwd_w; /* residual_rmsnorm_backward_w (fused weight grad) */
+    backend_kernel_t* k_resnorm_fwd_train; /* residual_rmsnorm_forward_train (no in-place) */
+    backend_kernel_t* k_resnorm_bwd_train; /* residual_rmsnorm_backward_train (recompute y) */
+    backend_kernel_t* k_resnorm_bwd_w_train; /* residual_rmsnorm_backward_w_train (recompute y) */
 
     int max_seq_len;
     int kv_dim;
@@ -172,6 +175,9 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
     sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
     sched->k_resnorm_bwd = backend_kernel_create(backend, "residual_rmsnorm_backward");
     sched->k_resnorm_bwd_w = backend_kernel_create(backend, "residual_rmsnorm_backward_w");
+    sched->k_resnorm_fwd_train = backend_kernel_create(backend, "residual_rmsnorm_forward_train");
+    sched->k_resnorm_bwd_train = backend_kernel_create(backend, "residual_rmsnorm_backward_train");
+    sched->k_resnorm_bwd_w_train = backend_kernel_create(backend, "residual_rmsnorm_backward_w_train");
 
     return sched;
 }
@@ -217,6 +223,9 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_add_bwd) backend_kernel_destroy(sched->k_add_bwd);
     if (sched->k_resnorm_bwd) backend_kernel_destroy(sched->k_resnorm_bwd);
     if (sched->k_resnorm_bwd_w) backend_kernel_destroy(sched->k_resnorm_bwd_w);
+    if (sched->k_resnorm_fwd_train) backend_kernel_destroy(sched->k_resnorm_fwd_train);
+    if (sched->k_resnorm_bwd_train) backend_kernel_destroy(sched->k_resnorm_bwd_train);
+    if (sched->k_resnorm_bwd_w_train) backend_kernel_destroy(sched->k_resnorm_bwd_w_train);
     free(sched);
 }
 
@@ -555,6 +564,8 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             kn = sched->bf16_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16 && sched->fp16_kernel) {
             kn = sched->fp16_kernel;
+        } else if (node->op_type == BMK_OP_FUSED_RESIDUAL_NORM && sched->k_resnorm_fwd_train) {
+            kn = sched->k_resnorm_fwd_train;
         } else {
             kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
         }
@@ -620,6 +631,16 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
                 n_bufs = 5;
                 break;
             }
+            case BMK_OP_FUSED_RESIDUAL_NORM: {
+                bufs[0] = sched->buffers[node->inputs[0]];
+                bufs[1] = sched->buffers[node->inputs[1]];
+                bufs[2] = sched->buffers[node->inputs[2]];
+                bufs[3] = bout;
+                bufs[4] = sched->param_bufs[i];
+                bufs[5] = sched->eps_bufs[i];
+                n_bufs = 6;
+                break;
+            }
             case BMK_OP_ACT_SWIGLU: {
                 bufs[0] = sched->buffers[node->inputs[0]];
                 bufs[1] = sched->buffers[node->inputs[1]];
@@ -664,7 +685,7 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             gtx = (p3 + 31) & ~31;
             gty = p1;
             ttx = 32;
-        } else if (node->op_type == BMK_OP_NORM_RMS) {
+        } else if (node->op_type == BMK_OP_NORM_RMS || node->op_type == BMK_OP_FUSED_RESIDUAL_NORM) {
             gtx = node->params[0];
             ttx = gtx < 256 ? gtx : 256;
             if (ttx == 0) ttx = 1;
@@ -790,28 +811,29 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             ef[0] = node->fparams[0];
             backend_buffer_unmap(sched->eps_bufs[i]);
             int tn = N < 256 ? N : 256;
-            /* grad_x += grad_y; grad_residual += grad_y (fused) */
-            /* y is stored in buffers[inputs[0]] after forward (in-place) */
+            /* grad_x += grad_y; grad_residual += grad_y (training-safe, recomputes y) */
             backend_buffer_t* b1[] = {
                 sched->grad_buffers[node->output],
                 sched->buffers[node->inputs[2]],
                 sched->buffers[node->inputs[0]],
+                sched->buffers[node->inputs[1]],
                 sched->grad_buffers[node->inputs[0]],
                 sched->grad_buffers[node->inputs[1]],
                 sched->param_bufs[i],
                 sched->eps_bufs[i]
             };
-            backend_encode_dispatch(enc, sched->k_resnorm_bwd, b1, NULL, 7, N,1,1, tn,1,1);
-            /* grad_w = residual_rmsnorm_backward_w(gout, y) where y is in buffers[inputs[0]] */
+            backend_encode_dispatch(enc, sched->k_resnorm_bwd_train, b1, NULL, 8, N,1,1, tn,1,1);
+            /* grad_w (training-safe, recomputes y from x + residual) */
             backend_buffer_t* b2[] = {
                 sched->grad_buffers[node->output],
                 sched->buffers[node->inputs[0]],
+                sched->buffers[node->inputs[1]],
                 sched->grad_buffers[node->inputs[2]],
                 sched->param_bufs[i],
                 sched->eps_bufs[i]
             };
             int tc = C < 256 ? C : 256;
-            backend_encode_dispatch(enc, sched->k_resnorm_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
+            backend_encode_dispatch(enc, sched->k_resnorm_bwd_w_train, b2, NULL, 6, C,1,1, tc,1,1);
             continue;
         }
 
