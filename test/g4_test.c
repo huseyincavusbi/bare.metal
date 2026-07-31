@@ -34,6 +34,8 @@ int main(void) {
         return 1;
     }
     fprintf(stderr, "[G4] tokenized: %d tokens (%.1fK), enough for %d steps\n", n_tok, n_tok/1000.0, n_tok/S - 1);
+    fprintf(stderr, "[G4] first8: %d %d %d %d %d %d %d %d\n", all_tokens[0], all_tokens[1], all_tokens[2],
+            all_tokens[3], all_tokens[4], all_tokens[5], all_tokens[6], all_tokens[7]);
 
     /* 3. create model + trainer */
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
