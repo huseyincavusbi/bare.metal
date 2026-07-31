@@ -19,6 +19,12 @@ bmt_graph_t* bmt_graph_create(void) {
     return g;
 }
 
+int bmt_graph_find_weight(bmt_graph_t* graph, void* ptr) {
+    for (int i = 0; i < graph->n_tensors; i++)
+        if (graph->tensors[i].type == BMT_TENSOR_TYPE_WEIGHT && graph->tensors[i].weight_ptr == ptr) return i;
+    return -1;
+}
+
 void bmt_graph_destroy(bmt_graph_t* g) {
     if (!g) return;
     free(g->tensors);

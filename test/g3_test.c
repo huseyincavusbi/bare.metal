@@ -47,14 +47,23 @@ int main(void){
         if (diff>=0.5) fails++;
     }
 
-    /* compare final weights: layer 0 q, layer 15 down, lnfw */
+    /* compare final weights: layer 0 q, layer 15 down, lnfw.
+     * NOTE: weights live in the GPU scheduler buffers (AdamW updates them in
+     * place; the CPU weight_buffer is only the initializer). */
     int D=m->arch.dim, NH=m->arch.n_heads, HD=m->head_size, H=m->arch.hidden_dim;
     int fails_w=0;
-    { float*ref=loadf(G,"g3_w_l0_q",NH*HD*D); float mx; double c=cosmax(m->qw+0*NH*HD*D, ref, NH*HD*D, &mx);
+    bmt_graph_t* g = (bmt_graph_t*)m->graph;
+    { float*ref=loadf(G,"g3_w_l0_q",NH*HD*D); float mx; double c;
+      float* w = (float*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->qw)));
+      c=cosmax(w, ref, NH*HD*D, &mx); backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->qw)));
       printf("final w_l0_q  cos=%.6f maxabs=%.2e %s\n", c, mx, c>0.9999?"OK":"BAD"); if(c<=0.9999)fails_w++; free(ref); }
-    { float*ref=loadf(G,"g3_w_l15_d",D*H); float mx; double c=cosmax(m->fcprojw+15*D*H, ref, D*H, &mx);
+    { float*ref=loadf(G,"g3_w_l15_d",D*H); float mx; double c;
+      float* w = (float*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->fcprojw+15*D*H)));
+      c=cosmax(w, ref, D*H, &mx); backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->fcprojw+15*D*H)));
       printf("final w_l15_d cos=%.6f maxabs=%.2e %s\n", c, mx, c>0.9999?"OK":"BAD"); if(c<=0.9999)fails_w++; free(ref); }
-    { float*ref=loadf(G,"g3_w_lnfw",D); float mx; double c=cosmax(m->lnfw, ref, D, &mx);
+    { float*ref=loadf(G,"g3_w_lnfw",D); float mx; double c;
+      float* w = (float*)backend_buffer_map(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->lnfw)));
+      c=cosmax(w, ref, D, &mx); backend_buffer_unmap(bmt_scheduler_get_buffer(t->sched, bmt_graph_find_weight(g, m->lnfw)));
       printf("final w_lnfw  cos=%.6f maxabs=%.2e %s\n", c, mx, c>0.9999?"OK":"BAD"); if(c<=0.9999)fails_w++; free(ref); }
 
     int ok = (fails==0) && (fails_w==0);
