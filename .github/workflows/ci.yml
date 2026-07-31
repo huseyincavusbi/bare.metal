@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Display system information
+        run: |
+          echo "OS Information:"
+          uname -a
+          echo ""
+          echo "CPU Information:"
+          nproc 2>/dev/null || sysctl -n hw.ncpu
+          echo "CPU Details:"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            sysctl -n machdep.cpu.brand_string 2>/dev/null
+            echo "CPU cores: $(sysctl -n hw.ncpu)"
+          else
+            lscpu | head -10
+          fi
+          echo ""
+          echo "Memory Information:"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            vm_stat | head -5
+          else
+            free -h | awk '/^Mem:/{print "Memory: " $2}'
+            free -h | awk '/^Swap:/{print "Swap: " $2}'
+          fi
+
+      - name: Build (inference + training)
+        run: |
+          make clean
+          make baremetal
+          make baremetal-train
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyTorch + transformers
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch numpy transformers safetensors
+
+      - name: Download SmolLM2-135M weights
+        run: |
+          python -c "
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id='HuggingFaceTB/SmolLM2-135M',
+              local_dir='data/smollm2-135m',
+              allow_patterns=['*.safetensors', '*.json', '*.txt'],
+          )
+          "
+          ls -la data/smollm2-135m/
+
+      - name: Generate golden refs with PyTorch
+        run: |
+          for gen in test/grad/gen_*.py; do
+            echo "=== $gen ==="
+            python "$gen" || exit 1
+          done
+
+      - name: Build tests
+        run: make tests
+
+      - name: Run kernel tests
+        run: |
+          set -e
+          for t in build/test/*_test; do
+            echo "=== $t ==="
+            "$t"
+          done
+
+      - name: Run g3 (10-step loss curve + weights vs PyTorch)
+        run: ./build/test/g3_test
+
+      - name: Run g4 (200-step loss decrease)
+        run: ./build/test/g4_test
+
+      - name: Run inference E2E
+        run: |
+          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42
+
+      - name: Run inference E2E (bf16)
+        run: |
+          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision bf16
+
+      - name: Run inference E2E (fp16)
+        run: |
+          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision fp16
+
+      - name: Run inference E2E (q8)
+        run: |
+          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --quant q8
