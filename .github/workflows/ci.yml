@@ -67,7 +67,9 @@ jobs:
 
       - name: Generate golden refs with PyTorch
         run: |
+          # gen_g4_text.py needs a local TinyStories checkout; g4_text.txt is committed.
           for gen in test/grad/gen_*.py; do
+            case "$gen" in *gen_g4_text.py) continue;; esac
             echo "=== $gen ==="
             python "$gen" || exit 1
           done
