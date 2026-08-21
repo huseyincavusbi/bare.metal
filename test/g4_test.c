@@ -40,6 +40,7 @@ int main(void) {
     /* 3. create model + trainer */
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
     bm_load_weights(m, md);
+    m->precision = bm_get_supported_precision(ctx);
     bm_train_config_t cfg = {.learning_rate=1e-3f,.beta1=0.9f,.beta2=0.999f,.epsilon=1e-8f,
                             .weight_decay=0.0f,.grad_clip=0,.grad_accum_steps=1,.warmup_steps=0,
                             .max_steps=NSTEPS,.use_master_weights=1};
