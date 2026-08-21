@@ -74,7 +74,7 @@ static void print_usage(const char* prog) {
     printf("  -n, --steps <int>           Max generation steps (default: 256)\n");
     printf("  -s, --seed <int>            RNG seed (default: time-based)\n");
     printf("      --quant <q8>            Quantize matmul weights to Q8 (default: off/fp32)\n");
-    printf("      --precision <bf16|fp16|fp32>  Weight precision (default: fp32)\n");
+    printf("      --precision <bf16|fp16|fp32>  Weight precision (default: bf16)\n");
 }
 
 static int cmd_test_dispatch(void) {
@@ -391,7 +391,7 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "  --lr <float>        Learning rate (default: 3e-4)\n");
         fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
         fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
-        fprintf(stderr, "  --precision <bf16|fp16|fp32>  Weight precision (default: fp32)\n");
+        fprintf(stderr, "  --precision <bf16|fp16|fp32>  Weight precision (default: bf16)\n");
         return 1;
     }
     const char* model_dir = argv[2];
@@ -463,6 +463,8 @@ static int cmd_train(int argc, char** argv) {
         if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;
         else if (strcmp(prec_str, "fp16") == 0) model->precision = BM_PRECISION_FP16;
         else model->precision = BM_PRECISION_FP32;
+    } else {
+        model->precision = bm_get_supported_precision(ctx);
     }
 
     bm_trainer_t* trainer = bm_create_trainer(ctx, model, &cfg);
