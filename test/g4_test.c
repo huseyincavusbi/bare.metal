@@ -52,10 +52,18 @@ int main(void) {
 
     /* 3. create model + trainer. lr=1e-4 (below the 3e-4 production default):
      * single-sequence batches are noisy, and the lower rate keeps the 200-step
-     * loss curve reliably decreasing on this small dataset in every precision. */
+     * loss curve reliably decreasing on this small dataset in every precision.
+     * BM_PRECISION overrides the device default so CI can gate each precision. */
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
     bm_load_weights(m, md);
-    m->precision = bm_get_supported_precision(ctx);
+    const char* prec = getenv("BM_PRECISION");
+    if (prec && !strcmp(prec, "fp32"))      m->precision = BM_PRECISION_FP32;
+    else if (prec && !strcmp(prec, "fp16")) m->precision = BM_PRECISION_FP16;
+    else if (prec && !strcmp(prec, "bf16")) m->precision = BM_PRECISION_BF16;
+    else                                    m->precision = bm_get_supported_precision(ctx);
+    fprintf(stderr, "[G4] precision=%s\n",
+            m->precision == BM_PRECISION_BF16 ? "bf16" :
+            m->precision == BM_PRECISION_FP16 ? "fp16" : "fp32");
     bm_train_config_t cfg = {.learning_rate=1e-4f,.beta1=0.9f,.beta2=0.95f,.epsilon=1e-8f,
                             .weight_decay=0.0f,.grad_clip=1.0f,.grad_accum_steps=1,.warmup_steps=10,
                             .max_steps=NSTEPS,.use_master_weights=1};
