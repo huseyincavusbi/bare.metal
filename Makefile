@@ -75,6 +75,7 @@ $(BINARY_TRAIN): $(OBJS_TRAIN) $(TOOL_OBJS_TRAIN) $(METAL_BIN)
 	@echo "  Built: $@ (training)"
 
 build/test/%: test/%.c $(OBJS_TRAIN) $(METAL_BIN)
+	@mkdir -p build/test
 	$(CC) $(CFLAGS_TRAIN) -c $< -o $@.o
 	$(CC) $(CFLAGS_TRAIN) $@.o $(OBJS_TRAIN) -o $@ $(LDFLAGS)
 	@mkdir -p build/test/kernels
@@ -82,18 +83,23 @@ build/test/%: test/%.c $(OBJS_TRAIN) $(METAL_BIN)
 	@echo "  Built: $@"
 
 build/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/train/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_TRAIN) -c $< -o $@
 
 build/%.o: %.m
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fobjc-arc -c $< -o $@
 
 build/train/%.o: %.m
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_TRAIN) -fobjc-arc -c $< -o $@
 
 $(METAL_BIN): $(METAL_SRC)
+	@mkdir -p build/kernels
 	xcrun -sdk macosx metal -c src/kernels/forward.metal -o build/kernels/forward.air
 	xcrun -sdk macosx metal -c src/kernels/backward.metal -o build/kernels/backward.air
 	xcrun -sdk macosx metal -c src/anneal/adamw.metal -o build/kernels/adamw.air
