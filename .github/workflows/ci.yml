@@ -112,16 +112,40 @@ jobs:
 
       - name: Run inference E2E
         run: |
-          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100                       # produced non-trivial output
+          test "$a" = "$b"                         # deterministic for a fixed seed
+          echo "  E2E ok (fp32): non-empty and deterministic"
 
       - name: Run inference E2E (bf16)
         run: |
-          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision bf16
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision bf16 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (bf16): non-empty and deterministic"
 
       - name: Run inference E2E (fp16)
         run: |
-          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision fp16
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision fp16 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (fp16): non-empty and deterministic"
 
       - name: Run inference E2E (q8)
         run: |
-          ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --quant q8
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --quant q8 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (q8): non-empty and deterministic"
