@@ -78,14 +78,7 @@ jobs:
           if [ -f data/smollm2-135m/model.safetensors ]; then
             echo "model weights restored from cache"
           else
-            python -c "
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id='HuggingFaceTB/SmolLM2-135M',
-                local_dir='data/smollm2-135m',
-                allow_patterns=['*.safetensors', '*.json', '*.txt'],
-            )
-            "
+            python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='HuggingFaceTB/SmolLM2-135M', local_dir='data/smollm2-135m', allow_patterns=['*.safetensors','*.json','*.txt'])"
           fi
           ls -la data/smollm2-135m/
 
