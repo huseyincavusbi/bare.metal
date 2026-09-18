@@ -9,7 +9,7 @@ TEST_SRCS := $(wildcard test/*_test.c)
 TEST_BINS := $(patsubst test/%.c,build/test/%,$(TEST_SRCS))
 
 CC      := clang
-CFLAGS  := -std=c11 -Wall -Wextra -O2 -I include -I src -DBAREMETAL_TRAIN
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -O2 -I include -I src -DBAREMETAL_TRAIN
 LDFLAGS := -framework Metal -framework Foundation
 
 OBJC_SRCS := src/backend/metal/device.m \
