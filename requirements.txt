@@ -1,5 +1,0 @@
-torch
-numpy
-transformers
-safetensors
-huggingface_hub
