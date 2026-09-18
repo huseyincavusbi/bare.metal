@@ -34,11 +34,14 @@ void bmt_graph_destroy(bmt_graph_t* g) {
 
 int bmt_graph_add_tensor(bmt_graph_t* graph, bmt_tensor_type_t type, int n_dims, const int* dims) {
     if (graph->n_tensors >= graph->capacity_tensors) {
+        int old_cap = graph->capacity_tensors;
         graph->capacity_tensors *= 2;
         graph->tensors = realloc(graph->tensors, graph->capacity_tensors * sizeof(bmt_tensor_t));
+        memset(&graph->tensors[old_cap], 0, (graph->capacity_tensors - old_cap) * sizeof(bmt_tensor_t));
     }
     int id = graph->n_tensors++;
     bmt_tensor_t* t = &graph->tensors[id];
+    memset(t, 0, sizeof(*t));
     t->id = id;
     t->type = type;
     t->n_dims = n_dims;
@@ -58,11 +61,14 @@ int bmt_graph_add_node(bmt_graph_t* graph, bmk_op_type_t op_type,
                        int n_params, const int* params,
                        int n_fparams, const float* fparams) {
     if (graph->n_nodes >= graph->capacity_nodes) {
+        int old_cap = graph->capacity_nodes;
         graph->capacity_nodes *= 2;
         graph->nodes = realloc(graph->nodes, graph->capacity_nodes * sizeof(bmt_node_t));
+        memset(&graph->nodes[old_cap], 0, (graph->capacity_nodes - old_cap) * sizeof(bmt_node_t));
     }
     int id = graph->n_nodes++;
     bmt_node_t* n = &graph->nodes[id];
+    memset(n, 0, sizeof(*n));
     n->id = id;
     n->op_type = op_type;
     n->n_inputs = n_inputs;
