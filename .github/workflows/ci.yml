@@ -91,7 +91,12 @@ jobs:
       - name: Run g3 (10-step loss curve + weights vs PyTorch)
         run: ./build/test/g3_test
 
-      - name: Run g4 (200-step loss decrease)
+      - name: Run g4 (200-step loss decrease, fp32)
+        run: BM_PRECISION=fp32 ./build/test/g4_test
+
+      - name: Run g4 (200-step loss decrease, device precision)
+        # CI's paravirtual GPU has no bf16, so the device default here is fp16;
+        # bf16 is covered on real hardware. fp32 is the reference path.
         run: ./build/test/g4_test
 
       - name: Run inference E2E
