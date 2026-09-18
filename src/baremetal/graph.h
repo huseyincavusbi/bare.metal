@@ -57,8 +57,9 @@ void bmt_graph_destroy(bmt_graph_t* graph);
 
 int bmt_graph_add_tensor(bmt_graph_t* graph, bmt_tensor_type_t type, int n_dims, const int* dims);
 void bmt_graph_set_weight_ptr(bmt_graph_t* graph, int tensor_id, void* ptr);
-int bmt_graph_add_weight(bmt_graph_t* graph, void* ptr, int n_dims, const int* dims);
 
+int bmt_graph_add_weight(bmt_graph_t* graph, void* ptr, int n_dims, const int* dims);
+int bmt_graph_find_weight(bmt_graph_t* graph, void* ptr);
 int bmt_graph_add_node(bmt_graph_t* graph, bmk_op_type_t op_type, 
                        int n_inputs, const int* inputs, int output, 
                        int n_params, const int* params,

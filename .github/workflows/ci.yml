@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly: GitHub runner images update every week, so re-run even with no
+    # commits to catch upstream toolchain/SDK churn early.
+    - cron: "0 0 * * 0"   # Sundays 00:00 UTC
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    # Run the identical pipeline on macOS 26 (blocking, GA) and macOS 27
+    # (non-blocking preview via the xcode-27 image). The preview job must never
+    # block merges, but it exercises the whole suite so upcoming SDK/toolchain
+    # breakage surfaces early.
+    name: build-and-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26          # GA arm64; macos-latest currently points here
+            experimental: false
+          - os: xcode-27          # macOS 27 public preview (no SLA, weekly churn)
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Metal toolchain (preview only)
+        # macOS 26 bundles the Metal toolchain; the Xcode 27 preview image does not.
+        if: matrix.experimental
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Assert runner capabilities
+        run: |
+          set -e
+          echo "arch:   $(uname -m)"
+          echo "kernel: $(uname -r)"
+          test "$(uname -m)" = "arm64" || { echo "ERROR: Metal backend requires arm64"; exit 1; }
+          xcrun -sdk macosx metal --version
+          xcrun -sdk macosx metallib --version >/dev/null 2>&1 || true
+
+      - name: Display system information
+        run: |
+          echo "OS Information:"
+          uname -a
+          echo ""
+          echo "CPU Information:"
+          nproc 2>/dev/null || sysctl -n hw.ncpu
+          echo "CPU Details:"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            sysctl -n machdep.cpu.brand_string 2>/dev/null
+            echo "CPU cores: $(sysctl -n hw.ncpu)"
+          else
+            lscpu | head -10
+          fi
+          echo ""
+          echo "Memory Information:"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            vm_stat | head -5
+          else
+            free -h | awk '/^Mem:/{print "Memory: " $2}'
+            free -h | awk '/^Swap:/{print "Swap: " $2}'
+          fi
+
+      - name: Build (inference + training)
+        run: |
+          make clean
+          make baremetal
+          make baremetal-train
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "test/grad/uv.lock"
+
+      - name: Install Python deps (uv)
+        run: uv sync --project test/grad --frozen
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: data/smollm2-135m
+          key: smollm2-135m-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Download SmolLM2-135M weights
+        run: |
+          if [ -f data/smollm2-135m/model.safetensors ]; then
+            echo "model weights restored from cache"
+          else
+            uv run --project test/grad python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='HuggingFaceTB/SmolLM2-135M', local_dir='data/smollm2-135m', allow_patterns=['*.safetensors','*.json','*.txt'])"
+          fi
+          ls -la data/smollm2-135m/
+
+      - name: Generate golden refs with PyTorch
+        run: |
+          set -e
+          # gen_g4_text.py needs a local TinyStories checkout; g4_text.txt is committed.
+          for gen in test/grad/gen_*.py; do
+            case "$gen" in *gen_g4_text.py) continue;; esac
+            echo "=== $gen ==="
+            uv run --project test/grad python "$gen"
+          done
+
+      - name: Verify golden refs
+        run: |
+          set -e
+          n=$(ls test/grad/*.bin 2>/dev/null | wc -l | tr -d ' ')
+          echo "generated $n reference .bin files"
+          if [ "$n" -lt 50 ]; then
+            echo "ERROR: too few golden refs ($n); a generator likely failed"
+            ls -la test/grad || true
+            exit 1
+          fi
+
+      - name: Build tests
+        run: make tests
+
+      - name: Run kernel tests
+        run: |
+          set -e
+          for t in build/test/*_test; do
+            case "$(basename "$t")" in
+              g3_test|g4_test) continue;;   # gated separately below
+            esac
+            echo "=== $t ==="
+            "$t"
+          done
+
+      - name: Run g3 (10-step loss curve + weights vs PyTorch)
+        run: ./build/test/g3_test
+
+      - name: Run g4 (200-step loss decrease, fp32)
+        run: BM_PRECISION=fp32 ./build/test/g4_test
+
+      - name: Run g4 (200-step loss decrease, device precision)
+        # CI's paravirtual GPU has no bf16, so the device default here is fp16;
+        # bf16 is covered on real hardware. fp32 is the reference path.
+        run: ./build/test/g4_test
+
+      - name: Run inference E2E
+        run: |
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100                       # produced non-trivial output
+          test "$a" = "$b"                         # deterministic for a fixed seed
+          echo "  E2E ok (fp32): non-empty and deterministic"
+
+      - name: Run inference E2E (bf16)
+        run: |
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision bf16 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (bf16): non-empty and deterministic"
+
+      - name: Run inference E2E (fp16)
+        run: |
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --precision fp16 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (fp16): non-empty and deterministic"
+
+      - name: Run inference E2E (q8)
+        run: |
+          set -e
+          run_once() { ./build/baremetal run data/smollm2-135m "Once upon a time" --steps 8 --temp 0.7 --top-k 40 --seed 42 --quant q8 "$@"; }
+          a=$(run_once); b=$(run_once)
+          echo "$a"
+          test ${#a} -gt 100
+          test "$a" = "$b"
+          echo "  E2E ok (q8): non-empty and deterministic"
+
+      - name: Sanitizer build (ASan + UBSan) - unit tests
+        run: |
+          set -e
+          make clean
+          make CFLAGS="-std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -I include -I src -DBAREMETAL_TRAIN" \
+               LDFLAGS="-fsanitize=address,undefined -framework Metal -framework Foundation" \
+               build/test/graph_capacity_test build/test/api_test
+          export ASAN_OPTIONS=detect_leaks=0
+          export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          ./build/test/graph_capacity_test
+          ./build/test/api_test

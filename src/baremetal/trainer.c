@@ -241,12 +241,26 @@ static int find_wt_id(bmt_graph_t* g, void* ptr) {
     return -1;
 }
 
-/* embedding lookup: x[s,:] = wte[token[s]*D + :]  (SmolLM2: no scale, no wpe) */
+/* embedding lookup: x[s,:] = wte[token[s]*D + :]  (SmolLM2: no scale, no wpe).
+ * Reads from the fp32 master (AdamW updates master_w in mixed precision, or the
+ * fp32 scheduler buffer in FP32 mode); the CPU token_embedding_table is only
+ * the initializer and is NOT kept in sync after training starts. */
 static void embed_lookup(bm_trainer_t* t, const int* tokens, int S) {
     int D = t->model->arch.dim;
-    float* wte = t->model->token_embedding_table;
+    bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
+    int wte_id = find_wt_id(g, t->model->token_embedding_table);
+    backend_buffer_t* src = NULL;
+    for (int i = 0; i < t->n_opt_states; i++) {
+        if (t->opt_states[i].grad_tensor_id == wte_id) {
+            if (t->opt_states[i].master_w) src = t->opt_states[i].master_w;
+            break;
+        }
+    }
+    if (!src) src = bmt_scheduler_get_buffer(t->sched, wte_id);
+    const float* wte = (const float*)backend_buffer_map(src);
     for (int s = 0; s < S; s++)
         memcpy(t->x_in + s*D, wte + (size_t)tokens[s]*D, D*sizeof(float));
+    backend_buffer_unmap(src);
     bmt_scheduler_set_input(t->sched, t->t_x_id, t->x_in, (size_t)S*D*sizeof(float));
 }
 
@@ -277,7 +291,9 @@ static void embed_backward(bm_trainer_t* t, const int* tokens, int S) {
         backend_encoder_t* enc = backend_encode_begin(be);
         backend_buffer_t* bufs[] = { b_tok, bmt_scheduler_get_grad_buffer(t->sched, t->t_x_id),
                                      bmt_scheduler_get_grad_buffer(t->sched, wte_id), t->k_embed_param };
-        backend_encode_dispatch(enc, t->k_embed_bwd, bufs, NULL, 4, S*D, 1, 1, S*D, 1, 1);
+        int n_threads = S * D;
+        int tg = n_threads < 256 ? n_threads : 256;
+        backend_encode_dispatch(enc, t->k_embed_bwd, bufs, NULL, 4, n_threads,1,1, tg,1,1);
         backend_encode_commit(enc); backend_encode_wait(enc);
     }
     backend_buffer_free(b_tok);
