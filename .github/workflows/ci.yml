@@ -178,3 +178,21 @@ jobs:
           export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
           ./build/test/graph_capacity_test
           ./build/test/api_test
+
+  macos27-preview:
+    # Informational only: the next macOS (27) is a public-preview image reached
+    # via the xcode-27 label. It has no SLA and updates weekly, so it must never
+    # block merges -- but it surfaces upcoming SDK/toolchain breakage early.
+    runs-on: xcode-27
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build (inference + training)
+        run: |
+          make clean
+          make baremetal
+          make baremetal-train
+
