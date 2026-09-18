@@ -81,6 +81,9 @@ jobs:
         run: |
           set -e
           for t in build/test/*_test; do
+            case "$(basename "$t")" in
+              g3_test|g4_test) continue;;   # gated separately below
+            esac
             echo "=== $t ==="
             "$t"
           done
