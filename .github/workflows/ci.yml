@@ -74,6 +74,17 @@ jobs:
             python "$gen" || exit 1
           done
 
+      - name: Verify golden refs
+        run: |
+          set -e
+          n=$(ls test/grad/*.bin 2>/dev/null | wc -l | tr -d ' ')
+          echo "generated $n reference .bin files"
+          if [ "$n" -lt 50 ]; then
+            echo "ERROR: too few golden refs ($n); a generator likely failed"
+            ls -la test/grad || true
+            exit 1
+          fi
+
       - name: Build tests
         run: make tests
 
