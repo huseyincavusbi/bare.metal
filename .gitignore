@@ -6,3 +6,5 @@ data/
 *.bin
 .DS_Store
 docs/
+.venv/
+__pycache__/
