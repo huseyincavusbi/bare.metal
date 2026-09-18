@@ -149,3 +149,15 @@ jobs:
           test ${#a} -gt 100
           test "$a" = "$b"
           echo "  E2E ok (q8): non-empty and deterministic"
+
+      - name: Sanitizer build (ASan + UBSan) - unit tests
+        run: |
+          set -e
+          make clean
+          make CFLAGS="-std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -I include -I src -DBAREMETAL_TRAIN" \
+               LDFLAGS="-fsanitize=address,undefined -framework Metal -framework Foundation" \
+               build/test/graph_capacity_test build/test/api_test
+          export ASAN_OPTIONS=detect_leaks=0
+          export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          ./build/test/graph_capacity_test
+          ./build/test/api_test
