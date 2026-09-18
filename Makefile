@@ -1,6 +1,6 @@
 # bare.metal Makefile
-# Inference: make baremetal
-# Training:  make baremetal-train (adds BAREMETAL_TRAIN=1)
+# Inference: make baremetal      (no BAREMETAL_TRAIN)
+# Training:  make baremetal-train (with -DBAREMETAL_TRAIN)
 
 BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
@@ -9,7 +9,8 @@ TEST_SRCS := $(wildcard test/*_test.c)
 TEST_BINS := $(patsubst test/%.c,build/test/%,$(TEST_SRCS))
 
 CC      := clang
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -O2 -I include -I src -DBAREMETAL_TRAIN
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -O2 -I include -I src
+CFLAGS_TRAIN := $(CFLAGS) -DBAREMETAL_TRAIN
 LDFLAGS := -framework Metal -framework Foundation
 
 OBJC_SRCS := src/backend/metal/device.m \
@@ -32,9 +33,11 @@ C_SRCS    := src/utils/log.c \
 
 TOOL_SRCS := tools/cli.c tools/run.c
 
-OBJS      := $(patsubst %.c,build/%.o,$(C_SRCS))
-OBJS      += $(patsubst %.m,build/%.o,$(OBJC_SRCS))
+OBJS      := $(patsubst %.c,build/%.o,$(C_SRCS)) $(patsubst %.m,build/%.o,$(OBJC_SRCS))
 TOOL_OBJS := $(patsubst %.c,build/%.o,$(TOOL_SRCS))
+
+OBJS_TRAIN      := $(patsubst %.c,build/train/%.o,$(C_SRCS)) $(patsubst %.m,build/train/%.o,$(OBJC_SRCS))
+TOOL_OBJS_TRAIN := $(patsubst %.c,build/train/%.o,$(TOOL_SRCS))
 
 METAL_SRC := src/kernels/forward.metal src/kernels/backward.metal src/anneal/adamw.metal
 METAL_BIN := build/kernels/default.metallib
@@ -57,18 +60,23 @@ dirs:
 	@mkdir -p build/kernels
 	@mkdir -p build/src/kernels
 	@mkdir -p build/test
+	@mkdir -p build/train/src/utils
+	@mkdir -p build/train/src/baremetal
+	@mkdir -p build/train/src/backend/metal
+	@mkdir -p build/train/tools
+	@mkdir -p build/train/src/kernels
 
 $(BINARY): $(OBJS) $(TOOL_OBJS) $(METAL_BIN)
 	$(CC) $(CFLAGS) $(OBJS) $(TOOL_OBJS) -o $@ $(LDFLAGS)
-	@echo "  Built: $@"
+	@echo "  Built: $@ (inference)"
 
-$(BINARY_TRAIN): $(OBJS) $(TOOL_OBJS) $(METAL_BIN)
-	$(CC) $(CFLAGS) $(OBJS) $(TOOL_OBJS) -o $@ $(LDFLAGS)
-	@echo "  Built: $@ (with training)"
+$(BINARY_TRAIN): $(OBJS_TRAIN) $(TOOL_OBJS_TRAIN) $(METAL_BIN)
+	$(CC) $(CFLAGS_TRAIN) $(OBJS_TRAIN) $(TOOL_OBJS_TRAIN) -o $@ $(LDFLAGS)
+	@echo "  Built: $@ (training)"
 
-build/test/%: test/%.c $(OBJS) $(METAL_BIN)
-	$(CC) $(CFLAGS) -c $< -o $@.o
-	$(CC) $(CFLAGS) $@.o $(OBJS) -o $@ $(LDFLAGS)
+build/test/%: test/%.c $(OBJS_TRAIN) $(METAL_BIN)
+	$(CC) $(CFLAGS_TRAIN) -c $< -o $@.o
+	$(CC) $(CFLAGS_TRAIN) $@.o $(OBJS_TRAIN) -o $@ $(LDFLAGS)
 	@mkdir -p build/test/kernels
 	@ln -sf ../../kernels/default.metallib build/test/kernels/default.metallib
 	@echo "  Built: $@"
@@ -76,8 +84,14 @@ build/test/%: test/%.c $(OBJS) $(METAL_BIN)
 build/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+build/train/%.o: %.c
+	$(CC) $(CFLAGS_TRAIN) -c $< -o $@
+
 build/%.o: %.m
 	$(CC) $(CFLAGS) -fobjc-arc -c $< -o $@
+
+build/train/%.o: %.m
+	$(CC) $(CFLAGS_TRAIN) -fobjc-arc -c $< -o $@
 
 $(METAL_BIN): $(METAL_SRC)
 	xcrun -sdk macosx metal -c src/kernels/forward.metal -o build/kernels/forward.air
