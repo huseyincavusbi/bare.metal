@@ -8,15 +8,31 @@ on:
 
 jobs:
   build-and-test:
-    # Pinned to the arm64 image the project targets (Metal requires arm64).
-    # macos-latest flips between images and has previously changed the SDK
-    # underneath us; pin explicitly and re-evaluate deliberately.
-    runs-on: macos-26
+    # Run the identical pipeline on macOS 26 (blocking, GA) and macOS 27
+    # (non-blocking preview via the xcode-27 image). The preview job must never
+    # block merges, but it exercises the whole suite so upcoming SDK/toolchain
+    # breakage surfaces early.
+    name: build-and-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26          # GA arm64; macos-latest currently points here
+            experimental: false
+          - os: xcode-27          # macOS 27 public preview (no SLA, weekly churn)
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Metal toolchain (preview only)
+        # macOS 26 bundles the Metal toolchain; the Xcode 27 preview image does not.
+        if: matrix.experimental
+        run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Assert runner capabilities
         run: |
@@ -178,25 +194,3 @@ jobs:
           export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
           ./build/test/graph_capacity_test
           ./build/test/api_test
-
-  macos27-preview:
-    # Informational only: the next macOS (27) is a public-preview image reached
-    # via the xcode-27 label. It has no SLA and updates weekly, so it must never
-    # block merges -- but it surfaces upcoming SDK/toolchain breakage early.
-    # Unlike macOS 26, the Xcode 27 image does not bundle the Metal toolchain.
-    runs-on: xcode-27
-    continue-on-error: true
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Metal toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
-
-      - name: Build (inference + training)
-        run: |
-          make clean
-          make baremetal
-          make baremetal-train
-
