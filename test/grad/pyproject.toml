@@ -1,0 +1,12 @@
+[project]
+name = "baremetal-testrefs"
+version = "0.0.0"
+description = "Golden-reference generators for bare.metal test suite (test tooling only; the engine is C/Metal)"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "transformers",
+    "numpy",
+    "safetensors",
+    "huggingface_hub",
+]
