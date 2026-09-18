@@ -8,11 +8,23 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    # Pinned to the arm64 image the project targets (Metal requires arm64).
+    # macos-latest flips between images and has previously changed the SDK
+    # underneath us; pin explicitly and re-evaluate deliberately.
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Assert runner capabilities
+        run: |
+          set -e
+          echo "arch:   $(uname -m)"
+          echo "kernel: $(uname -r)"
+          test "$(uname -m)" = "arm64" || { echo "ERROR: Metal backend requires arm64"; exit 1; }
+          xcrun -sdk macosx metal --version
+          xcrun -sdk macosx metallib --version >/dev/null 2>&1 || true
 
       - name: Display system information
         run: |
