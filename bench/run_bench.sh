@@ -4,21 +4,23 @@
 # MUST run on real Apple Silicon hardware. The GitHub CI runners are paravirtual
 # (VM GPU, no bf16), so their numbers are not representative.
 #
+# Energy is ON by default: it wraps runs in `sudo powermetrics` (needs
+# passwordless sudo; skipped with a warning otherwise). Two dedicated runs give
+# per-phase energy (prefill-heavy and decode-heavy), and the measured average
+# watts are propagated into every sweep file.
+#
 # Usage:
 #   bench/run_bench.sh [options]
 #
 # Options:
 #   --model DIR      model directory            (default: data/smollm2-135m)
 #   --out DIR        results directory          (default: bench/results)
-#   --reps N         measured reps per config   (default: 5)
+#   --reps N         measured reps per config  (default: 5)
 #   --warmup N       warmup reps                (default: 2)
 #   --gen N          tokens to generate         (default: 128)
 #   --quick          single config, fewer reps  (smoke)
-#   --energy         also measure energy via powermetrics (needs sudo)
-#   --no-sweep       only run the base config
-#
-# Each configuration produces one JSON file (baremetal.bench/v1 schema) under
-# the results directory.
+#   --no-sweep       only the base config
+#   --no-energy      skip powermetrics energy capture
 set -euo pipefail
 
 MODEL="${MODEL:-data/smollm2-135m}"
@@ -26,20 +28,20 @@ OUTDIR="${OUTDIR:-bench/results}"
 REPS=5
 WARMUP=2
 GEN=128
-ENERGY=0
 SWEEP=1
 QUICK=0
+ENERGY=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model)  MODEL="$2"; shift 2;;
-    --out)    OUTDIR="$2"; shift 2;;
-    --reps)   REPS="$2"; shift 2;;
-    --warmup) WARMUP="$2"; shift 2;;
-    --gen)    GEN="$2"; shift 2;;
-    --energy) ENERGY=1; shift;;
+    --model)    MODEL="$2"; shift 2;;
+    --out)      OUTDIR="$2"; shift 2;;
+    --reps)     REPS="$2"; shift 2;;
+    --warmup)   WARMUP="$2"; shift 2;;
+    --gen)      GEN="$2"; shift 2;;
     --no-sweep) SWEEP=0; shift;;
-    --quick)  QUICK=1; REPS=2; WARMUP=1; GEN=64; SWEEP=0; shift;;
+    --no-energy) ENERGY=0; shift;;
+    --quick)    QUICK=1; REPS=2; WARMUP=1; GEN=64; SWEEP=0; shift;;
     -h|--help) sed -n '2,26p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -85,54 +87,114 @@ for cfg in $CONFIGS; do
   run_one "$prompt" "$prec" "p${prompt}_${prec}" "$extra"
 done
 
-# ---- optional energy measurement (Apple-specific, needs sudo) --------------
+# ---- energy capture (default on; powermetrics needs passwordless sudo) -----
+HAVE_ENERGY=0
 if [ "$ENERGY" -eq 1 ]; then
   if ! command -v powermetrics >/dev/null 2>&1; then
-    echo "powermetrics not found; skipping energy" >&2
+    echo "energy: powermetrics not found; skipping" >&2
   elif ! sudo -n true 2>/dev/null; then
     echo "energy: needs passwordless sudo for powermetrics; skipping" >&2
   else
-    pmf="$(mktemp)"
-    echo "== energy run (powermetrics) =="
-    sudo powermetrics --samplers gpu_power,cpu_power -i 500 -o "$pmf" >/dev/null 2>&1 &
-    pm_pid=$!
-    sleep 2
-    eout="$OUTDIR/energy_bf16.json"
-    $BENCH --model "$MODEL" --prompt-tokens 128 --gen 1024 \
-           --warmup 1 --reps 1 --seed 42 --precision bf16 --out "$eout"
-    kill "$pm_pid" 2>/dev/null || true
-    wait "$pm_pid" 2>/dev/null || true
-    avgw="$(python3 - "$pmf" <<'PY'
-import re, sys
-# Average the "GPU Power" and "CPU Power" (mW) samples across the file.
-gpu=[]; cpu=[]
-for line in open(sys.argv[1], errors='ignore'):
-    m=re.search(r'GPU Power:\s*([\d.]+)\s*mW', line)
-    if m: gpu.append(float(m.group(1)))
-    m=re.search(r'CPU Power:\s*([\d.]+)\s*mW', line)
-    if m: cpu.append(float(m.group(1)))
-vals=[x for x in (gpu+cpu) if x>0]
-print(f"{sum(vals)/len(vals)/1000.0:.2f}" if vals else "0")
-PY
-)"
-    rm -f "$pmf"
-    python3 - "$eout" "$avgw" <<'PY'
-import json, sys
-p, avgw = sys.argv[1], float(sys.argv[2])
-d = json.load(open(p))
-r = d["results"]
-active = r.get("active_seconds", 0.0)
-tokens = r.get("generated_tokens", 0)
-joules = avgw * active
-r["energy"] = {
-    "avg_w": avgw,
-    "joules": round(joules, 2),
-    "j_per_token": round(joules / tokens, 4) if tokens else 0.0,
-}
-json.dump(d, open(p, "w"), indent=2)
-print(f"  energy: {avgw:.2f} W -> {joules:.2f} J, {r['energy']['j_per_token']:.4f} J/token")
-PY
+    HAVE_ENERGY=1
   fi
+fi
+
+energy_run() {
+  # $1 = output json; rest = bench args. Wraps the run in powermetrics and
+  # merges avg power / residency / joules into the JSON.
+  local out="$1"; shift
+  local pmf; pmf="$(mktemp)"
+  sudo powermetrics --samplers gpu_power,cpu_power -i 250 -o "$pmf" >/dev/null 2>&1 &
+  local pm_pid=$!
+  sleep 2
+  # shellcheck disable=SC2086
+  $BENCH --model "$MODEL" --seed 42 "$@" --out "$out" >/dev/null
+  kill "$pm_pid" 2>/dev/null || true
+  wait "$pm_pid" 2>/dev/null || true
+  python3 - "$out" "$pmf" <<'PY'
+import json, re, sys
+out_path, pm_path = sys.argv[1], sys.argv[2]
+cpu, gpu, act = [], [], []
+for line in open(pm_path, errors='ignore'):
+    m = re.search(r'CPU Power:\s*([\d.]+)\s*mW', line)
+    if m: cpu.append(float(m.group(1)))
+    m = re.search(r'GPU Power:\s*([\d.]+)\s*mW', line)
+    if m: gpu.append(float(m.group(1)))
+    m = re.search(r'GPU HW [Aa]ctive [Rr]esidency:\s*([\d.]+)\s*%', line)
+    if m: act.append(float(m.group(1)))
+def avg(xs): return sum(xs)/len(xs)/1000.0 if xs else 0.0   # -> watts
+cpu_w, gpu_w, act_pct = avg(cpu), avg(gpu), (sum(act)/len(act) if act else 0.0)
+total_w = cpu_w + gpu_w
+d = json.load(open(out_path))
+r, c = d["results"], d["config"]
+active = r.get("active_seconds", 0.0)
+reps = c.get("reps", 1)
+joules = total_w * active
+energy = {
+    "avg_w": round(total_w, 2),
+    "avg_cpu_w": round(cpu_w, 2),
+    "avg_gpu_w": round(gpu_w, 2),
+    "gpu_active_pct": round(act_pct, 2),
+    "joules": round(joules, 2),
+}
+# phase attribution: decode-heavy run counts decode steps; prefill-heavy run
+# counts prompt tokens.
+if c.get("gen_tokens", 0) > 8:
+    dec_tokens = (c["gen_tokens"] - 1) * reps
+    energy["j_per_decode_token"] = round(joules / dec_tokens, 4) if dec_tokens else 0.0
+if c.get("prompt_tokens", 0) > 128 and c.get("gen_tokens", 0) <= 8:
+    pre_tokens = c["prompt_tokens"] * reps
+    energy["j_per_prefill_token"] = round(joules / pre_tokens, 4) if pre_tokens else 0.0
+gen = r.get("generated_tokens", 0)
+energy["j_per_token"] = round(joules / gen, 4) if gen else 0.0
+r["energy"] = energy
+json.dump(d, open(out_path, "w"), indent=2)
+print(f"  {out_path}: {total_w:.2f} W (cpu {cpu_w:.2f} + gpu {gpu_w:.2f}), "
+      f"gpu active {act_pct:.1f}%, {joules:.1f} J")
+PY
+  rm -f "$pmf"
+}
+
+if [ "$HAVE_ENERGY" -eq 1 ]; then
+  echo
+  echo "== energy: decode-heavy run =="
+  energy_run "$OUTDIR/energy_decode.json" --prompt-tokens 128 --gen 512 \
+             --warmup 1 --reps 1 --precision bf16
+  echo "== energy: prefill-heavy run =="
+  energy_run "$OUTDIR/energy_prefill.json" --prompt-tokens 512 --gen 2 \
+             --warmup 1 --reps 1 --precision bf16
+
+  # Propagate measured average watts into every sweep result (approximation:
+  # steady-state watts x that file's active window).
+  python3 - "$OUTDIR" <<'PY'
+import json, glob, os, sys
+d = sys.argv[1]
+src = None
+for cand in ("energy_decode.json", "energy_prefill.json"):
+    p = os.path.join(d, cand)
+    if os.path.exists(p):
+        src = json.load(open(p)); break
+if not src:
+    raise SystemExit
+avg_w = src["results"]["energy"]["avg_w"]
+for f in glob.glob(os.path.join(d, "*.json")):
+    if os.path.basename(f).startswith("energy_"):
+        continue
+    try: j = json.load(open(f))
+    except Exception: continue
+    if j.get("schema") != "baremetal.bench/v2": continue
+    r = j["results"]
+    active, gen = r.get("active_seconds", 0), r.get("generated_tokens", 0)
+    if avg_w > 0 and active > 0:
+        r["energy"] = {
+            "avg_w": avg_w,
+            "estimated": True,
+            "joules": round(avg_w * active, 2),
+            "j_per_token": round(avg_w * active / gen, 4) if gen else 0.0,
+        }
+        json.dump(j, open(f, "w"), indent=2)
+print(f"  propagated {avg_w:.2f} W into all sweep results")
+PY
 fi
 
 echo
@@ -144,15 +206,20 @@ rows = []
 for f in sorted(glob.glob(os.path.join(d, "*.json"))):
     try: j = json.load(open(f))
     except Exception: continue
-    if j.get("schema") != "baremetal.bench/v1": continue
+    if j.get("schema") != "baremetal.bench/v2": continue
     m, c, r = j["meta"], j["config"], j["results"]
+    pre = r["prefill"]["tok_s"]["p50"]
+    dec = r["decode"]["tok_s"]["p50"]
+    jpt = r.get("energy", {}).get("j_per_token", 0.0)
     rows.append((os.path.basename(f), m["precision"], m["quant"],
-                 c["prompt_tokens"], c["gen_tokens"],
-                 r["prefill"]["tok_s"]["median"], r["decode"]["tok_s"]["median"],
-                 r["ttft_ms"]["p50"], r["itl_ms"]["p50"]))
+                 c["prompt_tokens"], c["gen_tokens"], pre, dec,
+                 r["ttft_ms"]["p50"], r["itl_ms"]["p50"],
+                 r["memory"]["rss_peak_bytes"] / 1e6, jpt))
 if not rows:
     print("(no results)"); raise SystemExit
-print(f"{'file':<22}{'prec':<6}{'q':<5}{'Np':>5}{'Ng':>5}{'pref t/s':>10}{'dec t/s':>10}{'ttft ms':>9}{'itl ms':>8}")
+print(f"{'file':<24}{'prec':<6}{'q':<5}{'Np':>5}{'Ng':>5}{'pre t/s':>9}{'dec t/s':>9}"
+      f"{'ttft ms':>9}{'itl ms':>8}{'rss MB':>8}{'J/tok':>8}")
 for x in rows:
-    print(f"{x[0]:<22}{x[1]:<6}{x[2]:<5}{x[3]:>5}{x[4]:>5}{x[5]:>10.1f}{x[6]:>10.1f}{x[7]:>9.2f}{x[8]:>8.2f}")
+    print(f"{x[0]:<24}{x[1]:<6}{x[2]:<5}{x[3]:>5}{x[4]:>5}{x[5]:>9.1f}{x[6]:>9.1f}"
+          f"{x[7]:>9.2f}{x[8]:>8.2f}{x[9]:>8.0f}{x[10]:>8.4f}")
 PY
