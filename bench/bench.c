@@ -252,6 +252,7 @@ int main(int argc, char** argv) {
     }
 
     /* ---- measured reps ---- */
+    if (ctx->backend_ctx) backend_reset_gpu_timing(ctx->backend_ctx);
     active_start_unix = (long)time(NULL);
     for (int r = 0; r < reps; r++) {
         bm_reset_session(sess);
@@ -291,6 +292,8 @@ int main(int argc, char** argv) {
     }
     active_end_unix = (long)time(NULL);
     snap_rusage(&rs_end);
+    double gpu_busy_ms = ctx->backend_ctx ? backend_get_gpu_busy_ms(ctx->backend_ctx) : 0.0;
+    unsigned long long cmd_buffers = ctx->backend_ctx ? backend_get_command_buffers(ctx->backend_ctx) : 0;
 
     /* ---- memory ---- */
     size_t rss = bm_peak_rss_bytes();
@@ -329,6 +332,12 @@ int main(int argc, char** argv) {
     long majflt_load = rs_load.majflt - rs_start.majflt;
     long minflt_load = rs_load.minflt - rs_start.minflt;
     long inblock_load = rs_load.inblock - rs_start.inblock;
+
+    /* ---- GPU execution vs host time ---- */
+    double active_ms = active_s * 1000.0;
+    double host_ms = active_ms > gpu_busy_ms ? active_ms - gpu_busy_ms : 0.0;
+    double busy_pct = active_ms > 0.0 ? gpu_busy_ms / active_ms * 100.0 : 0.0;
+    double buffers_per_tok = total_gen_tokens > 0 ? (double)cmd_buffers / (double)total_gen_tokens : 0.0;
 
     /* ---- energy (from powermetrics watts supplied by the wrapper) ---- */
     double energy_joules = 0.0, j_per_token = 0.0;
@@ -565,6 +574,13 @@ int main(int argc, char** argv) {
     fprintf(out, "      \"itl_growth_pct\": %.2f,\n", itl_growth);
     fprintf(out, "      \"cov\": { \"prefill\": %.2f, \"decode\": %.2f, \"ttft\": %.2f, \"itl\": %.2f }\n",
             cov_pre, cov_dec, cov_ttft, cov_itl);
+    fprintf(out, "    },\n");
+    fprintf(out, "    \"gpu_exec\": {\n");
+    fprintf(out, "      \"busy_ms\": %.3f,\n", gpu_busy_ms);
+    fprintf(out, "      \"host_ms\": %.3f,\n", host_ms);
+    fprintf(out, "      \"busy_pct\": %.2f,\n", busy_pct);
+    fprintf(out, "      \"command_buffers\": %llu,\n", cmd_buffers);
+    fprintf(out, "      \"buffers_per_decode_token\": %.2f\n", buffers_per_tok);
     fprintf(out, "    },\n");
     fprintf(out, "    \"energy\": { \"avg_w\": %.2f, \"joules\": %.2f, \"j_per_token\": %.4f },\n",
             avg_w, energy_joules, j_per_token);
