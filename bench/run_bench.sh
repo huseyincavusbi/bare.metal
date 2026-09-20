@@ -110,7 +110,9 @@ energy_run() {
   # privileged sampler, even if the benchmark fails.
   local out="$1"; shift
   local pmf; pmf="$(mktemp)"
-  sudo powermetrics --samplers cpu_power,gpu_power,thermal,ane_power -i 250 -o "$pmf" >/dev/null 2>&1 &
+  local pmlog="$RUN_DIR/$(basename "$out" .json).powermetrics.txt"
+  sudo powermetrics --samplers cpu_power,gpu_power,thermal,ane_power --show-process-gpu \
+       -i 250 -o "$pmf" >/dev/null 2>&1 &
   local pm_pid=$!
   sleep 1
   local rc=0
@@ -119,7 +121,7 @@ energy_run() {
   kill "$pm_pid" 2>/dev/null || true
   wait "$pm_pid" 2>/dev/null || true
   python3 - "$out" "$pmf" <<'PY' || true
-import json, re, sys, datetime
+import json, re, sys, datetime, os
 out_path, pm_path = sys.argv[1], sys.argv[2]
 d = json.load(open(out_path))
 r, c = d["results"], d["config"]
@@ -200,6 +202,9 @@ energy["avg_cpu_w"] = round(cpu_w, 2)
 energy["avg_gpu_w"] = round(gpu_w, 2)
 energy["avg_ane_w"] = round(ane_w, 2)
 energy["avg_w"] = round(total_w, 2)
+# raw powermetrics (incl. per-process GPU via --show-process-gpu) kept for
+# inspection; per-process extraction is left to the reader for now.
+energy["powermetrics_log"] = os.path.basename(out_path).replace(".json", ".powermetrics.txt")
 
 active = r.get("active_seconds", 0.0)
 reps = c.get("reps", 1)
@@ -222,6 +227,7 @@ for k in ("cpu_die_c", "gpu_die_c", "gpu_freq_mhz", "gpu_active_pct"):
 print(f"  {out_path}: {total_w:.2f} W (cpu {cpu_w:.2f} + gpu {gpu_w:.2f} + ane {ane_w:.2f}), "
       f"{joules:.1f} J, {len(sel)} samples" + (", " + ", ".join(extra) if extra else ""))
 PY
+  cp -f "$pmf" "$pmlog" 2>/dev/null || true
   rm -f "$pmf"
   return "$rc"
 }
