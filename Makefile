@@ -4,6 +4,7 @@
 
 BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
+BENCH_BIN := build/bench/bench
 
 TEST_SRCS := $(wildcard test/*_test.c)
 TEST_BINS := $(patsubst test/%.c,build/test/%,$(TEST_SRCS))
@@ -42,7 +43,7 @@ TOOL_OBJS_TRAIN := $(patsubst %.c,build/train/%.o,$(TOOL_SRCS))
 METAL_SRC := src/kernels/forward.metal src/kernels/backward.metal src/anneal/adamw.metal
 METAL_BIN := build/kernels/default.metallib
 
-.PHONY: all clean baremetal baremetal-train dirs tests
+.PHONY: all clean baremetal baremetal-train dirs tests bench
 
 all: dirs baremetal
 
@@ -51,6 +52,15 @@ baremetal: dirs $(BINARY)
 baremetal-train: dirs $(BINARY_TRAIN)
 
 tests: dirs $(TEST_BINS)
+
+bench: dirs $(BENCH_BIN)
+
+$(BENCH_BIN): bench/bench.c $(OBJS) $(METAL_BIN)
+	@mkdir -p build/bench
+	$(CC) $(CFLAGS) -o $@ bench/bench.c $(OBJS) $(LDFLAGS)
+	@mkdir -p build/bench/kernels
+	@ln -sf ../../kernels/default.metallib build/bench/kernels/default.metallib
+	@echo "  Built: $@"
 
 dirs:
 	@mkdir -p build/src/utils
