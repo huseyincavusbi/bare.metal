@@ -58,6 +58,12 @@ struct bmt_scheduler_s {
     int kv_dim;
     int n_layers;
     int seq_len;
+
+    /* profiling */
+    int   prof_enabled;
+    int   prof_max;
+    int   prof_n;
+    int*  prof_node;
 };
 
 bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers) {
@@ -516,11 +522,52 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             ttx = node->params[1]; // HD
         }
         
+        if (sched->prof_enabled && sched->prof_n < sched->prof_max)
+            sched->prof_node[sched->prof_n++] = i;
         backend_encode_dispatch(enc, kn, bufs, NULL, n_bufs, gtx, gty, gtz, ttx, tty, ttz);
     }
     
     backend_encode_commit(enc);
     backend_encode_wait(enc);
+}
+
+int bmt_scheduler_profile_begin(bmt_scheduler_t* sched, int max_nodes) {
+    if (!sched || max_nodes <= 0) return -1;
+    if (backend_profile_begin(sched->backend, max_nodes * 2 + 2) != 0) return -1;
+    free(sched->prof_node);
+    sched->prof_node = (int*)malloc((size_t)max_nodes * sizeof(int));
+    if (!sched->prof_node) {
+        uint64_t drop;
+        backend_profile_end(sched->backend, &drop, 0);
+        return -1;
+    }
+    sched->prof_max = max_nodes;
+    sched->prof_n = 0;
+    sched->prof_enabled = 1;
+    return 0;
+}
+
+int bmt_scheduler_profile_end(bmt_scheduler_t* sched, double* out_ms, int max_nodes) {
+    if (!sched || !out_ms || max_nodes <= 0) return 0;
+    int cap = sched->prof_n * 2 + 2;
+    uint64_t* ts = (uint64_t*)malloc((size_t)cap * sizeof(uint64_t));
+    int cnt = ts ? backend_profile_end(sched->backend, ts, cap) : 0;
+    int nodes = sched->graph->n_nodes;
+    for (int i = 0; i < nodes && i < max_nodes; i++) out_ms[i] = 0.0;
+    for (int k = 0; k < sched->prof_n; k++) {
+        int s0 = 2 * k, s1 = 2 * k + 1;
+        if (s1 < cnt) {
+            int node = sched->prof_node[k];
+            if (node >= 0 && node < max_nodes)
+                out_ms[node] += (double)(ts[s1] - ts[s0]) / 1e6;
+        }
+    }
+    free(ts);
+    free(sched->prof_node);
+    sched->prof_node = NULL;
+    sched->prof_enabled = 0;
+    sched->prof_n = 0;
+    return nodes;
 }
 
 void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {

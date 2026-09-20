@@ -42,4 +42,10 @@ void bmt_scheduler_get_grad(bmt_scheduler_t* sched, int tensor_id, void* data, s
 backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id);
 backend_buffer_t* bmt_scheduler_get_grad_buffer(bmt_scheduler_t* sched, int tensor_id);
 
+/* Per-node GPU timing. begin() arms counter sampling (max_nodes = graph node
+ * count); the next bmt_scheduler_run records a timestamp pair per dispatched
+ * node. end() fills out_ms[node_index] (ms) and returns the node count. */
+int bmt_scheduler_profile_begin(bmt_scheduler_t* sched, int max_nodes);
+int bmt_scheduler_profile_end(bmt_scheduler_t* sched, double* out_ms, int max_nodes);
+
 #endif
