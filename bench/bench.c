@@ -19,6 +19,8 @@
 #include "baremetal.h"
 #include "baremetal/context.h"
 #include "baremetal/model.h"
+#include "baremetal/graph.h"
+#include "baremetal/quant.h"
 #include "backend/backend.h"
 #include "metrics.h"
 
@@ -49,6 +51,8 @@ static void usage(const char* prog) {
         "  --precision P       fp32|fp16|bf16 (default device)\n"
         "  --quant q8          quantize matmul weights        (default off)\n"
         "  --avg-w W           average watts (from powermetrics)\n"
+        "  --peak-gbps F       peak memory bandwidth for %% of peak (default 0=off)\n"
+        "  --peak-gflops F     peak FP32 GFLOPS for %% of peak   (default 0=off)\n"
         "  --power SRC         ac|battery|unknown            (default auto)\n"
         "  --no-raw            omit raw sample arrays         (default on)\n"
         "  --out FILE          write JSON here (default stdout)\n",
@@ -71,6 +75,25 @@ static void emit_arr(FILE* f, const double* a, int n) {
     fputc(']', f);
 }
 
+/* Total bytes occupied by weight tensors on the GPU, using the same rule the
+ * scheduler uses to choose a storage format. */
+static size_t model_weight_bytes(bm_model_t* m) {
+    bmt_graph_t* g = (bmt_graph_t*)m->graph;
+    if (!g) return 0;
+    size_t total = 0;
+    for (int i = 0; i < g->n_tensors; i++) {
+        bmt_tensor_t* t = &g->tensors[i];
+        if (t->type != BMT_TENSOR_TYPE_WEIGHT || !t->weight_ptr) continue;
+        size_t n = 1;
+        for (int d = 0; d < t->n_dims; d++) n *= t->dims[d];
+        if (n == 0) continue;
+        if (t->quantized)                                   total += bmt_q8_bytes(n);
+        else if (t->n_dims >= 2 && m->precision != BM_PRECISION_FP32) total += n * 2;
+        else                                                total += n * 4;
+    }
+    return total;
+}
+
 int main(int argc, char** argv) {
     const char* model_dir = NULL;
     const char* out_path  = NULL;
@@ -82,6 +105,7 @@ int main(int argc, char** argv) {
     int   quant = 0;
     int   raw = 1;
     double avg_w = 0.0;
+    double peak_gbps = 0.0, peak_gflops = 0.0;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--model") && i+1 < argc)         model_dir = argv[++i];
@@ -94,6 +118,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--precision") && i+1 < argc)     prec_arg = argv[++i];
         else if (!strcmp(argv[i], "--quant") && i+1 < argc)         quant = !strcmp(argv[++i], "q8");
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)         avg_w = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--peak-gbps") && i+1 < argc)     peak_gbps = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--peak-gflops") && i+1 < argc)   peak_gflops = atof(argv[++i]);
         else if (!strcmp(argv[i], "--power") && i+1 < argc)         power_arg = argv[++i];
         else if (!strcmp(argv[i], "--no-raw"))                      raw = 0;
         else if (!strcmp(argv[i], "--out") && i+1 < argc)           out_path = argv[++i];
@@ -247,6 +273,30 @@ int main(int argc, char** argv) {
     size_t gpu_peak = ctx->backend_ctx ? backend_get_peak_allocated_memory(ctx->backend_ctx) : 0;
     double kv_bytes_per_token = (double)m->arch.n_layers * 2.0 * (double)m->kv_dim * 4.0;
     double kv_total = kv_bytes_per_token * (double)max_seq;
+
+    /* ---- derived analytics (from measurements already collected) ---- */
+    size_t model_bytes = model_weight_bytes(m);
+    double bytes_per_param = m->n_parameters ? (double)model_bytes / (double)m->n_parameters : 0.0;
+    double bytes_per_tok = (double)model_bytes + kv_bytes_per_token;
+    double itl_p50 = bm_percentile_copy(itl_all, itl_n, 50.0);
+    double itl_s = itl_p50 / 1000.0;
+    double achieved_gbps = itl_s > 0.0 ? bytes_per_tok / itl_s / 1e9 : 0.0;
+    double gflops = itl_s > 0.0 ? 2.0 * (double)m->n_parameters / itl_s / 1e9 : 0.0;
+    double arith_intensity = bytes_per_tok > 0.0 ? 2.0 * (double)m->n_parameters / bytes_per_tok : 0.0;
+    double bw_pct = peak_gbps > 0.0 ? achieved_gbps / peak_gbps * 100.0 : 0.0;
+    double mfu_pct = peak_gflops > 0.0 ? gflops / peak_gflops * 100.0 : 0.0;
+    int K = itl_n / 2; if (K > 10) K = 10;
+    double itl_first10 = 0.0, itl_last10 = 0.0, itl_growth = 0.0;
+    if (K > 0) {
+        for (int i = 0; i < K; i++) itl_first10 += itl_all[i];
+        for (int i = 0; i < K; i++) itl_last10 += itl_all[itl_n - K + i];
+        itl_first10 /= K; itl_last10 /= K;
+        if (itl_first10 > 0.0) itl_growth = (itl_last10 - itl_first10) / itl_first10 * 100.0;
+    }
+    double cov_pre  = bm_mean(prefill_ms, reps) != 0.0 ? bm_stddev(prefill_ms, reps) / bm_mean(prefill_ms, reps) * 100.0 : 0.0;
+    double cov_dec  = bm_mean(decode_tps, reps)  != 0.0 ? bm_stddev(decode_tps, reps)  / bm_mean(decode_tps, reps)  * 100.0 : 0.0;
+    double cov_ttft = bm_mean(ttft_ms, reps)     != 0.0 ? bm_stddev(ttft_ms, reps)     / bm_mean(ttft_ms, reps)     * 100.0 : 0.0;
+    double cov_itl  = bm_mean(itl_all, itl_n)    != 0.0 ? bm_stddev(itl_all, itl_n)    / bm_mean(itl_all, itl_n)    * 100.0 : 0.0;
 
     /* ---- energy (from powermetrics watts supplied by the wrapper) ---- */
     double energy_joules = 0.0, j_per_token = 0.0;
@@ -431,6 +481,21 @@ int main(int argc, char** argv) {
     fprintf(out, "      \"gpu_peak_bytes\": %zu,\n", gpu_peak);
     fprintf(out, "      \"kv_bytes_per_token\": %.0f,\n", kv_bytes_per_token);
     fprintf(out, "      \"kv_total_bytes\": %.0f\n", kv_total);
+    fprintf(out, "    },\n");
+    fprintf(out, "    \"analysis\": {\n");
+    fprintf(out, "      \"model_bytes\": %zu,\n", model_bytes);
+    fprintf(out, "      \"bytes_per_param\": %.3f,\n", bytes_per_param);
+    fprintf(out, "      \"bytes_per_decode_token\": %.0f,\n", bytes_per_tok);
+    fprintf(out, "      \"achieved_gbps\": %.2f,\n", achieved_gbps);
+    fprintf(out, "      \"gflops\": %.2f,\n", gflops);
+    fprintf(out, "      \"arith_intensity\": %.2f,\n", arith_intensity);
+    fprintf(out, "      \"bw_pct_of_peak\": %.1f,\n", bw_pct);
+    fprintf(out, "      \"mfu_pct_of_peak\": %.1f,\n", mfu_pct);
+    fprintf(out, "      \"itl_first10_ms\": %.3f,\n", itl_first10);
+    fprintf(out, "      \"itl_last10_ms\": %.3f,\n", itl_last10);
+    fprintf(out, "      \"itl_growth_pct\": %.2f,\n", itl_growth);
+    fprintf(out, "      \"cov\": { \"prefill\": %.2f, \"decode\": %.2f, \"ttft\": %.2f, \"itl\": %.2f }\n",
+            cov_pre, cov_dec, cov_ttft, cov_itl);
     fprintf(out, "    },\n");
     fprintf(out, "    \"energy\": { \"avg_w\": %.2f, \"joules\": %.2f, \"j_per_token\": %.4f },\n",
             avg_w, energy_joules, j_per_token);
