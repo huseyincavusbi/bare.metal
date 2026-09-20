@@ -94,13 +94,22 @@ done
 
 # ---- energy capture (default on; powermetrics needs passwordless sudo) -----
 HAVE_ENERGY=0
+PM_BIN="$(command -v powermetrics || true)"
+pm_ok() {
+  [ -n "$PM_BIN" ] && sudo -n "$PM_BIN" -n 1 -i 50 -s gpu_power -o /dev/null >/dev/null 2>&1
+}
 if [ "$ENERGY" -eq 1 ]; then
-  if ! command -v powermetrics >/dev/null 2>&1; then
+  if [ -z "$PM_BIN" ]; then
     echo "energy: powermetrics not found; skipping" >&2
-  elif ! sudo -n true 2>/dev/null; then
-    echo "energy: needs passwordless sudo for powermetrics; skipping" >&2
-  else
+  elif pm_ok; then
     HAVE_ENERGY=1
+  elif [ -t 0 ]; then
+    echo "energy: sudo needed for powermetrics (one prompt)..."
+    if sudo -v 2>/dev/null && pm_ok; then HAVE_ENERGY=1; else echo "energy: sudo failed; skipping" >&2; fi
+  else
+    echo "energy: no passwordless sudo for powermetrics; skipping" >&2
+    echo "  grant it once with:" >&2
+    echo "    echo \"$(id -un) ALL=(root) NOPASSWD: $PM_BIN\" | sudo tee /etc/sudoers.d/powermetrics >/dev/null && sudo chmod 440 /etc/sudoers.d/powermetrics" >&2
   fi
 fi
 
