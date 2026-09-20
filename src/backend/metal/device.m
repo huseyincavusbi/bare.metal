@@ -144,6 +144,59 @@ void backend_reset_gpu_timing(backend_ctx_t* ctx) {
     ctx->cmd_buffers = 0;
 }
 
+int backend_profile_begin(backend_ctx_t* ctx, int max_samples) {
+    if (!ctx || max_samples <= 0) return -1;
+    if (@available(macOS 11.0, *)) {
+        id<MTLDevice> dev = (__bridge id<MTLDevice>)ctx->device;
+        if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) return -1;
+        id<MTLCounterSet> tsset = nil;
+        for (id<MTLCounterSet> s in dev.counterSets) {
+            if ([[s name] isEqualToString:MTLCommonCounterSetTimestamp]) { tsset = s; break; }
+        }
+        if (!tsset) return -1;
+        MTLCounterSampleBufferDescriptor* d = [[MTLCounterSampleBufferDescriptor alloc] init];
+        d.counterSet  = tsset;
+        d.storageMode = MTLStorageModeShared;
+        d.sampleCount = (NSUInteger)max_samples;
+        NSError* err = nil;
+        id<MTLCounterSampleBuffer> sb = [dev newCounterSampleBufferWithDescriptor:d error:&err];
+        if (!sb) {
+            BMT_LOG_WARN("profile: counter sample buffer failed: %s",
+                         [[err localizedDescription] UTF8String]);
+            return -1;
+        }
+        ctx->profile_buf = (__bridge_retained void*)sb;
+        ctx->profile_n   = max_samples;
+        ctx->profile_idx = 0;
+        ctx->profiling   = 1;
+        return 0;
+    }
+    return -1;
+}
+
+int backend_profile_end(backend_ctx_t* ctx, uint64_t* out_ts, int max) {
+    if (!ctx || !ctx->profile_buf) return 0;
+    int n = ctx->profile_idx < max ? ctx->profile_idx : max;
+    int cnt = 0;
+    if (@available(macOS 11.0, *)) {
+        id<MTLCounterSampleBuffer> sb = (__bridge id<MTLCounterSampleBuffer>)ctx->profile_buf;
+        NSData* data = [sb resolveCounterRange:NSMakeRange(0, (NSUInteger)n)];
+        if (data) {
+            const MTLCounterResultTimestamp* ts =
+                (const MTLCounterResultTimestamp*)data.bytes;
+            NSUInteger m = data.length / sizeof(MTLCounterResultTimestamp);
+            for (NSUInteger i = 0; i < m && cnt < n; i++)
+                out_ts[cnt++] = (uint64_t)ts[i].timestamp;
+        }
+    }
+    id<MTLCounterSampleBuffer> released =
+        (__bridge_transfer id<MTLCounterSampleBuffer>)ctx->profile_buf;
+    (void)released;
+    ctx->profile_buf = NULL;
+    ctx->profiling   = 0;
+    return cnt;
+}
+
 void* backend_buffer_map(backend_buffer_t* buf) {
     if (!buf || !buf->buffer) return NULL;
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf->buffer;

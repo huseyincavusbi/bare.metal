@@ -118,8 +118,28 @@ int backend_encode_dispatch(backend_encoder_t* enc,
         id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffers[i]->buffer;
         [encoder setBuffer:buf offset:offsets ? offsets[i] : 0 atIndex:i];
     }
-    [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
-       threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
+
+    /* Per-kernel profiling: bracket the dispatch with GPU timestamp samples. */
+    int profiled = 0;
+    if (enc->ctx && enc->ctx->profiling && enc->ctx->profile_idx + 1 < enc->ctx->profile_n) {
+        id<MTLCounterSampleBuffer> sb =
+            (__bridge id<MTLCounterSampleBuffer>)enc->ctx->profile_buf;
+        if (sb) {
+            [encoder sampleCountersInBuffer:sb
+                             atSampleIndex:(NSUInteger)enc->ctx->profile_idx++
+                               withBarrier:YES];
+            [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
+               threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
+            [encoder sampleCountersInBuffer:sb
+                             atSampleIndex:(NSUInteger)enc->ctx->profile_idx++
+                               withBarrier:YES];
+            profiled = 1;
+        }
+    }
+    if (!profiled) {
+        [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
+           threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
+    }
     return 0;
 }
 

@@ -24,6 +24,12 @@ struct backend_ctx_s {
     /* GPU timing accumulation (backend_get_gpu_busy_ms / _command_buffers) */
     double   gpu_busy_ms;
     uint64_t cmd_buffers;
+
+    /* per-kernel profiling via GPU timestamp counter sampling */
+    void* profile_buf;
+    int   profile_n;
+    int   profile_idx;
+    int   profiling;
 };
 
 struct backend_buffer_s {
