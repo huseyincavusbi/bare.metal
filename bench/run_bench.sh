@@ -110,7 +110,7 @@ energy_run() {
   # privileged sampler, even if the benchmark fails.
   local out="$1"; shift
   local pmf; pmf="$(mktemp)"
-  sudo powermetrics --samplers gpu_power,cpu_power -i 250 -o "$pmf" >/dev/null 2>&1 &
+  sudo powermetrics --samplers cpu_power,gpu_power,thermal,ane_power -i 250 -o "$pmf" >/dev/null 2>&1 &
   local pm_pid=$!
   sleep 1
   local rc=0
@@ -132,51 +132,79 @@ def parse_ts(s):
     except Exception:
         return None
 
+# Optional metrics: (json key, regex, unit scale). Absent fields are omitted, so
+# the parser stays valid across macOS/powermetrics versions.
+PATTERNS = [
+    ("avg_cpu_w",       r'CPU Power:\s*([\d.]+)\s*mW', 0.001),
+    ("avg_gpu_w",       r'GPU Power:\s*([\d.]+)\s*mW', 0.001),
+    ("avg_ane_w",       r'ANE Power:\s*([\d.]+)\s*mW', 0.001),
+    ("combined_w",      r'Combined Power \(CPU \+ GPU \+ ANE\):\s*([\d.]+)\s*mW', 0.001),
+    ("gpu_active_pct",  r'GPU HW [Aa]ctive [Rr]esidency:\s*([\d.]+)\s*%', 1.0),
+    ("gpu_freq_mhz",    r'GPU HW [Aa]ctive [Ff]requency:\s*([\d.]+)\s*MHz', 1.0),
+    ("p_cluster_w",     r'P\d*-Cluster Power:\s*([\d.]+)\s*mW', 0.001),
+    ("e_cluster_w",     r'E\d*-Cluster Power:\s*([\d.]+)\s*mW', 0.001),
+    ("p_residency_pct", r'P\d*-Cluster HW [Aa]ctive [Rr]esidency:\s*([\d.]+)\s*%', 1.0),
+    ("e_residency_pct", r'E\d*-Cluster HW [Aa]ctive [Rr]esidency:\s*([\d.]+)\s*%', 1.0),
+    ("p_freq_mhz",      r'P\d*-Cluster HW [Aa]ctive [Ff]requency:\s*([\d.]+)\s*MHz', 1.0),
+    ("e_freq_mhz",      r'E\d*-Cluster HW [Aa]ctive [Ff]requency:\s*([\d.]+)\s*MHz', 1.0),
+    ("cpu_die_c",       r'CPU die temperature:\s*([\d.]+)\s*C', 1.0),
+    ("gpu_die_c",       r'GPU die temperature:\s*([\d.]+)\s*C', 1.0),
+]
+
+def new_block():
+    return {"ts": None, "vals": {k: [] for (k, _, _) in PATTERNS}}
+
 # Split the powermetrics stream into per-sample blocks.
 blocks = []
-bts, bcpu, bgpu, bact = None, [], [], []
-def flush():
-    if bts is not None:
-        blocks.append({"ts": bts, "cpu": bcpu[:], "gpu": bgpu[:], "act": bact[:]})
+cur = new_block()
 for line in open(pm_path, errors='ignore'):
     m = re.search(r'\*\*\* Sampled system activity \(([^)]*)\)', line)
     if m:
-        flush()
-        bts, bcpu, bgpu, bact = parse_ts(m.group(1)), [], [], []
+        if cur["ts"] is not None:
+            blocks.append(cur)
+        cur = new_block(); cur["ts"] = parse_ts(m.group(1))
         continue
-    if bts is None:
+    if cur["ts"] is None:
         continue
-    m = re.search(r'CPU Power:\s*([\d.]+)\s*mW', line)
-    if m: bcpu.append(float(m.group(1)))
-    m = re.search(r'GPU Power:\s*([\d.]+)\s*mW', line)
-    if m: bgpu.append(float(m.group(1)))
-    m = re.search(r'GPU HW [Aa]ctive [Rr]esidency:\s*([\d.]+)\s*%', line)
-    if m: bact.append(float(m.group(1)))
-flush()
+    if "Average" in line or "(avg" in line:      # skip powermetrics' own averages
+        continue
+    for (key, rx, scale) in PATTERNS:
+        mm = re.search(rx, line)
+        if mm:
+            cur["vals"][key].append(float(mm.group(1)) * scale)
+if cur["ts"] is not None:
+    blocks.append(cur)
 
 # Only samples inside the harness's measured window (small tolerance);
 # fall back to all samples if the window is unavailable.
 sel = [b for b in blocks if t0 and t1 and (t0 - 0.5) <= b["ts"] <= (t1 + 0.5)]
 if not sel:
     sel = blocks
-cpu = [v for b in sel for v in b["cpu"]]
-gpu = [v for b in sel for v in b["gpu"]]
-act = [v for b in sel for v in b["act"]]
-def avg(xs, scale): return (sum(xs) / len(xs) * scale) if xs else 0.0
-cpu_w, gpu_w = avg(cpu, 0.001), avg(gpu, 0.001)
-act_pct = (sum(act) / len(act)) if act else 0.0
-total_w = cpu_w + gpu_w
+
+def mean(key):
+    xs = [v for b in sel for v in b["vals"][key]]
+    return (sum(xs) / len(xs)) if xs else 0.0
+
+energy = {"samples_used": len(sel)}
+for (key, _, _) in PATTERNS:
+    xs = [v for b in sel for v in b["vals"][key]]
+    if xs:
+        energy[key] = round(sum(xs) / len(xs), 2)
+
+# Total power: measured SoC rails (CPU+GPU+ANE); fall back to the combined line.
+cpu_w, gpu_w, ane_w = mean("avg_cpu_w"), mean("avg_gpu_w"), mean("avg_ane_w")
+total_w = cpu_w + gpu_w + ane_w
+if total_w == 0.0:
+    total_w = mean("combined_w")
+energy["avg_cpu_w"] = round(cpu_w, 2)
+energy["avg_gpu_w"] = round(gpu_w, 2)
+energy["avg_ane_w"] = round(ane_w, 2)
+energy["avg_w"] = round(total_w, 2)
+
 active = r.get("active_seconds", 0.0)
 reps = c.get("reps", 1)
 joules = total_w * active
-energy = {
-    "avg_w": round(total_w, 2),
-    "avg_cpu_w": round(cpu_w, 2),
-    "avg_gpu_w": round(gpu_w, 2),
-    "gpu_active_pct": round(act_pct, 2),
-    "samples_used": len(sel),
-    "joules": round(joules, 2),
-}
+energy["joules"] = round(joules, 2)
 if c.get("gen_tokens", 0) > 8:
     dec_tokens = (c["gen_tokens"] - 1) * reps
     energy["j_per_decode_token"] = round(joules / dec_tokens, 4) if dec_tokens else 0.0
@@ -187,8 +215,12 @@ gen = r.get("generated_tokens", 0)
 energy["j_per_token"] = round(joules / gen, 4) if gen else 0.0
 r["energy"] = energy
 json.dump(d, open(out_path, "w"), indent=2)
-print(f"  {out_path}: {total_w:.2f} W (cpu {cpu_w:.2f} + gpu {gpu_w:.2f}), "
-      f"gpu active {act_pct:.1f}%, {joules:.1f} J, {len(sel)} samples")
+extra = []
+for k in ("cpu_die_c", "gpu_die_c", "gpu_freq_mhz", "gpu_active_pct"):
+    if k in energy:
+        extra.append(f"{k}={energy[k]}")
+print(f"  {out_path}: {total_w:.2f} W (cpu {cpu_w:.2f} + gpu {gpu_w:.2f} + ane {ane_w:.2f}), "
+      f"{joules:.1f} J, {len(sel)} samples" + (", " + ", ".join(extra) if extra else ""))
 PY
   rm -f "$pmf"
   return "$rc"
