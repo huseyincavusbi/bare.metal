@@ -11,12 +11,14 @@ struct backend_ctx_s {
     void* queue;
     void* library;
     int   supports_bf16;
-    size_t allocated_bytes;
+    size_t allocated_bytes;       /* current live buffer bytes */
+    size_t peak_allocated_bytes;  /* high-water mark */
 };
 
 struct backend_buffer_s {
     void* buffer;
     size_t size;
+    struct backend_ctx_s* ctx;    /* owner, for accounting on free */
 };
 
 struct backend_kernel_s {

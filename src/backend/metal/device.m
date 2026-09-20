@@ -87,12 +87,17 @@ backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size) {
     backend_buffer_t* buf = calloc(1, sizeof(backend_buffer_t));
     buf->buffer = (__bridge_retained void*)buffer;
     buf->size   = size;
+    buf->ctx    = ctx;
     ctx->allocated_bytes += size;
+    if (ctx->allocated_bytes > ctx->peak_allocated_bytes)
+        ctx->peak_allocated_bytes = ctx->allocated_bytes;
     return buf;
 }
 
 void backend_buffer_free(backend_buffer_t* buf) {
     if (!buf) return;
+    if (buf->ctx && buf->ctx->allocated_bytes >= buf->size)
+        buf->ctx->allocated_bytes -= buf->size;
     if (buf->buffer) {
         id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)buf->buffer;
         (void)b;
@@ -103,6 +108,11 @@ void backend_buffer_free(backend_buffer_t* buf) {
 size_t backend_get_allocated_memory(backend_ctx_t* ctx) {
     if (!ctx) return 0;
     return ctx->allocated_bytes;
+}
+
+size_t backend_get_peak_allocated_memory(backend_ctx_t* ctx) {
+    if (!ctx) return 0;
+    return ctx->peak_allocated_bytes;
 }
 
 void* backend_buffer_map(backend_buffer_t* buf) {

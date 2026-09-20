@@ -17,6 +17,7 @@ typedef struct backend_encoder_s backend_encoder_t;
 backend_ctx_t*    backend_create(void);
 void              backend_destroy(backend_ctx_t* ctx);
 size_t            backend_get_allocated_memory(backend_ctx_t* ctx);
+size_t            backend_get_peak_allocated_memory(backend_ctx_t* ctx);
 
 backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size);
 void              backend_buffer_free(backend_buffer_t* buf);
