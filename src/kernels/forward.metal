@@ -186,6 +186,44 @@ kernel void matmul_forward_q8(
 }
 
 // ----------------------------------------------------------------
+// matmul_forward_q4  (Q4_0-style: 32 int4 weights + fp32 scale per block)
+// ----------------------------------------------------------------
+typedef struct {
+    float   scale;
+    uchar   qs[16];
+} q4_block_metal;  // 20 bytes — must match C q4_block_t layout
+
+kernel void matmul_forward_q4(
+    device const float* inp [[buffer(0)]],
+    device const q4_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int nblocks = C / 32;
+    int bt = gid.y, oc = gid.x;
+    if (bt >= BT || oc >= OC) return;
+    float val = has_bias ? bias[oc] : 0.0f;
+    const device float* inp_bt = inp + bt * C;
+    const device q4_block_metal* wrow = weight + (size_t)oc * nblocks;
+    for (int b = 0; b < nblocks; b++) {
+        float s = wrow[b].scale;
+        const device uchar* qb = wrow[b].qs;
+        const device float* xb = inp_bt + b * 32;
+        for (int j = 0; j < 16; j++) {
+            uchar byte = qb[j];
+            int lo = (int)(char)(byte << 4) >> 4;   // sign-extend low nibble
+            int hi = (int)(char)byte >> 4;          // sign-extend high nibble
+            val += xb[2 * j]     * ((float)lo * s);
+            val += xb[2 * j + 1] * ((float)hi * s);
+        }
+    }
+    out[bt * OC + oc] = val;
+}
+
+// ----------------------------------------------------------------
 // softmax_forward
 // ----------------------------------------------------------------
 kernel void softmax_forward(

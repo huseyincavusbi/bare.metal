@@ -49,7 +49,7 @@ static void usage(const char* prog) {
         "  --temp T            sampling temperature (0=greedy)(default 0)\n"
         "  --seed S            RNG seed                       (default 42)\n"
         "  --precision P       fp32|fp16|bf16 (default device)\n"
-        "  --quant q8          quantize matmul weights        (default off)\n"
+        "  --quant q8|q4       quantize matmul weights        (default off)\n"
         "  --avg-w W           average watts (from powermetrics)\n"
         "  --peak-gbps F       peak memory bandwidth for %% of peak (default 0=off)\n"
         "  --peak-gflops F     peak FP32 GFLOPS for %% of peak   (default 0=off)\n"
@@ -88,7 +88,8 @@ static size_t model_weight_bytes(bm_model_t* m) {
         size_t n = 1;
         for (int d = 0; d < t->n_dims; d++) n *= t->dims[d];
         if (n == 0) continue;
-        if (t->quantized)                                   total += bmt_q8_bytes(n);
+        if (t->quantized == 8)                              total += bmt_q8_bytes(n);
+        else if (t->quantized == 4)                         total += bmt_q4_bytes(n);
         else if (t->n_dims >= 2 && m->precision != BM_PRECISION_FP32) total += n * 2;
         else                                                total += n * 4;
     }
@@ -120,8 +121,7 @@ int main(int argc, char** argv) {
     uint64_t seed = 42;
     int   quant = 0;
     int   raw = 1;
-    int   profile = 0;
-    double avg_w = 0.0;
+    int   profile = 0;    double avg_w = 0.0;
     double peak_gbps = 0.0, peak_gflops = 0.0;
 
     for (int i = 1; i < argc; i++) {
@@ -133,7 +133,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--temp") && i+1 < argc)          temp = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i+1 < argc)          seed = strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--precision") && i+1 < argc)     prec_arg = argv[++i];
-        else if (!strcmp(argv[i], "--quant") && i+1 < argc)         quant = !strcmp(argv[++i], "q8");
+        else if (!strcmp(argv[i], "--quant") && i+1 < argc) { const char* q = argv[++i];
+            quant = (strcmp(q, "q4") == 0) ? 4 : (strcmp(q, "q8") == 0 ? 8 : 0); }
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)         avg_w = atof(argv[++i]);
         else if (!strcmp(argv[i], "--peak-gbps") && i+1 < argc)     peak_gbps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--peak-gflops") && i+1 < argc)   peak_gflops = atof(argv[++i]);
@@ -172,7 +173,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "failed to load weights from %s\n", model_dir);
         return 1;
     }
-    m->quantized = quant;
+    m->quant_bits = quant;
 
     if (prec_arg) {
         if      (!strcmp(prec_arg, "bf16")) m->precision = BM_PRECISION_BF16;
@@ -529,7 +530,7 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"n_kv_heads\": %d,\n", m->arch.n_kv_heads);
     fprintf(out, "    \"max_seq\": %d,\n", max_seq);
     fprintf(out, "    \"precision\": \"%s\",\n", precision_name(m->precision));
-    fprintf(out, "    \"quant\": \"%s\"\n", quant ? "q8" : "none");
+    fprintf(out, "    \"quant\": \"%s\"\n", quant == 8 ? "q8" : quant == 4 ? "q4" : "none");
     fprintf(out, "  },\n");
 
     fprintf(out, "  \"config\": {\n");
