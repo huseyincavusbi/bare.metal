@@ -8,3 +8,4 @@ data/
 docs/
 .venv/
 __pycache__/
+bench/results/
