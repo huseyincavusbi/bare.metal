@@ -33,12 +33,9 @@ double            backend_get_gpu_busy_ms(backend_ctx_t* ctx);
 uint64_t          backend_get_command_buffers(backend_ctx_t* ctx);
 void              backend_reset_gpu_timing(backend_ctx_t* ctx);
 
-/* Per-kernel GPU timing via timestamp counter sampling. begin() creates a
- * sample buffer for up to max_samples timestamp points; every dispatch then
- * records a (start,end) pair. end() resolves them into out_ts (nanoseconds),
- * returns the number of timestamps written, and disables profiling. */
-int               backend_profile_begin(backend_ctx_t* ctx, int max_samples);
-int               backend_profile_end(backend_ctx_t* ctx, uint64_t* out_ts, int max);
+/* Wait for the encoder's command buffer and return its GPU execution time (ms),
+ * accumulating into the context totals. Used for phase-level profiling. */
+double            backend_encode_wait_timed(backend_encoder_t* enc);
 
 backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size);
 void              backend_buffer_free(backend_buffer_t* buf);

@@ -126,11 +126,13 @@ float*         bm_step(bm_session_t* sess, int token);
 void           bm_reset_session(bm_session_t* sess);
 void           bm_destroy_session(bm_session_t* sess);
 
-/* Per-node GPU timing (timestamp counter sampling). Arms profiling for the next
- * forward/step (max_nodes >= graph node count); then fills out_ms[node_index]
- * in milliseconds and returns the node count. Returns -1 if unsupported. */
-int            bm_profile_begin(bm_session_t* sess, int max_nodes);
-int            bm_profile_end(bm_session_t* sess, double* out_ms, int max_nodes);
+/* Phase-level GPU timing (ms). begin() arms profiling; the next forward/step
+ * attributes GPU time to the attention and MLP blocks (plus other); end()
+ * reports and disarms. These use the command buffers the engine already
+ * flushes at the residual adds (per-kernel counter sampling is unsupported on
+ * Apple GPUs for compute encoders). */
+void           bm_profile_begin(bm_session_t* sess);
+void           bm_profile_end(bm_session_t* sess, double* attention_ms, double* mlp_ms, double* other_ms);
 
 typedef int (*bm_token_cb_t)(int token_id, void* user_data);
 

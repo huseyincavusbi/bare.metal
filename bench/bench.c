@@ -55,6 +55,7 @@ static void usage(const char* prog) {
         "  --peak-gflops F     peak FP32 GFLOPS for %% of peak   (default 0=off)\n"
         "  --power SRC         ac|battery|unknown            (default auto)\n"
         "  --no-raw            omit raw sample arrays         (default on)\n"
+        "  --profile           per-kernel GPU timing (counter sampling)\n"
         "  --out FILE          write JSON here (default stdout)\n",
         prog);
 }
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
     uint64_t seed = 42;
     int   quant = 0;
     int   raw = 1;
+    int   profile = 0;
     double avg_w = 0.0;
     double peak_gbps = 0.0, peak_gflops = 0.0;
 
@@ -137,6 +139,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--peak-gflops") && i+1 < argc)   peak_gflops = atof(argv[++i]);
         else if (!strcmp(argv[i], "--power") && i+1 < argc)         power_arg = argv[++i];
         else if (!strcmp(argv[i], "--no-raw"))                      raw = 0;
+        else if (!strcmp(argv[i], "--profile"))                     profile = 1;
         else if (!strcmp(argv[i], "--out") && i+1 < argc)           out_path = argv[++i];
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); usage(argv[0]); return 2; }
@@ -251,10 +254,21 @@ int main(int argc, char** argv) {
         bm_destroy_sampler(smp);
     }
 
+    /* ---- optional per-node GPU profile (one decode step) ---- */
+    int prof_ok = 0;
+    double prof_attn = 0.0, prof_mlp = 0.0, prof_other = 0.0, prof_total = 0.0;
+    if (profile) {
+        bm_profile_begin(sess);
+        bm_reset_session(sess);
+        bm_step(sess, prompt[0]);              /* one decode step, profiled */
+        bm_profile_end(sess, &prof_attn, &prof_mlp, &prof_other);
+        prof_total = prof_attn + prof_mlp + prof_other;
+        prof_ok = 1;
+    }
+
     /* ---- measured reps ---- */
     if (ctx->backend_ctx) backend_reset_gpu_timing(ctx->backend_ctx);
-    active_start_unix = (long)time(NULL);
-    for (int r = 0; r < reps; r++) {
+    active_start_unix = (long)time(NULL);    for (int r = 0; r < reps; r++) {
         bm_reset_session(sess);
         bm_sampler_t* smp = bm_create_sampler(V, temp, 1.0f, seed);
 
@@ -605,6 +619,18 @@ int main(int argc, char** argv) {
     fprintf(out, "      \"majflt_load\": %ld,\n", majflt_load);
     fprintf(out, "      \"inblock_load\": %ld\n", inblock_load);
     fprintf(out, "    },\n");
+    if (prof_ok) {
+        double attn_pct = prof_total > 0.0 ? prof_attn / prof_total * 100.0 : 0.0;
+        double mlp_pct  = prof_total > 0.0 ? prof_mlp  / prof_total * 100.0 : 0.0;
+        fprintf(out, "    \"kernel_profile\": {\n");
+        fprintf(out, "      \"attention_ms\": %.4f,\n", prof_attn);
+        fprintf(out, "      \"mlp_ms\": %.4f,\n", prof_mlp);
+        fprintf(out, "      \"other_ms\": %.4f,\n", prof_other);
+        fprintf(out, "      \"total_ms\": %.4f,\n", prof_total);
+        fprintf(out, "      \"attention_pct\": %.1f,\n", attn_pct);
+        fprintf(out, "      \"mlp_pct\": %.1f\n", mlp_pct);
+        fprintf(out, "    },\n");
+    }
     fprintf(out, "    \"generated_tokens\": %ld\n", total_gen_tokens);
     fprintf(out, "  }\n");
     fprintf(out, "}\n");

@@ -118,28 +118,8 @@ int backend_encode_dispatch(backend_encoder_t* enc,
         id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffers[i]->buffer;
         [encoder setBuffer:buf offset:offsets ? offsets[i] : 0 atIndex:i];
     }
-
-    /* Per-kernel profiling: bracket the dispatch with GPU timestamp samples. */
-    int profiled = 0;
-    if (enc->ctx && enc->ctx->profiling && enc->ctx->profile_idx + 1 < enc->ctx->profile_n) {
-        id<MTLCounterSampleBuffer> sb =
-            (__bridge id<MTLCounterSampleBuffer>)enc->ctx->profile_buf;
-        if (sb) {
-            [encoder sampleCountersInBuffer:sb
-                             atSampleIndex:(NSUInteger)enc->ctx->profile_idx++
-                               withBarrier:YES];
-            [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
-               threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
-            [encoder sampleCountersInBuffer:sb
-                             atSampleIndex:(NSUInteger)enc->ctx->profile_idx++
-                               withBarrier:YES];
-            profiled = 1;
-        }
-    }
-    if (!profiled) {
-        [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
-           threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
-    }
+    [encoder dispatchThreads:MTLSizeMake(grid_x,grid_y,grid_z)
+       threadsPerThreadgroup:MTLSizeMake(tg_x,tg_y,tg_z)];
     return 0;
 }
 
@@ -150,13 +130,21 @@ void backend_encode_commit(backend_encoder_t* enc) {
 }
 
 void backend_encode_wait(backend_encoder_t* enc) {
-    if (!enc) return;
+    (void)backend_encode_wait_timed(enc);
+}
+
+/* Like backend_encode_wait, but returns the GPU execution time (ms) of this
+ * command buffer and accumulates it. Used for phase-level profiling. */
+double backend_encode_wait_timed(backend_encoder_t* enc) {
+    if (!enc) return 0.0;
     id<MTLCommandBuffer> cmdBuf =
         (__bridge id<MTLCommandBuffer>)enc->command_buffer;
     [cmdBuf waitUntilCompleted];
+    double ms = 0.0;
+    if (cmdBuf.GPUStartTime > 0.0 && cmdBuf.GPUEndTime >= cmdBuf.GPUStartTime)
+        ms = (cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0;
     if (enc->ctx) {
-        if (cmdBuf.GPUStartTime > 0.0 && cmdBuf.GPUEndTime >= cmdBuf.GPUStartTime)
-            enc->ctx->gpu_busy_ms += (cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0;
+        enc->ctx->gpu_busy_ms += ms;
         enc->ctx->cmd_buffers += 1;
     }
     id<MTLComputeCommandEncoder> encoder =
@@ -165,4 +153,5 @@ void backend_encode_wait(backend_encoder_t* enc) {
         (__bridge_transfer id<MTLCommandBuffer>)enc->command_buffer;
     (void)encoder; (void)released;
     free(enc);
+    return ms;
 }
