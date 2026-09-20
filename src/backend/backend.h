@@ -29,6 +29,10 @@ typedef struct {
 
 void              backend_get_device_info(backend_ctx_t* ctx, backend_device_info_t* out);
 
+double            backend_get_gpu_busy_ms(backend_ctx_t* ctx);
+uint64_t          backend_get_command_buffers(backend_ctx_t* ctx);
+void              backend_reset_gpu_timing(backend_ctx_t* ctx);
+
 backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size);
 void              backend_buffer_free(backend_buffer_t* buf);
 void*             backend_buffer_map(backend_buffer_t* buf);

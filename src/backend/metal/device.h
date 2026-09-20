@@ -20,6 +20,10 @@ struct backend_ctx_s {
     size_t dev_max_buffer_bytes;
     size_t dev_recommended_working_set;
     int    dev_has_unified_memory;
+
+    /* GPU timing accumulation (backend_get_gpu_busy_ms / _command_buffers) */
+    double   gpu_busy_ms;
+    uint64_t cmd_buffers;
 };
 
 struct backend_buffer_s {
@@ -35,6 +39,7 @@ struct backend_kernel_s {
 struct backend_encoder_s {
     void* command_buffer;
     void* encoder;
+    struct backend_ctx_s* ctx;   /* owner, for GPU timing */
 };
 
 #endif

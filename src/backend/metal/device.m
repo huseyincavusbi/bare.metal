@@ -130,6 +130,20 @@ void backend_get_device_info(backend_ctx_t* ctx, backend_device_info_t* out) {
     out->has_unified_memory          = ctx->dev_has_unified_memory;
 }
 
+double backend_get_gpu_busy_ms(backend_ctx_t* ctx) {
+    return ctx ? ctx->gpu_busy_ms : 0.0;
+}
+
+uint64_t backend_get_command_buffers(backend_ctx_t* ctx) {
+    return ctx ? ctx->cmd_buffers : 0;
+}
+
+void backend_reset_gpu_timing(backend_ctx_t* ctx) {
+    if (!ctx) return;
+    ctx->gpu_busy_ms = 0.0;
+    ctx->cmd_buffers = 0;
+}
+
 void* backend_buffer_map(backend_buffer_t* buf) {
     if (!buf || !buf->buffer) return NULL;
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf->buffer;
