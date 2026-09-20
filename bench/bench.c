@@ -118,6 +118,10 @@ int main(int argc, char** argv) {
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
     if (!m) { fprintf(stderr, "model alloc failed\n"); return 1; }
     bm_load_weights(m, model_dir);
+    if (!m->weight_buffer) {
+        fprintf(stderr, "failed to load weights from %s\n", model_dir);
+        return 1;
+    }
     m->quantized = quant;
 
     if (prec_arg) {
@@ -174,13 +178,14 @@ int main(int argc, char** argv) {
     double* decode_tps = calloc((size_t)reps, sizeof(double));
     double* ttft_ms    = calloc((size_t)reps, sizeof(double));
     double* itl_all    = calloc((size_t)itl_cap, sizeof(double));
-    int*    tok_ids    = calloc((size_t)(gen_tokens < 64 ? gen_tokens : 64), sizeof(int));
+    int*    tok_ids    = calloc((size_t)gen_tokens, sizeof(int));
     if (!prefill_ms || !prefill_tps || !decode_tps || !ttft_ms || !itl_all || !tok_ids) {
         fprintf(stderr, "alloc failed\n"); return 1;
     }
     int itl_n = 0, tok_n = 0;
     double active_s = 0.0, prefill_s_sum = 0.0, decode_s_sum = 0.0;
     long   total_gen_tokens = 0;
+    long   active_start_unix = 0, active_end_unix = 0;
 
     /* ---- warmup (discarded: first passes include pipeline work) ---- */
     for (int w = 0; w < warmup; w++) {
@@ -196,6 +201,7 @@ int main(int argc, char** argv) {
     }
 
     /* ---- measured reps ---- */
+    active_start_unix = (long)time(NULL);
     for (int r = 0; r < reps; r++) {
         bm_reset_session(sess);
         bm_sampler_t* smp = bm_create_sampler(V, temp, 1.0f, seed);
@@ -209,7 +215,7 @@ int main(int argc, char** argv) {
         prefill_ms[r] = t1 - t0;
         prefill_tps[r] = prefill_ms[r] > 0.0 ? (double)prompt_tokens / (prefill_ms[r] / 1000.0) : 0.0;
         ttft_ms[r]    = t2 - t0;
-        if (r == 0 && tok_n < (gen_tokens < 64 ? gen_tokens : 64)) tok_ids[tok_n++] = tk;
+        if (r == 0 && tok_n < gen_tokens) tok_ids[tok_n++] = tk;
 
         double dec_ms = 0.0;
         for (int j = 1; j < gen_tokens; j++) {
@@ -219,7 +225,7 @@ int main(int argc, char** argv) {
             double b = bm_now_ms();
             if (itl_n < itl_cap) itl_all[itl_n++] = b - a;
             dec_ms += (b - a);
-            if (r == 0 && tok_n < (gen_tokens < 64 ? gen_tokens : 64)) tok_ids[tok_n++] = tk;
+            if (r == 0 && tok_n < gen_tokens) tok_ids[tok_n++] = tk;
         }
         double t3 = bm_now_ms();
 
@@ -232,10 +238,12 @@ int main(int argc, char** argv) {
 
         bm_destroy_sampler(smp);
     }
+    active_end_unix = (long)time(NULL);
 
     /* ---- memory ---- */
     size_t rss = bm_peak_rss_bytes();
     size_t gpu = ctx->backend_ctx ? backend_get_allocated_memory(ctx->backend_ctx) : 0;
+    size_t gpu_peak = ctx->backend_ctx ? backend_get_peak_allocated_memory(ctx->backend_ctx) : 0;
     double kv_bytes_per_token = (double)m->arch.n_layers * 2.0 * (double)m->kv_dim * 4.0;
     double kv_total = kv_bytes_per_token * (double)max_seq;
 
@@ -276,12 +284,13 @@ int main(int argc, char** argv) {
         time_t t = time(NULL);
         strftime(ended_at, sizeof(ended_at), "%Y-%m-%dT%H:%M:%SZ", gmtime(&t));
     }
-    char cpu_e[256], osver_e[128], git_e[128], gpu_e[256], therm_e[128];
+    char cpu_e[256], osver_e[128], git_e[128], gpu_e[256], therm_e[128], model_e[512];
     bm_json_escape(cpu, cpu_e, sizeof(cpu_e));
     bm_json_escape(osver, osver_e, sizeof(osver_e));
     bm_json_escape(git, git_e, sizeof(git_e));
     bm_json_escape(gpu_name, gpu_e, sizeof(gpu_e));
     bm_json_escape(therm, therm_e, sizeof(therm_e));
+    bm_json_escape(model_dir, model_e, sizeof(model_e));
 
     /* ---- emit JSON (baremetal.bench/v2) ---- */
     FILE* out = out_path ? fopen(out_path, "w") : stdout;
@@ -304,7 +313,7 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"thermal_speed_limit\": \"%s\",\n", therm_e);
     fprintf(out, "    \"started_at\": \"%s\",\n", started_at);
     fprintf(out, "    \"ended_at\": \"%s\",\n", ended_at);
-    fprintf(out, "    \"model\": \"%s\",\n", model_dir);
+    fprintf(out, "    \"model\": \"%s\",\n", model_e);
     fprintf(out, "    \"params\": %zu,\n", m->n_parameters);
     fprintf(out, "    \"n_layers\": %d,\n", m->arch.n_layers);
     fprintf(out, "    \"dim\": %d,\n", m->arch.dim);
@@ -353,12 +362,15 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"memory\": {\n");
     fprintf(out, "      \"rss_peak_bytes\": %zu,\n", rss);
     fprintf(out, "      \"gpu_alloc_bytes\": %zu,\n", gpu);
+    fprintf(out, "      \"gpu_peak_bytes\": %zu,\n", gpu_peak);
     fprintf(out, "      \"kv_bytes_per_token\": %.0f,\n", kv_bytes_per_token);
     fprintf(out, "      \"kv_total_bytes\": %.0f\n", kv_total);
     fprintf(out, "    },\n");
     fprintf(out, "    \"energy\": { \"avg_w\": %.2f, \"joules\": %.2f, \"j_per_token\": %.4f },\n",
             avg_w, energy_joules, j_per_token);
     fprintf(out, "    \"active_seconds\": %.3f,\n", active_s);
+    fprintf(out, "    \"active_started_unix\": %ld,\n", active_start_unix);
+    fprintf(out, "    \"active_ended_unix\": %ld,\n", active_end_unix);
     fprintf(out, "    \"prefill_seconds\": %.3f,\n", prefill_s_sum);
     fprintf(out, "    \"decode_seconds\": %.3f,\n", decode_s_sum);
     fprintf(out, "    \"generated_tokens\": %ld\n", total_gen_tokens);
