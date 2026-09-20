@@ -126,6 +126,12 @@ float*         bm_step(bm_session_t* sess, int token);
 void           bm_reset_session(bm_session_t* sess);
 void           bm_destroy_session(bm_session_t* sess);
 
+/* Per-node GPU timing (timestamp counter sampling). Arms profiling for the next
+ * forward/step (max_nodes >= graph node count); then fills out_ms[node_index]
+ * in milliseconds and returns the node count. Returns -1 if unsupported. */
+int            bm_profile_begin(bm_session_t* sess, int max_nodes);
+int            bm_profile_end(bm_session_t* sess, double* out_ms, int max_nodes);
+
 typedef int (*bm_token_cb_t)(int token_id, void* user_data);
 
 int            bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
