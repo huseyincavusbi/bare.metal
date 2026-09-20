@@ -69,7 +69,7 @@ echo
 
 # prompt_len:precision pairs to sweep
 if [ "$SWEEP" -eq 1 ]; then
-  CONFIGS="128:fp32 128:bf16 128:fp16 128:q8 512:bf16 1024:bf16 2048:bf16"
+  CONFIGS="128:bf16 128:fp16 128:q8 128:q4 512:bf16 1024:bf16 2048:bf16"
 else
   CONFIGS="128:bf16"
 fi
@@ -87,7 +87,7 @@ run_one() {
 for cfg in $CONFIGS; do
   prompt="${cfg%%:*}"; prec="${cfg##*:}"
   extra=""
-  if [ "$prec" = "q8" ]; then extra="--quant q8"; else extra="--precision $prec"; fi
+  if [ "$prec" = "q8" ] || [ "$prec" = "q4" ]; then extra="--quant $prec"; else extra="--precision $prec"; fi
   echo "== prompt=$prompt precision=$prec =="
   run_one "$prompt" "$prec" "p${prompt}_${prec}" "$extra"
 done
