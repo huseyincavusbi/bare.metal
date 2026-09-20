@@ -19,6 +19,16 @@ void              backend_destroy(backend_ctx_t* ctx);
 size_t            backend_get_allocated_memory(backend_ctx_t* ctx);
 size_t            backend_get_peak_allocated_memory(backend_ctx_t* ctx);
 
+typedef struct {
+    int    max_threads_per_threadgroup;
+    size_t max_threadgroup_memory;
+    size_t max_buffer_bytes;
+    size_t recommended_max_working_set;
+    int    has_unified_memory;
+} backend_device_info_t;
+
+void              backend_get_device_info(backend_ctx_t* ctx, backend_device_info_t* out);
+
 backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size);
 void              backend_buffer_free(backend_buffer_t* buf);
 void*             backend_buffer_map(backend_buffer_t* buf);

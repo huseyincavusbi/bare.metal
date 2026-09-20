@@ -13,6 +13,13 @@ struct backend_ctx_s {
     int   supports_bf16;
     size_t allocated_bytes;       /* current live buffer bytes */
     size_t peak_allocated_bytes;  /* high-water mark */
+
+    /* device limits captured at creation */
+    int    dev_max_threads_per_tg;
+    size_t dev_max_threadgroup_mem;
+    size_t dev_max_buffer_bytes;
+    size_t dev_recommended_working_set;
+    int    dev_has_unified_memory;
 };
 
 struct backend_buffer_s {

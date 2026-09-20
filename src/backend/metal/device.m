@@ -29,6 +29,12 @@ backend_ctx_t* backend_create(void) {
         ctx->supports_bf16 = 0;
     }
 
+    ctx->dev_max_threads_per_tg    = (int)[device maxThreadsPerThreadgroup].width;
+    ctx->dev_max_threadgroup_mem   = (size_t)[device maxThreadgroupMemoryLength];
+    ctx->dev_max_buffer_bytes      = (size_t)[device maxBufferLength];
+    ctx->dev_recommended_working_set = (size_t)[device recommendedMaxWorkingSetSize];
+    ctx->dev_has_unified_memory    = [device hasUnifiedMemory] ? 1 : 0;
+
     BMT_LOG_INFO("Metal device: %s (bf16: %s)",
                  [[device name] UTF8String],
                  ctx->supports_bf16 ? "yes" : "no");
@@ -113,6 +119,15 @@ size_t backend_get_allocated_memory(backend_ctx_t* ctx) {
 size_t backend_get_peak_allocated_memory(backend_ctx_t* ctx) {
     if (!ctx) return 0;
     return ctx->peak_allocated_bytes;
+}
+
+void backend_get_device_info(backend_ctx_t* ctx, backend_device_info_t* out) {
+    if (!ctx || !out) return;
+    out->max_threads_per_threadgroup = ctx->dev_max_threads_per_tg;
+    out->max_threadgroup_memory      = ctx->dev_max_threadgroup_mem;
+    out->max_buffer_bytes            = ctx->dev_max_buffer_bytes;
+    out->recommended_max_working_set = ctx->dev_recommended_working_set;
+    out->has_unified_memory          = ctx->dev_has_unified_memory;
 }
 
 void* backend_buffer_map(backend_buffer_t* buf) {
