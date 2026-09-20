@@ -1,11 +1,14 @@
-/* bench/metrics.h -- timing, memory and percentile helpers for the benchmark
- * harness. Header-only so bench.c stays a single translation unit. */
+/* bench/metrics.h -- timing, memory, statistics and probe helpers for the
+ * benchmark harness. Header-only so bench.c stays a single translation unit. */
 #ifndef BENCH_METRICS_H
 #define BENCH_METRICS_H
 
 #include <time.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 
@@ -28,8 +31,7 @@ static inline int bm_cmp_dbl(const void* a, const void* b) {
     return (x > y) - (x < y);
 }
 
-/* Nearest-rank percentile in [0,100]. `scratch` must hold n doubles; it is
- * sorted in place. Returns 0 for n<=0. */
+/* Nearest-rank percentile in [0,100]. `scratch` is sorted in place. */
 static inline double bm_percentile(double* scratch, int n, double p) {
     if (n <= 0) return 0.0;
     qsort(scratch, (size_t)n, sizeof(double), bm_cmp_dbl);
@@ -39,7 +41,7 @@ static inline double bm_percentile(double* scratch, int n, double p) {
     return scratch[idx];
 }
 
-/* Convenience: percentile on a copy so `src` is left intact. */
+/* Percentile on a copy so `src` is left intact. */
 static inline double bm_percentile_copy(const double* src, int n, double p) {
     if (n <= 0) return 0.0;
     double* tmp = (double*)malloc((size_t)n * sizeof(double));
@@ -54,6 +56,36 @@ static inline double bm_median_copy(const double* src, int n) {
     return bm_percentile_copy(src, n, 50.0);
 }
 
+static inline double bm_mean(const double* a, int n) {
+    if (n <= 0) return 0.0;
+    double s = 0.0;
+    for (int i = 0; i < n; i++) s += a[i];
+    return s / (double)n;
+}
+
+/* Population standard deviation. */
+static inline double bm_stddev(const double* a, int n) {
+    if (n <= 0) return 0.0;
+    double mu = bm_mean(a, n);
+    double s = 0.0;
+    for (int i = 0; i < n; i++) { double d = a[i] - mu; s += d * d; }
+    return sqrt(s / (double)n);
+}
+
+static inline double bm_min(const double* a, int n) {
+    if (n <= 0) return 0.0;
+    double v = a[0];
+    for (int i = 1; i < n; i++) if (a[i] < v) v = a[i];
+    return v;
+}
+
+static inline double bm_max(const double* a, int n) {
+    if (n <= 0) return 0.0;
+    double v = a[0];
+    for (int i = 1; i < n; i++) if (a[i] > v) v = a[i];
+    return v;
+}
+
 static inline unsigned long long bm_sysctl_u64(const char* name) {
     unsigned long long v = 0;
     size_t len = sizeof(v);
@@ -65,6 +97,32 @@ static inline void bm_sysctl_str(const char* name, char* buf, size_t n) {
     size_t len = n;
     if (n == 0) return;
     if (sysctlbyname(name, buf, &len, NULL, 0) != 0) buf[0] = '\0';
+}
+
+/* Run `cmd`, find the first line containing `needle`, and copy what follows the
+ * needle (leading blanks skipped) into `out` (truncated at newline). */
+static inline void bm_probe_line(const char* cmd, const char* needle,
+                                 char* out, size_t n) {
+    if (n == 0) return;
+    out[0] = '\0';
+    FILE* p = popen(cmd, "r");
+    if (!p) return;
+    char line[512];
+    while (fgets(line, sizeof(line), p)) {
+        const char* hit = strstr(line, needle);
+        if (hit) {
+            hit += strlen(needle);
+            while (*hit == ' ' || *hit == '\t') hit++;
+            size_t i = 0;
+            while (hit[i] && hit[i] != '\n' && hit[i] != '\r' && i + 1 < n) {
+                out[i] = hit[i];
+                i++;
+            }
+            out[i] = '\0';
+            break;
+        }
+    }
+    pclose(p);
 }
 
 /* JSON string escaping for the few free-form fields we emit. */
