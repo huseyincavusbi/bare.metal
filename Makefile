@@ -55,7 +55,7 @@ tests: dirs $(TEST_BINS)
 
 bench: dirs $(BENCH_BIN)
 
-$(BENCH_BIN): bench/bench.c $(OBJS) $(METAL_BIN)
+$(BENCH_BIN): bench/bench.c bench/metrics.h $(OBJS) $(METAL_BIN)
 	@mkdir -p build/bench
 	$(CC) $(CFLAGS) -o $@ bench/bench.c $(OBJS) $(LDFLAGS)
 	@mkdir -p build/bench/kernels
