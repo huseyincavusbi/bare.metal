@@ -416,6 +416,9 @@ int main(int argc, char** argv) {
     char clang_ver[128] = "", metal_ver[128] = "";
     bm_probe_line("clang --version 2>/dev/null", "version", clang_ver, sizeof(clang_ver));
     bm_probe_line("xcrun -sdk macosx metal --version 2>/dev/null", "version", metal_ver, sizeof(metal_ver));
+
+    backend_device_info_t dinfo;
+    backend_get_device_info(ctx->backend_ctx, &dinfo);
     {
         FILE* p = popen("git rev-parse --short HEAD 2>/dev/null", "r");
         if (p) { if (fgets(git, sizeof(git), p)) { char* nl = strchr(git, '\n'); if (nl) *nl = 0; } pclose(p); }
@@ -474,6 +477,11 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"e_cores\": %llu,\n", e_cores);
     fprintf(out, "    \"gpu_name\": \"%s\",\n", gpu_e);
     fprintf(out, "    \"gpu_cores\": %d,\n", gpu_cores);
+    fprintf(out, "    \"gpu_max_threads_per_tg\": %d,\n", dinfo.max_threads_per_threadgroup);
+    fprintf(out, "    \"gpu_max_threadgroup_mem\": %zu,\n", dinfo.max_threadgroup_memory);
+    fprintf(out, "    \"gpu_max_buffer_bytes\": %zu,\n", dinfo.max_buffer_bytes);
+    fprintf(out, "    \"gpu_recommended_working_set\": %zu,\n", dinfo.recommended_max_working_set);
+    fprintf(out, "    \"gpu_has_unified_memory\": %d,\n", dinfo.has_unified_memory);
     fprintf(out, "    \"ram_bytes\": %llu,\n", ram);
     fprintf(out, "    \"macos\": \"%s\",\n", osver_e);
     fprintf(out, "    \"power\": \"%s\",\n", power_arg);
