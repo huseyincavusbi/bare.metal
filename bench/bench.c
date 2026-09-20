@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <sys/time.h>
 
 static const char* precision_name(bm_precision_t p) {
     switch (p) {
@@ -275,6 +276,59 @@ int main(int argc, char** argv) {
         else power_arg = "unknown";
     }
     bm_probe_line("pmset -g therm", "CPU_Speed_Limit=", therm, sizeof(therm));
+
+    /* ---- system context ---- */
+    double load[3] = { 0, 0, 0 };
+    getloadavg(load, 3);
+    char load_avg[64];
+    snprintf(load_avg, sizeof(load_avg), "%.2f %.2f %.2f", load[0], load[1], load[2]);
+
+    unsigned long long swap_total = 0, swap_used = 0;
+    {
+        struct xsw_usage xsw; size_t len = sizeof(xsw);
+        if (sysctlbyname("vm.swapusage", &xsw, &len, NULL, 0) == 0) {
+            swap_total = xsw.xsu_total; swap_used = xsw.xsu_used;
+        }
+    }
+
+    unsigned long long pagesize = bm_sysctl_u64("hw.pagesize");
+    unsigned long long free_bytes = 0, compressed_bytes = 0;
+    {
+        char vmp[64];
+        bm_probe_line("vm_stat", "Pages free:", vmp, sizeof(vmp));
+        free_bytes = strtoull(vmp, NULL, 10) * pagesize;
+        bm_probe_line("vm_stat", "Pages occupied by compressor:", vmp, sizeof(vmp));
+        compressed_bytes = strtoull(vmp, NULL, 10) * pagesize;
+    }
+
+    long uptime_s = 0;
+    {
+        struct timeval bt; size_t len = sizeof(bt);
+        if (sysctlbyname("kern.boottime", &bt, &len, NULL, 0) == 0)
+            uptime_s = (long)time(NULL) - (long)bt.tv_sec;
+    }
+
+    int battery_pct = -1;
+    {
+        FILE* p = popen("pmset -g batt", "r");
+        if (p) {
+            char line[256];
+            while (fgets(line, sizeof(line), p)) {
+                char* pct = strchr(line, '%');
+                if (pct) {
+                    char* s = pct;
+                    while (s > line && s[-1] >= '0' && s[-1] <= '9') s--;
+                    if (s < pct) battery_pct = atoi(s);
+                    break;
+                }
+            }
+            pclose(p);
+        }
+    }
+
+    char clang_ver[128] = "", metal_ver[128] = "";
+    bm_probe_line("clang --version 2>/dev/null", "version", clang_ver, sizeof(clang_ver));
+    bm_probe_line("xcrun -sdk macosx metal --version 2>/dev/null", "version", metal_ver, sizeof(metal_ver));
     {
         FILE* p = popen("git rev-parse --short HEAD 2>/dev/null", "r");
         if (p) { if (fgets(git, sizeof(git), p)) { char* nl = strchr(git, '\n'); if (nl) *nl = 0; } pclose(p); }
@@ -285,12 +339,15 @@ int main(int argc, char** argv) {
         strftime(ended_at, sizeof(ended_at), "%Y-%m-%dT%H:%M:%SZ", gmtime(&t));
     }
     char cpu_e[256], osver_e[128], git_e[128], gpu_e[256], therm_e[128], model_e[512];
+    char clang_e[256], metal_e[256];
     bm_json_escape(cpu, cpu_e, sizeof(cpu_e));
     bm_json_escape(osver, osver_e, sizeof(osver_e));
     bm_json_escape(git, git_e, sizeof(git_e));
     bm_json_escape(gpu_name, gpu_e, sizeof(gpu_e));
     bm_json_escape(therm, therm_e, sizeof(therm_e));
     bm_json_escape(model_dir, model_e, sizeof(model_e));
+    bm_json_escape(clang_ver, clang_e, sizeof(clang_e));
+    bm_json_escape(metal_ver, metal_e, sizeof(metal_e));
 
     /* ---- emit JSON (baremetal.bench/v2) ---- */
     FILE* out = out_path ? fopen(out_path, "w") : stdout;
@@ -311,6 +368,15 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"macos\": \"%s\",\n", osver_e);
     fprintf(out, "    \"power\": \"%s\",\n", power_arg);
     fprintf(out, "    \"thermal_speed_limit\": \"%s\",\n", therm_e);
+    fprintf(out, "    \"load_avg\": \"%s\",\n", load_avg);
+    fprintf(out, "    \"uptime_seconds\": %ld,\n", uptime_s);
+    fprintf(out, "    \"battery_pct\": %d,\n", battery_pct);
+    fprintf(out, "    \"swap_total_bytes\": %llu,\n", swap_total);
+    fprintf(out, "    \"swap_used_bytes\": %llu,\n", swap_used);
+    fprintf(out, "    \"free_bytes\": %llu,\n", free_bytes);
+    fprintf(out, "    \"compressed_bytes\": %llu,\n", compressed_bytes);
+    fprintf(out, "    \"clang_version\": \"%s\",\n", clang_e);
+    fprintf(out, "    \"metal_version\": \"%s\",\n", metal_e);
     fprintf(out, "    \"started_at\": \"%s\",\n", started_at);
     fprintf(out, "    \"ended_at\": \"%s\",\n", ended_at);
     fprintf(out, "    \"model\": \"%s\",\n", model_e);
