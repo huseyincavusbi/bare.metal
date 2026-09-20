@@ -94,6 +94,21 @@ static size_t model_weight_bytes(bm_model_t* m) {
     return total;
 }
 
+typedef struct {
+    double utime_ms, stime_ms;
+    long minflt, majflt, inblock, oublock, nvcsw, nivcsw;
+} rusage_snap_t;
+
+static void snap_rusage(rusage_snap_t* s) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    s->utime_ms = ru.ru_utime.tv_sec * 1000.0 + ru.ru_utime.tv_usec / 1000.0;
+    s->stime_ms = ru.ru_stime.tv_sec * 1000.0 + ru.ru_stime.tv_usec / 1000.0;
+    s->minflt  = ru.ru_minflt;  s->majflt  = ru.ru_majflt;
+    s->inblock = ru.ru_inblock; s->oublock = ru.ru_oublock;
+    s->nvcsw   = ru.ru_nvcsw;   s->nivcsw  = ru.ru_nivcsw;
+}
+
 int main(int argc, char** argv) {
     const char* model_dir = NULL;
     const char* out_path  = NULL;
@@ -138,6 +153,11 @@ int main(int argc, char** argv) {
     }
 
     /* ---- model ---- */
+    rusage_snap_t rs_start, rs_load, rs_end;
+    char therm_start[64] = "";
+    snap_rusage(&rs_start);
+    bm_probe_line("pmset -g therm", "CPU_Speed_Limit=", therm_start, sizeof(therm_start));
+
     double t_load0 = bm_now_ms();
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
     if (!ctx) { fprintf(stderr, "bm_create failed\n"); return 1; }
@@ -163,6 +183,7 @@ int main(int argc, char** argv) {
     bm_session_t* sess = bm_create_session(ctx, m);
     if (!sess) { fprintf(stderr, "session failed\n"); return 1; }
     double load_ms = bm_now_ms() - t_load0;
+    snap_rusage(&rs_load);
 
     int V = m->arch.vocab_size;
     int max_seq = m->arch.max_seq_len;
@@ -213,11 +234,14 @@ int main(int argc, char** argv) {
     double active_s = 0.0, prefill_s_sum = 0.0, decode_s_sum = 0.0;
     long   total_gen_tokens = 0;
     long   active_start_unix = 0, active_end_unix = 0;
+    double first_call_ms = 0.0;
 
     /* ---- warmup (discarded: first passes include pipeline work) ---- */
     for (int w = 0; w < warmup; w++) {
         bm_reset_session(sess);
+        double tc0 = bm_now_ms();
         float* lg_pre = bm_forward(sess, prompt, prompt_tokens);
+        if (w == 0) first_call_ms = bm_now_ms() - tc0;   /* includes pipeline compile */
         bm_sampler_t* smp = bm_create_sampler(V, temp, 1.0f, seed);
         int tk = bm_sample(smp, lg_pre);
         for (int j = 1; j < gen_tokens; j++) {
@@ -266,6 +290,7 @@ int main(int argc, char** argv) {
         bm_destroy_sampler(smp);
     }
     active_end_unix = (long)time(NULL);
+    snap_rusage(&rs_end);
 
     /* ---- memory ---- */
     size_t rss = bm_peak_rss_bytes();
@@ -297,6 +322,13 @@ int main(int argc, char** argv) {
     double cov_dec  = bm_mean(decode_tps, reps)  != 0.0 ? bm_stddev(decode_tps, reps)  / bm_mean(decode_tps, reps)  * 100.0 : 0.0;
     double cov_ttft = bm_mean(ttft_ms, reps)     != 0.0 ? bm_stddev(ttft_ms, reps)     / bm_mean(ttft_ms, reps)     * 100.0 : 0.0;
     double cov_itl  = bm_mean(itl_all, itl_n)    != 0.0 ? bm_stddev(itl_all, itl_n)    / bm_mean(itl_all, itl_n)    * 100.0 : 0.0;
+
+    /* ---- process runtime stats ---- */
+    double host_cpu_ms = (rs_end.utime_ms + rs_end.stime_ms) - (rs_start.utime_ms + rs_start.stime_ms);
+    double host_cpu_pct = active_s > 0.0 ? host_cpu_ms / (active_s * 1000.0) * 100.0 : 0.0;
+    long majflt_load = rs_load.majflt - rs_start.majflt;
+    long minflt_load = rs_load.minflt - rs_start.minflt;
+    long inblock_load = rs_load.inblock - rs_start.inblock;
 
     /* ---- energy (from powermetrics watts supplied by the wrapper) ---- */
     double energy_joules = 0.0, j_per_token = 0.0;
@@ -342,6 +374,11 @@ int main(int argc, char** argv) {
     }
 
     unsigned long long pagesize = bm_sysctl_u64("hw.pagesize");
+    unsigned long long cacheline = bm_sysctl_u64("hw.cachelinesize");
+    char hw_model[64] = "", hw_machine[32] = "", os_build[64] = "";
+    bm_sysctl_str("hw.model", hw_model, sizeof(hw_model));
+    bm_sysctl_str("hw.machine", hw_machine, sizeof(hw_machine));
+    bm_sysctl_str("kern.osversion", os_build, sizeof(os_build));
     unsigned long long free_bytes = 0, compressed_bytes = 0;
     {
         char vmp[64];
@@ -383,6 +420,16 @@ int main(int argc, char** argv) {
         FILE* p = popen("git rev-parse --short HEAD 2>/dev/null", "r");
         if (p) { if (fgets(git, sizeof(git), p)) { char* nl = strchr(git, '\n'); if (nl) *nl = 0; } pclose(p); }
     }
+    char git_branch[64] = "";
+    {
+        FILE* p = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+        if (p) { if (fgets(git_branch, sizeof(git_branch), p)) { char* nl = strchr(git_branch, '\n'); if (nl) *nl = 0; } pclose(p); }
+    }
+    int git_dirty = 0;
+    {
+        FILE* p = popen("git status --porcelain 2>/dev/null", "r");
+        if (p) { char l[8]; git_dirty = fgets(l, sizeof(l), p) ? 1 : 0; pclose(p); }
+    }
     char ended_at[32] = "";
     {
         time_t t = time(NULL);
@@ -390,6 +437,7 @@ int main(int argc, char** argv) {
     }
     char cpu_e[256], osver_e[128], git_e[128], gpu_e[256], therm_e[128], model_e[512];
     char clang_e[256], metal_e[256];
+    char hwmodel_e[128], machine_e[64], osbuild_e[128], branch_e[128], thermstart_e[128];
     bm_json_escape(cpu, cpu_e, sizeof(cpu_e));
     bm_json_escape(osver, osver_e, sizeof(osver_e));
     bm_json_escape(git, git_e, sizeof(git_e));
@@ -398,6 +446,11 @@ int main(int argc, char** argv) {
     bm_json_escape(model_dir, model_e, sizeof(model_e));
     bm_json_escape(clang_ver, clang_e, sizeof(clang_e));
     bm_json_escape(metal_ver, metal_e, sizeof(metal_e));
+    bm_json_escape(hw_model, hwmodel_e, sizeof(hwmodel_e));
+    bm_json_escape(hw_machine, machine_e, sizeof(machine_e));
+    bm_json_escape(os_build, osbuild_e, sizeof(osbuild_e));
+    bm_json_escape(git_branch, branch_e, sizeof(branch_e));
+    bm_json_escape(therm_start, thermstart_e, sizeof(thermstart_e));
 
     /* ---- emit JSON (baremetal.bench/v2) ---- */
     FILE* out = out_path ? fopen(out_path, "w") : stdout;
@@ -408,7 +461,14 @@ int main(int argc, char** argv) {
     fprintf(out, "  \"meta\": {\n");
     fprintf(out, "    \"engine\": \"bare.metal\",\n");
     fprintf(out, "    \"git_commit\": \"%s\",\n", git_e);
+    fprintf(out, "    \"git_branch\": \"%s\",\n", branch_e);
+    fprintf(out, "    \"git_dirty\": %d,\n", git_dirty);
     fprintf(out, "    \"host\": \"%s\",\n", cpu_e);
+    fprintf(out, "    \"hw_model\": \"%s\",\n", hwmodel_e);
+    fprintf(out, "    \"hw_machine\": \"%s\",\n", machine_e);
+    fprintf(out, "    \"os_build\": \"%s\",\n", osbuild_e);
+    fprintf(out, "    \"pagesize\": %llu,\n", pagesize);
+    fprintf(out, "    \"cacheline\": %llu,\n", cacheline);
     fprintf(out, "    \"cpu_count\": %llu,\n", n_cpu);
     fprintf(out, "    \"p_cores\": %llu,\n", p_cores);
     fprintf(out, "    \"e_cores\": %llu,\n", e_cores);
@@ -418,6 +478,7 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"macos\": \"%s\",\n", osver_e);
     fprintf(out, "    \"power\": \"%s\",\n", power_arg);
     fprintf(out, "    \"thermal_speed_limit\": \"%s\",\n", therm_e);
+    fprintf(out, "    \"thermal_start\": \"%s\",\n", thermstart_e);
     fprintf(out, "    \"load_avg\": \"%s\",\n", load_avg);
     fprintf(out, "    \"uptime_seconds\": %ld,\n", uptime_s);
     fprintf(out, "    \"battery_pct\": %d,\n", battery_pct);
@@ -504,10 +565,25 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"active_ended_unix\": %ld,\n", active_end_unix);
     fprintf(out, "    \"prefill_seconds\": %.3f,\n", prefill_s_sum);
     fprintf(out, "    \"decode_seconds\": %.3f,\n", decode_s_sum);
+    fprintf(out, "    \"first_call_ms\": %.3f,\n", first_call_ms);
+    fprintf(out, "    \"process\": {\n");
+    fprintf(out, "      \"user_ms\": %.3f,\n", rs_end.utime_ms - rs_start.utime_ms);
+    fprintf(out, "      \"sys_ms\": %.3f,\n", rs_end.stime_ms - rs_start.stime_ms);
+    fprintf(out, "      \"host_cpu_ms\": %.3f,\n", host_cpu_ms);
+    fprintf(out, "      \"host_cpu_pct\": %.2f,\n", host_cpu_pct);
+    fprintf(out, "      \"minflt\": %ld,\n", rs_end.minflt - rs_start.minflt);
+    fprintf(out, "      \"majflt\": %ld,\n", rs_end.majflt - rs_start.majflt);
+    fprintf(out, "      \"inblock\": %ld,\n", rs_end.inblock - rs_start.inblock);
+    fprintf(out, "      \"oublock\": %ld,\n", rs_end.oublock - rs_start.oublock);
+    fprintf(out, "      \"nvcsw\": %ld,\n", rs_end.nvcsw - rs_start.nvcsw);
+    fprintf(out, "      \"nivcsw\": %ld,\n", rs_end.nivcsw - rs_start.nivcsw);
+    fprintf(out, "      \"minflt_load\": %ld,\n", minflt_load);
+    fprintf(out, "      \"majflt_load\": %ld,\n", majflt_load);
+    fprintf(out, "      \"inblock_load\": %ld\n", inblock_load);
+    fprintf(out, "    },\n");
     fprintf(out, "    \"generated_tokens\": %ld\n", total_gen_tokens);
     fprintf(out, "  }\n");
     fprintf(out, "}\n");
-
     if (out != stdout) fclose(out);
 
     free(prefill_ms); free(prefill_tps); free(decode_tps); free(ttft_ms);
