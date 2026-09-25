@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-OUT="bench/compare/results/$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="bench/compare/results/$(date +%m-%d-%Y)"
 PARTS="$(mktemp -d)"
 mkdir -p "$OUT"
 echo "run dir: $OUT (single file)"
