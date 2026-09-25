@@ -3,6 +3,7 @@ build/
 *.air
 *.o
 data/
+models/
 *.bin
 .DS_Store
 docs/
