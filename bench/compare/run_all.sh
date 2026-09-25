@@ -42,7 +42,7 @@ echo
 
 echo "== bare.metal =="
 make bench >/dev/null 2>&1
-./build/bench/bench --model "$MODEL" --prompt-tokens "$PROMPT_TOKENS" --gen "$GEN" \
+./build/bench/bench --model "$MODEL" --prompt-tokens "$PROMPT_TOKENS" --raw-prompt --gen "$GEN" \
     --warmup 1 --reps "$REPS" --precision "$PREC" --out "$OUT/baremetal_${PREC}.json" \
   || echo "  bare.metal bench failed"
 
