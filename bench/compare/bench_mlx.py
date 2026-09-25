@@ -47,14 +47,17 @@ def main():
 
     def run_once():
         ids, itls = [], []
-        prev = None
+        prev = first = None
+        t0 = time.perf_counter()
         for resp in stream_generate(model, tok, prompt_ids, max_tokens=a.gen, sampler=sampler):
             now = time.perf_counter()
+            if first is None:
+                first = now
             ids.append(int(resp.token))
             if prev is not None:
                 itls.append((now - prev) * 1000.0)
             prev = now
-        return ids, itls
+        return ids, itls, (first - t0) * 1000.0 if first else 0.0
 
     # warmup
     for _ in range(a.warmup):
@@ -63,13 +66,8 @@ def main():
     prefill_tps, decode_tps, ttft_ms, itl_all = [], [], [], []
     last_ids = None
     for _ in range(a.reps):
-        t0 = time.perf_counter()
-        ids, itls = run_once()
-        total = time.perf_counter() - t0
-        # ttft ≈ prompt processing + first token: approximate from the run's
-        # total minus the measured decode time.
+        ids, itls, ttft = run_once()
         dec = sum(itls) / 1000.0
-        ttft = max(total - dec, 0.0) * 1000.0
         ttft_ms.append(ttft)
         itl_all += itls
         prefill_tps.append(n_prompt / (ttft / 1000.0) if ttft > 0 else 0.0)
