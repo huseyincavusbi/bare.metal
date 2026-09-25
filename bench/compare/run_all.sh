@@ -61,13 +61,23 @@ else
     || echo "  bare.metal bench failed"
 fi
 
+PEAK=(--peak-gflops "$PEAK_GFLOPPS" --peak-gbps "$PEAK_GBPS")
+adapter() {   # OUT CMD...
+  local out="$1"; shift
+  if [ "$HAVE_ENERGY" -eq 1 ]; then
+    energy_exec "$out" "$@"
+  else
+    "$@" || echo "  $(basename "$out") failed"
+  fi
+}
+
 echo "== llama.cpp =="
 if command -v llama-bench >/dev/null 2>&1; then
   if [ -z "$GGUF" ] || [ ! -f "$GGUF" ]; then
     echo "  no GGUF available (set GGUF=path or --gguf); skipping"
   else
-    python3 bench/compare/bench_llamacpp.py --gguf "$GGUF" \
-        --gen "$GEN" --reps "$REPS" --out "$PARTS/llamacpp.json" || echo "  llama.cpp bench failed"
+    adapter "$PARTS/llamacpp.json" python3 bench/compare/bench_llamacpp.py --gguf "$GGUF" \
+        --gen "$GEN" --reps "$REPS" "${PEAK[@]}" --out "$PARTS/llamacpp.json"
   fi
 else
   echo "  llama-bench not found (brew install llama.cpp); skipping"
@@ -75,16 +85,16 @@ fi
 
 echo "== MLX =="
 if "$PYTHON" -c "import mlx_lm" 2>/dev/null; then
-  "$PYTHON" bench/compare/bench_mlx.py --model "$MLX_MODEL" \
-      --gen "$GEN" --reps "$REPS" --out "$PARTS/mlx.json" || echo "  MLX bench failed"
+  adapter "$PARTS/mlx.json" "$PYTHON" bench/compare/bench_mlx.py --model "$MLX_MODEL" \
+      --gen "$GEN" --reps "$REPS" "${PEAK[@]}" --out "$PARTS/mlx.json"
 else
   echo "  mlx-lm not installed in $PYTHON (uv pip install mlx-lm); skipping"
 fi
 
 echo "== PyTorch MPS =="
 if "$PYTHON" -c "import torch" 2>/dev/null; then
-  "$PYTHON" bench/compare/bench_mps.py --model "$MODEL" \
-      --gen "$GEN" --reps "$REPS" --out "$PARTS/mps.json" || echo "  MPS bench failed"
+  adapter "$PARTS/mps.json" "$PYTHON" bench/compare/bench_mps.py --model "$MODEL" \
+      --gen "$GEN" --reps "$REPS" "${PEAK[@]}" --out "$PARTS/mps.json"
 else
   echo "  torch not installed in $PYTHON; skipping"
 fi
