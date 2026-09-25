@@ -21,6 +21,7 @@
 #include "baremetal/model.h"
 #include "baremetal/graph.h"
 #include "baremetal/quant.h"
+#include "baremetal/tokenizer.h"
 #include "backend/backend.h"
 #include "metrics.h"
 
@@ -568,6 +569,40 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"generated_token_ids\": [");
     for (int i = 0; i < tok_n; i++) fprintf(out, i ? ", %d" : "%d", tok_ids[i]);
     fprintf(out, "],\n");
+    {
+        bm_tokenizer_t* tok_out = bm_create_tokenizer(model_dir);
+        char* gt = NULL;
+        if (tok_out) {
+            size_t cap = 1;
+            for (int i = 0; i < tok_n; i++) {
+                char* s = bm_tokenizer_decode(tok_out, i ? tok_ids[i - 1] : 0, tok_ids[i]);
+                if (s) cap += strlen(s);
+            }
+            gt = malloc(cap);
+            if (gt) {
+                size_t off = 0;
+                for (int i = 0; i < tok_n; i++) {
+                    char* s = bm_tokenizer_decode(tok_out, i ? tok_ids[i - 1] : 0, tok_ids[i]);
+                    if (!s) continue;
+                    size_t l = strlen(s);
+                    memcpy(gt + off, s, l);
+                    off += l;
+                }
+                gt[off] = '\0';
+            }
+            bm_destroy_tokenizer(tok_out);
+        }
+        size_t esc_n = gt ? strlen(gt) * 2 + 1 : 1;
+        char* esc = malloc(esc_n);
+        if (esc) {
+            bm_json_escape(gt ? gt : "", esc, esc_n);
+            fprintf(out, "    \"generated_text\": \"%s\",\n", esc);
+            free(esc);
+        } else {
+            fprintf(out, "    \"generated_text\": \"\",\n");
+        }
+        free(gt);
+    }
     fprintf(out, "    \"memory\": {\n");
     fprintf(out, "      \"rss_peak_bytes\": %zu,\n", rss);
     fprintf(out, "      \"gpu_alloc_bytes\": %zu,\n", gpu);
