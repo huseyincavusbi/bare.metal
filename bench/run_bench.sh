@@ -17,7 +17,7 @@
 #   bench/run_bench.sh [options]
 #
 # Options:
-#   --model DIR      model directory            (default: data/smollm2-135m)
+#   --model DIR      model directory            (default: models/smollm2-135m)
 #   --out DIR        base results directory     (default: bench/results)
 #   --reps N         measured reps per config  (default: 5)
 #   --warmup N       warmup reps                (default: 2)
@@ -27,7 +27,7 @@
 #   --no-energy      skip powermetrics energy capture
 set -euo pipefail
 
-MODEL="${MODEL:-data/smollm2-135m}"
+MODEL="${MODEL:-models/smollm2-135m}"
 OUTDIR="${OUTDIR:-bench/results}"
 REPS=5
 WARMUP=2
