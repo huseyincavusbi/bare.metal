@@ -36,25 +36,25 @@ while [ $# -gt 0 ]; do
 done
 
 OUT="bench/compare/results/$(date -u +%Y%m%dT%H%M%SZ)"
+PARTS="$(mktemp -d)"
 mkdir -p "$OUT"
-echo "run dir: $OUT"
+echo "run dir: $OUT (single file)"
 echo "host:    $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
 echo
 
 echo "== bare.metal =="
 make bench >/dev/null 2>&1
 ./build/bench/bench --model "$MODEL" --prompt-tokens "$PROMPT_TOKENS" --raw-prompt --gen "$GEN" \
-    --warmup 1 --reps "$REPS" --precision "$PREC" --out "$OUT/baremetal_${PREC}.json" \
+    --warmup 1 --reps "$REPS" --precision "$PREC" --out "$PARTS/baremetal_${PREC}.json" \
   || echo "  bare.metal bench failed"
 
 echo "== llama.cpp =="
 if command -v llama-bench >/dev/null 2>&1; then
   if [ -z "$GGUF" ] || [ ! -f "$GGUF" ]; then
     echo "  no GGUF available (set GGUF=path or --gguf); skipping"
-    echo "  convert: python llama.cpp/convert_hf_to_gguf.py --outtype f16 --outfile /tmp/m.gguf $MODEL"
   else
     python3 bench/compare/bench_llamacpp.py --gguf "$GGUF" \
-        --gen "$GEN" --reps "$REPS" --out "$OUT/llamacpp.json" || echo "  llama.cpp bench failed"
+        --gen "$GEN" --reps "$REPS" --out "$PARTS/llamacpp.json" || echo "  llama.cpp bench failed"
   fi
 else
   echo "  llama-bench not found (brew install llama.cpp); skipping"
@@ -63,7 +63,7 @@ fi
 echo "== MLX =="
 if "$PYTHON" -c "import mlx_lm" 2>/dev/null; then
   "$PYTHON" bench/compare/bench_mlx.py --model "$MLX_MODEL" \
-      --gen "$GEN" --reps "$REPS" --out "$OUT/mlx.json" || echo "  MLX bench failed"
+      --gen "$GEN" --reps "$REPS" --out "$PARTS/mlx.json" || echo "  MLX bench failed"
 else
   echo "  mlx-lm not installed in $PYTHON (uv pip install mlx-lm); skipping"
 fi
@@ -71,11 +71,12 @@ fi
 echo "== PyTorch MPS =="
 if "$PYTHON" -c "import torch" 2>/dev/null; then
   "$PYTHON" bench/compare/bench_mps.py --model "$MODEL" \
-      --gen "$GEN" --reps "$REPS" --out "$OUT/mps.json" || echo "  MPS bench failed"
+      --gen "$GEN" --reps "$REPS" --out "$PARTS/mps.json" || echo "  MPS bench failed"
 else
   echo "  torch not installed in $PYTHON; skipping"
 fi
 
 echo
 "$PYTHON" bench/compare/collect.py --outdir "$OUT" --benchmark cross-engine \
-    --md "$OUT/cross-engine.md" "$OUT"
+    --date "$(basename "$OUT")" "$PARTS"
+rm -rf "$PARTS"
