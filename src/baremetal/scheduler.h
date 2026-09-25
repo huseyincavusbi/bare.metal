@@ -42,4 +42,10 @@ void bmt_scheduler_get_grad(bmt_scheduler_t* sched, int tensor_id, void* data, s
 backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id);
 backend_buffer_t* bmt_scheduler_get_grad_buffer(bmt_scheduler_t* sched, int tensor_id);
 
+/* Phase-level GPU timing (ms). begin() arms; the next bmt_scheduler_run
+ * attributes the GPU time of its command buffers to the attention and MLP
+ * blocks (plus everything else); end() reports and disarms. */
+void bmt_scheduler_profile_begin(bmt_scheduler_t* sched);
+void bmt_scheduler_profile_end(bmt_scheduler_t* sched, double* attention_ms, double* mlp_ms, double* other_ms);
+
 #endif

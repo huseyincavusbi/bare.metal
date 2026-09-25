@@ -32,3 +32,32 @@ size_t bmt_quantize_q8(const float* src, q8_block_t* dst, size_t n) {
     }
     return nblocks;
 }
+
+size_t bmt_quantize_q4(const float* src, q4_block_t* dst, size_t n) {
+    if (n == 0 || (n % Q4_BLOCK_SIZE) != 0) return 0;
+    size_t nblocks = n / Q4_BLOCK_SIZE;
+    for (size_t b = 0; b < nblocks; b++) {
+        const float* p = src + b * Q4_BLOCK_SIZE;
+        float amax = 0.0f;
+        for (int i = 0; i < Q4_BLOCK_SIZE; i++) {
+            float a = fabsf(p[i]);
+            if (a > amax) amax = a;
+        }
+        float scale = amax / 7.0f;
+        dst[b].scale = scale;
+        const int half = Q4_BLOCK_SIZE / 2;
+        if (scale == 0.0f) {
+            for (int j = 0; j < half; j++) dst[b].qs[j] = 0;
+            continue;
+        }
+        float inv = 1.0f / scale;
+        for (int j = 0; j < half; j++) {
+            int lo = (int)lroundf(p[2 * j]     * inv);
+            int hi = (int)lroundf(p[2 * j + 1] * inv);
+            if (lo > 7) lo = 7;   if (lo < -8) lo = -8;
+            if (hi > 7) hi = 7;   if (hi < -8) hi = -8;
+            dst[b].qs[j] = (uint8_t)((lo & 0x0F) | ((hi & 0x0F) << 4));
+        }
+    }
+    return nblocks;
+}

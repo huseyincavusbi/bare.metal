@@ -76,6 +76,9 @@ int backend_kernel_dispatch(backend_ctx_t* ctx,
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    if (cmdBuf.GPUStartTime > 0.0 && cmdBuf.GPUEndTime >= cmdBuf.GPUStartTime)
+        ctx->gpu_busy_ms += (cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0;
+    ctx->cmd_buffers += 1;
 
     return 0;
 }
@@ -93,6 +96,7 @@ backend_encoder_t* backend_encode_begin(backend_ctx_t* ctx) {
     backend_encoder_t* e = calloc(1, sizeof(backend_encoder_t));
     e->command_buffer = (__bridge_retained void*)cmdBuf;
     e->encoder = (__bridge_retained void*)enc;
+    e->ctx = ctx;
     return e;
 }
 
@@ -126,12 +130,28 @@ void backend_encode_commit(backend_encoder_t* enc) {
 }
 
 void backend_encode_wait(backend_encoder_t* enc) {
-    if (!enc) return;
-    [(__bridge id<MTLCommandBuffer>)enc->command_buffer waitUntilCompleted];
+    (void)backend_encode_wait_timed(enc);
+}
+
+/* Like backend_encode_wait, but returns the GPU execution time (ms) of this
+ * command buffer and accumulates it. Used for phase-level profiling. */
+double backend_encode_wait_timed(backend_encoder_t* enc) {
+    if (!enc) return 0.0;
+    id<MTLCommandBuffer> cmdBuf =
+        (__bridge id<MTLCommandBuffer>)enc->command_buffer;
+    [cmdBuf waitUntilCompleted];
+    double ms = 0.0;
+    if (cmdBuf.GPUStartTime > 0.0 && cmdBuf.GPUEndTime >= cmdBuf.GPUStartTime)
+        ms = (cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0;
+    if (enc->ctx) {
+        enc->ctx->gpu_busy_ms += ms;
+        enc->ctx->cmd_buffers += 1;
+    }
     id<MTLComputeCommandEncoder> encoder =
         (__bridge_transfer id<MTLComputeCommandEncoder>)enc->encoder;
-    id<MTLCommandBuffer> cmdBuf =
+    id<MTLCommandBuffer> released =
         (__bridge_transfer id<MTLCommandBuffer>)enc->command_buffer;
-    (void)encoder; (void)cmdBuf;
+    (void)encoder; (void)released;
     free(enc);
+    return ms;
 }

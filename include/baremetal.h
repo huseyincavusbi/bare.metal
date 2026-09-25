@@ -126,6 +126,14 @@ float*         bm_step(bm_session_t* sess, int token);
 void           bm_reset_session(bm_session_t* sess);
 void           bm_destroy_session(bm_session_t* sess);
 
+/* Phase-level GPU timing (ms). begin() arms profiling; the next forward/step
+ * attributes GPU time to the attention and MLP blocks (plus other); end()
+ * reports and disarms. These use the command buffers the engine already
+ * flushes at the residual adds (per-kernel counter sampling is unsupported on
+ * Apple GPUs for compute encoders). */
+void           bm_profile_begin(bm_session_t* sess);
+void           bm_profile_end(bm_session_t* sess, double* attention_ms, double* mlp_ms, double* other_ms);
+
 typedef int (*bm_token_cb_t)(int token_id, void* user_data);
 
 int            bm_run_tokens(bm_context_t* ctx, bm_model_t* model,

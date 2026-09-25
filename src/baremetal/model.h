@@ -50,7 +50,7 @@ struct bm_model_s {
 
     void*    graph;
 
-    int      quantized;   /* 1 = quantize matmul weights to Q8 at upload */
+    int      quant_bits;  /* 0 = fp, 8 = Q8, 4 = Q4 */
 };
 
 int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);

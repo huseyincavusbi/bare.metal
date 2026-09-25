@@ -60,6 +60,14 @@ void bm_destroy_session(bm_session_t* sess) {
     free(sess);
 }
 
+void bm_profile_begin(bm_session_t* sess) {
+    if (sess) bmt_scheduler_profile_begin(sess->sched);
+}
+
+void bm_profile_end(bm_session_t* sess, double* attention_ms, double* mlp_ms, double* other_ms) {
+    if (sess) bmt_scheduler_profile_end(sess->sched, attention_ms, mlp_ms, other_ms);
+}
+
 void bm_reset_session(bm_session_t* sess) {
     if (sess) sess->pos = 0;
 }

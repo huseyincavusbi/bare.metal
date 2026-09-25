@@ -17,6 +17,25 @@ typedef struct backend_encoder_s backend_encoder_t;
 backend_ctx_t*    backend_create(void);
 void              backend_destroy(backend_ctx_t* ctx);
 size_t            backend_get_allocated_memory(backend_ctx_t* ctx);
+size_t            backend_get_peak_allocated_memory(backend_ctx_t* ctx);
+
+typedef struct {
+    int    max_threads_per_threadgroup;
+    size_t max_threadgroup_memory;
+    size_t max_buffer_bytes;
+    size_t recommended_max_working_set;
+    int    has_unified_memory;
+} backend_device_info_t;
+
+void              backend_get_device_info(backend_ctx_t* ctx, backend_device_info_t* out);
+
+double            backend_get_gpu_busy_ms(backend_ctx_t* ctx);
+uint64_t          backend_get_command_buffers(backend_ctx_t* ctx);
+void              backend_reset_gpu_timing(backend_ctx_t* ctx);
+
+/* Wait for the encoder's command buffer and return its GPU execution time (ms),
+ * accumulating into the context totals. Used for phase-level profiling. */
+double            backend_encode_wait_timed(backend_encoder_t* enc);
 
 backend_buffer_t* backend_buffer_alloc(backend_ctx_t* ctx, size_t size);
 void              backend_buffer_free(backend_buffer_t* buf);
