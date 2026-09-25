@@ -2,10 +2,11 @@
 """llama.cpp inference benchmark -> baremetal.bench/v2 JSON.
 
 Uses llama-bench for prefill/decode throughput (its `pp`/`tg` map exactly to our
-prefill/decode) and llama-cli (greedy) for the generated text. Requires the
-llama.cpp tools on PATH: llama-bench, llama-cli, and a GGUF model.
+prefill/decode) and llama-completion (greedy) for the generated text. Requires
+the llama.cpp tools on PATH: llama-bench, llama-tokenize, llama-completion, and
+a GGUF model.
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, subprocess, sys, time, resource
 
 PROMPT_TEXT = (
     "Once upon a time, in a small village at the edge of a great forest, "
@@ -35,27 +36,30 @@ def tokenize(gguf, text):
 
 
 def bench_pp_tg(gguf, prompt_tokens, gen, reps):
-    """Return (prefill_tps, decode_tps) from llama-bench json output."""
+    """Return (prefill_tps, decode_tps, model_size, n_params) from llama-bench."""
     r = run(["llama-bench", "-m", gguf, "-p", str(prompt_tokens),
              "-n", str(gen), "-r", str(reps), "-o", "json"])
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
-        return 0.0, 0.0
+        return 0.0, 0.0, 0, 0
     try:
         data = json.loads(r.stdout)
     except Exception:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0, 0
     pp = tg = 0.0
+    model_size = n_params = 0
     for e in data:
+        model_size = model_size or int(e.get("model_size", 0))
+        n_params = n_params or int(e.get("model_n_params", 0))
         if e.get("n_prompt", 0) > 0 and e.get("n_gen", 0) == 0:
             pp = float(e.get("avg_ts", 0.0))
         elif e.get("n_prompt", 0) == 0 and e.get("n_gen", 0) > 0:
             tg = float(e.get("avg_ts", 0.0))
-    return pp, tg
+    return pp, tg, model_size, n_params
 
 
 def gen_text(gguf, prompt_tokens, gen, seed):
-    """Greedy generation via llama-cli; returns (text, peak_rss_bytes)."""
+    """Greedy generation via llama-completion; returns (text, peak_rss_bytes)."""
     args = ["llama-completion", "-m", gguf, "-p", PROMPT_TEXT, "-n", str(gen),
             "--temp", "0", "--seed", str(seed), "--no-display-prompt",
             "-c", str(prompt_tokens + gen + 64)]
@@ -71,20 +75,28 @@ def gen_text(gguf, prompt_tokens, gen, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", required=True)
-    ap.add_argument("--prompt-tokens", type=int, default=128)
     ap.add_argument("--gen", type=int, default=32)
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--precision", default="F16")
+    ap.add_argument("--peak-gflops", type=float, default=4200.0)
+    ap.add_argument("--peak-gbps", type=float, default=120.0)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     prompt_ids = tokenize(a.gguf, PROMPT_TEXT)
-    n_prompt = len(prompt_ids) or a.prompt_tokens
+    n_prompt = len(prompt_ids)
 
-    pp, tg = bench_pp_tg(a.gguf, n_prompt, a.gen, a.reps)
+    active_started = time.time()
+    pp, tg, model_size, n_params = bench_pp_tg(a.gguf, n_prompt, a.gen, a.reps)
     text, rss = gen_text(a.gguf, n_prompt, a.gen, a.seed)
-    gen_ids = tokenize(a.gguf, text) if text else []
+    active_ended = time.time()
+    model_size = model_size or os.path.getsize(a.gguf)
+
+    # decode bytes/token ≈ whole model read per token
+    dec_bytes_s = model_size * tg
+    achieved_gbps = dec_bytes_s / 1e9 if tg > 0 else 0.0
+    gflops = 2.0 * n_params * tg / 1e9 if (n_params and tg > 0) else 0.0
 
     doc = {
         "schema": "baremetal.bench/v2",
@@ -96,9 +108,21 @@ def main():
         "results": {
             "prefill": {"tok_s": {"p50": pp}},
             "decode": {"tok_s": {"p50": tg}},
-            "memory": {"rss_peak_bytes": rss},
+            "memory": {"rss_peak_bytes": rss or resource.getrusage(resource.RUSAGE_SELF).ru_maxrss},
+            "analysis": {
+                "model_bytes": model_size,
+                "bytes_per_param": round(model_size / n_params, 3) if n_params else 0.0,
+                "achieved_gbps": round(achieved_gbps, 3),
+                "gflops": round(gflops, 2),
+                "arith_intensity": round((2.0 * n_params) / model_size, 3) if model_size else 0.0,
+                "mfu_pct_of_peak": round(100.0 * gflops / a.peak_gflops, 2) if a.peak_gflops else 0.0,
+                "bw_pct_of_peak": round(100.0 * achieved_gbps / a.peak_gbps, 2) if a.peak_gbps else 0.0,
+            },
+            "active_started_unix": round(active_started, 3),
+            "active_ended_unix": round(active_ended, 3),
+            "active_seconds": round(active_ended - active_started, 3),
             "prompt_token_ids": prompt_ids,
-            "generated_token_ids": gen_ids,
+            "generated_token_ids": tokenize(a.gguf, text) if text else [],
             "generated_text": text,
         },
     }
