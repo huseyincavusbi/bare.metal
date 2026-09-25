@@ -6,6 +6,7 @@ Greedy, fixed prompt-tiling protocol (same as bench/bench.c). Requires mlx-lm
 """
 import argparse, json, time, platform
 from mlx_lm import load, stream_generate
+from mlx_lm.sample_utils import make_sampler
 
 PROMPT_TEXT = (
     "Once upon a time, in a small village at the edge of a great forest, "
@@ -40,13 +41,14 @@ def main():
     a = ap.parse_args()
 
     model, tok = load(a.model)
-    base = tok.encode(PROMPT_TEXT)
-    prompt_ids = [base[i % len(base)] for i in range(a.prompt_tokens)]
+    prompt_ids = tok.encode(PROMPT_TEXT)
+    n_prompt = len(prompt_ids)
+    sampler = make_sampler(temp=0.0)
 
     def run_once():
         ids, itls = [], []
         prev = None
-        for resp in stream_generate(model, tok, prompt_ids, max_tokens=a.gen, temp=0.0):
+        for resp in stream_generate(model, tok, prompt_ids, max_tokens=a.gen, sampler=sampler):
             now = time.perf_counter()
             ids.append(int(resp.token))
             if prev is not None:
@@ -70,7 +72,7 @@ def main():
         ttft = max(total - dec, 0.0) * 1000.0
         ttft_ms.append(ttft)
         itl_all += itls
-        prefill_tps.append(a.prompt_tokens / (ttft / 1000.0) if ttft > 0 else 0.0)
+        prefill_tps.append(n_prompt / (ttft / 1000.0) if ttft > 0 else 0.0)
         decode_tps.append((a.gen - 1) / dec if dec > 0 else 0.0)
         last_ids = ids
 
@@ -79,13 +81,14 @@ def main():
         "schema": "baremetal.bench/v2",
         "meta": {"engine": "mlx", "model": a.model, "precision": "bf16",
                  "quant": "none", "host": platform.machine()},
-        "config": {"prompt_tokens": a.prompt_tokens, "gen_tokens": a.gen,
+        "config": {"prompt_tokens": n_prompt, "gen_tokens": a.gen,
                    "warmup": a.warmup, "reps": a.reps, "temp": 0.0},
         "results": {
             "prefill": {"tok_s": stats(prefill_tps)},
             "decode": {"tok_s": stats(decode_tps)},
             "ttft_ms": stats(ttft_ms),
             "itl_ms": stats(itl_all),
+            "prompt_token_ids": prompt_ids,
             "generated_token_ids": last_ids,
             "generated_text": text,
         },
