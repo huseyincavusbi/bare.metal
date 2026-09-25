@@ -20,6 +20,7 @@ PROMPT_TOKENS=128
 GEN=32
 REPS=5
 PREC=bf16
+PYTHON="${PYTHON:-python3}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -52,7 +53,7 @@ if command -v llama-bench >/dev/null 2>&1; then
     echo "  no GGUF available (set GGUF=path or --gguf); skipping"
     echo "  convert: python llama.cpp/convert_hf_to_gguf.py --outtype f16 --outfile /tmp/m.gguf $MODEL"
   else
-    python3 bench/compare/bench_llamacpp.py --gguf "$GGUF" --prompt-tokens "$PROMPT_TOKENS" \
+    python3 bench/compare/bench_llamacpp.py --gguf "$GGUF" \
         --gen "$GEN" --reps "$REPS" --out "$OUT/llamacpp.json" || echo "  llama.cpp bench failed"
   fi
 else
@@ -60,20 +61,20 @@ else
 fi
 
 echo "== MLX =="
-if python3 -c "import mlx_lm" 2>/dev/null; then
-  python3 bench/compare/bench_mlx.py --model "$MLX_MODEL" --prompt-tokens "$PROMPT_TOKENS" \
+if "$PYTHON" -c "import mlx_lm" 2>/dev/null; then
+  "$PYTHON" bench/compare/bench_mlx.py --model "$MLX_MODEL" \
       --gen "$GEN" --reps "$REPS" --out "$OUT/mlx.json" || echo "  MLX bench failed"
 else
-  echo "  mlx-lm not installed (pip install mlx-lm); skipping"
+  echo "  mlx-lm not installed in $PYTHON (uv pip install mlx-lm); skipping"
 fi
 
 echo "== PyTorch MPS =="
-if python3 -c "import torch" 2>/dev/null; then
-  python3 bench/compare/bench_mps.py --model "$MODEL" --prompt-tokens "$PROMPT_TOKENS" \
+if "$PYTHON" -c "import torch" 2>/dev/null; then
+  "$PYTHON" bench/compare/bench_mps.py --model "$MODEL" \
       --gen "$GEN" --reps "$REPS" --out "$OUT/mps.json" || echo "  MPS bench failed"
 else
-  echo "  torch not installed; skipping"
+  echo "  torch not installed in $PYTHON; skipping"
 fi
 
 echo
-python3 bench/compare/collect.py "$OUT"
+"$PYTHON" bench/compare/collect.py "$OUT"
