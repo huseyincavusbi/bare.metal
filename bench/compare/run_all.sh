@@ -77,4 +77,5 @@ else
 fi
 
 echo
-"$PYTHON" bench/compare/collect.py --out "$OUT/comparison.json" --md "$OUT/comparison.md" "$OUT"
+"$PYTHON" bench/compare/collect.py --outdir "$OUT" --benchmark cross-engine \
+    --md "$OUT/cross-engine.md" "$OUT"
