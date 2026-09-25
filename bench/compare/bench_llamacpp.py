@@ -89,9 +89,16 @@ def main():
 
     active_started = time.time()
     pp, tg, model_size, n_params = bench_pp_tg(a.gguf, n_prompt, a.gen, a.reps)
+    tf = time.perf_counter()
     text, rss = gen_text(a.gguf, n_prompt, a.gen, a.seed)
+    first_call_ms = (time.perf_counter() - tf) * 1000.0
     active_ended = time.time()
     model_size = model_size or os.path.getsize(a.gguf)
+    gen_ids = tokenize(a.gguf, text) if text else []
+
+    # llama-bench reports pp/tg rates; derive TTFT and ITL from them.
+    ttft_ms = n_prompt / pp * 1000.0 if pp > 0 else 0.0
+    itl_ms = 1000.0 / tg if tg > 0 else 0.0
 
     # decode bytes/token ≈ whole model read per token
     dec_bytes_s = model_size * tg
@@ -106,8 +113,11 @@ def main():
         "config": {"prompt_tokens": n_prompt, "gen_tokens": a.gen,
                    "reps": a.reps, "temp": 0.0, "seed": a.seed},
         "results": {
+            "first_call_ms": round(first_call_ms, 3),
             "prefill": {"tok_s": {"p50": pp}},
             "decode": {"tok_s": {"p50": tg}},
+            "ttft_ms": {"p50": round(ttft_ms, 3)},
+            "itl_ms": {"p50": round(itl_ms, 3)},
             "memory": {"rss_peak_bytes": rss or resource.getrusage(resource.RUSAGE_SELF).ru_maxrss},
             "analysis": {
                 "model_bytes": model_size,
@@ -122,8 +132,9 @@ def main():
             "active_ended_unix": round(active_ended, 3),
             "active_seconds": round(active_ended - active_started, 3),
             "prompt_token_ids": prompt_ids,
-            "generated_token_ids": tokenize(a.gguf, text) if text else [],
+            "generated_token_ids": gen_ids,
             "generated_text": text,
+            "generated_tokens": len(gen_ids),
         },
     }
     json.dump(doc, open(a.out, "w"), indent=2)
