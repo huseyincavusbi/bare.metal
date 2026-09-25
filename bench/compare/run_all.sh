@@ -13,9 +13,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-MODEL="${MODEL:-data/smollm2-135m}"
-MLX_MODEL="${MLX_MODEL:-mlx-community/SmolLM2-135M-bf16}"
-GGUF="${GGUF:-}"
+MODEL="${MODEL:-models/smollm2-135m}"
+MLX_MODEL="${MLX_MODEL:-models/smollm2-135m-mlx}"
+GGUF="${GGUF:-models/smollm2-135m-bf16.gguf}"
 PROMPT_TOKENS=128
 GEN=32
 REPS=5
