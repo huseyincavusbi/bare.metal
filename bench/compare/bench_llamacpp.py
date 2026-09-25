@@ -21,6 +21,19 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def tokenize(gguf, text):
+    """Token ids for `text` via llama-tokenize (no BOS for these models)."""
+    r = run(["llama-tokenize", "-m", gguf, "-p", text, "--ids"])
+    for line in reversed(r.stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            try:
+                return json.loads(line)
+            except Exception:
+                pass
+    return []
+
+
 def bench_pp_tg(gguf, prompt_tokens, gen, reps):
     """Return (prefill_tps, decode_tps) from llama-bench json output."""
     r = run(["llama-bench", "-m", gguf, "-p", str(prompt_tokens),
@@ -52,7 +65,7 @@ def gen_text(gguf, prompt_tokens, gen, seed):
     m = re.search(r"(\d+)\s+maximum resident set size", r.stderr)
     if m:
         rss = int(m.group(1))
-    return text.strip(), rss
+    return text.rstrip(), rss
 
 
 def main():
@@ -66,25 +79,31 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    pp, tg = bench_pp_tg(a.gguf, a.prompt_tokens, a.gen, a.reps)
-    text, rss = gen_text(a.gguf, a.prompt_tokens, a.gen, a.seed)
+    prompt_ids = tokenize(a.gguf, PROMPT_TEXT)
+    n_prompt = len(prompt_ids) or a.prompt_tokens
+
+    pp, tg = bench_pp_tg(a.gguf, n_prompt, a.gen, a.reps)
+    text, rss = gen_text(a.gguf, n_prompt, a.gen, a.seed)
+    gen_ids = tokenize(a.gguf, text) if text else []
 
     doc = {
         "schema": "baremetal.bench/v2",
         "meta": {"engine": "llama.cpp", "model": os.path.basename(a.gguf),
                  "precision": a.precision,
                  "quant": "none" if a.precision in ("F32", "F16", "BF16") else a.precision},
-        "config": {"prompt_tokens": a.prompt_tokens, "gen_tokens": a.gen,
+        "config": {"prompt_tokens": n_prompt, "gen_tokens": a.gen,
                    "reps": a.reps, "temp": 0.0, "seed": a.seed},
         "results": {
             "prefill": {"tok_s": {"p50": pp}},
             "decode": {"tok_s": {"p50": tg}},
             "memory": {"rss_peak_bytes": rss},
+            "prompt_token_ids": prompt_ids,
+            "generated_token_ids": gen_ids,
             "generated_text": text,
         },
     }
     json.dump(doc, open(a.out, "w"), indent=2)
-    print(f"  wrote {a.out}  (pp={pp:.1f} tg={tg:.1f} t/s)")
+    print(f"  wrote {a.out}  (pp={pp:.1f} tg={tg:.1f} t/s, prompt={n_prompt})")
 
 
 if __name__ == "__main__":
