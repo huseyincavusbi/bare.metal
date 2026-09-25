@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Shared powermetrics energy capture for the benchmark harness.
 #
-# Source this, then set BENCH, MODEL and RUN_DIR before calling:
+# Source this, then set RUN_DIR before calling:
 #   energy_detect              -> sets PM_BIN and HAVE_ENERGY (0/1)
-#   energy_run OUT --args...   -> runs $BENCH wrapped in powermetrics and
-#                                 merges power/residency/joules into OUT
+#   energy_exec OUT CMD...     -> runs CMD under powermetrics, merges into OUT
+#   energy_run  OUT ARGS...    -> energy_exec for the bare.metal $BENCH
 #
 # powermetrics needs root; energy_detect checks passwordless sudo and prints a
 # one-line grant command if missing.
@@ -32,23 +32,9 @@ energy_detect() {
   fi
 }
 
-energy_run() {
-  # $1 = output json; rest = bench args. Wraps the run in powermetrics and
-  # merges avg power / residency / joules into the JSON. Always reaps the
-  # privileged sampler, even if the benchmark fails.
-  local out="$1"; shift
-  local pmf; pmf="$(mktemp)"
-  local pmlog="$RUN_DIR/$(basename "$out" .json).powermetrics.txt"
-  sudo powermetrics --samplers cpu_power,gpu_power,thermal,ane_power --show-process-gpu \
-       -i 250 -o "$pmf" >/dev/null 2>&1 &
-  local pm_pid=$!
-  sleep 1
-  local rc=0
-  # shellcheck disable=SC2086
-  $BENCH --model "$MODEL" --seed 42 "$@" --out "$out" >/dev/null || rc=$?
-  kill "$pm_pid" 2>/dev/null || true
-  wait "$pm_pid" 2>/dev/null || true
-  python3 - "$out" "$pmf" <<'PY' || true
+# Parse a powermetrics log and merge power/residency/joules into OUT (baremetal.bench/v2).
+_energy_merge() {
+  python3 - "$1" "$2" <<'PY' || true
 import json, re, sys, datetime, os
 out_path, pm_path = sys.argv[1], sys.argv[2]
 d = json.load(open(out_path))
@@ -155,7 +141,31 @@ for k in ("cpu_die_c", "gpu_die_c", "gpu_freq_mhz", "gpu_active_pct"):
 print(f"  {out_path}: {total_w:.2f} W (cpu {cpu_w:.2f} + gpu {gpu_w:.2f} + ane {ane_w:.2f}), "
       f"{joules:.1f} J, {len(sel)} samples" + (", " + ", ".join(extra) if extra else ""))
 PY
+}
+
+# Run an arbitrary command under powermetrics and merge energy into OUT (which
+# the command must write). Always reaps the privileged sampler.
+energy_exec() {
+  local out="$1"; shift
+  local pmf; pmf="$(mktemp)"
+  local pmlog="$RUN_DIR/$(basename "$out" .json).powermetrics.txt"
+  sudo powermetrics --samplers cpu_power,gpu_power,thermal,ane_power --show-process-gpu \
+       -i 250 -o "$pmf" >/dev/null 2>&1 &
+  local pm_pid=$!
+  sleep 1
+  local rc=0
+  "$@" >/dev/null || rc=$?
+  kill "$pm_pid" 2>/dev/null || true
+  wait "$pm_pid" 2>/dev/null || true
+  _energy_merge "$out" "$pmf"
   cp -f "$pmf" "$pmlog" 2>/dev/null || true
   rm -f "$pmf"
   return "$rc"
+}
+
+# bare.metal convenience wrapper (uses $BENCH and $MODEL).
+energy_run() {
+  local out="$1"; shift
+  # shellcheck disable=SC2086
+  energy_exec "$out" $BENCH --model "$MODEL" --seed 42 "$@" --out "$out"
 }
