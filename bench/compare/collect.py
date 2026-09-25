@@ -122,7 +122,7 @@ def engine_entry(ref, j):
 def build(ref, runs, benchmark, date_override=None):
     rm = ref["meta"]
     now = datetime.datetime.now(datetime.timezone.utc)
-    date = date_override or now.strftime("%Y%m%dT%H%M%SZ")
+    date = date_override or datetime.datetime.now().strftime("%m-%d-%Y")
     engines = [j["meta"].get("engine", j["_file"]) for j in runs]
     model = san(os.path.basename(str(rm.get("model", "model"))))
     fname = f"{model}x{san('+'.join(engines))}x{san(date)}x{san(benchmark)}.json"
