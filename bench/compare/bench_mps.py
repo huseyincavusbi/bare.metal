@@ -57,20 +57,28 @@ def main():
     n_prompt = len(prompt_ids)
     ids = torch.tensor([prompt_ids], device=dev)
 
+    def sync():
+        if dev == "mps":
+            torch.mps.synchronize()
+
     def run_once():
         with torch.no_grad():
             t0 = time.perf_counter()
             out = model(ids)
+            sync()
             t1 = time.perf_counter()
             nxt = int(out.logits[0, -1].argmax())
+            sync()
             t2 = time.perf_counter()
             gen, itls, past = [nxt], [], out.past_key_values
             cur = torch.tensor([[nxt]], device=dev)
             for _ in range(a.gen - 1):
                 ta = time.perf_counter()
                 out = model(cur, past_key_values=past, use_cache=True)
+                nxt_t = out.logits[0, -1].argmax().view(1, 1)
+                sync()
                 past = out.past_key_values
-                cur = out.logits[0, -1].argmax().view(1, 1)
+                cur = nxt_t
                 itls.append((time.perf_counter() - ta) * 1000.0)
                 gen.append(int(cur))
         return (t1 - t0) * 1000.0, (t2 - t0) * 1000.0, itls, gen
