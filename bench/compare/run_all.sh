@@ -21,6 +21,9 @@ GEN=32
 REPS=5
 PREC=bf16
 PYTHON="${PYTHON:-python3}"
+PEAK_GBPS="${PEAK_GBPS:-120}"
+PEAK_GFLOPPS="${PEAK_GFLOPPS:-4200}"
+ENERGY="${ENERGY:-1}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,9 +47,19 @@ echo
 
 echo "== bare.metal =="
 make bench >/dev/null 2>&1
-./build/bench/bench --model "$MODEL" --prompt-tokens "$PROMPT_TOKENS" --raw-prompt --gen "$GEN" \
-    --warmup 1 --reps "$REPS" --precision "$PREC" --out "$PARTS/baremetal_${PREC}.json" \
-  || echo "  bare.metal bench failed"
+BENCH="./build/bench/bench"
+RUN_DIR="$PARTS"
+HAVE_ENERGY=0
+source "$ROOT/bench/energy.sh"
+[ "$ENERGY" -eq 1 ] && energy_detect
+BENCH_ARGS=(--prompt-tokens "$PROMPT_TOKENS" --raw-prompt --gen "$GEN" --warmup 1 --reps "$REPS"
+            --precision "$PREC" --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS")
+if [ "$HAVE_ENERGY" -eq 1 ]; then
+  energy_run "$PARTS/baremetal_${PREC}.json" "${BENCH_ARGS[@]}"
+else
+  "$BENCH" --model "$MODEL" "${BENCH_ARGS[@]}" --out "$PARTS/baremetal_${PREC}.json" \
+    || echo "  bare.metal bench failed"
+fi
 
 echo "== llama.cpp =="
 if command -v llama-bench >/dev/null 2>&1; then
