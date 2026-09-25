@@ -56,23 +56,38 @@ def main():
 
     # ---- output diff (greedy) vs the first entry ----
     ref = runs[0]
+    ref_pids = ref["results"].get("prompt_token_ids")
     ref_ids = ref["results"].get("generated_token_ids")
     ref_txt = ref["results"].get("generated_text")
-    print("\n--- output diff (greedy) ---")
+    print(f"\n--- output diff (greedy) vs {ref['meta'].get('engine', ref['_file'])} ---")
     for j in runs[1:]:
         ids = j["results"].get("generated_token_ids")
         txt = j["results"].get("generated_text")
+        pids = j["results"].get("prompt_token_ids")
         name = j["meta"].get("engine", j["_file"])
+        if ref_pids and pids:
+            n = min(len(ref_pids), len(pids))
+            first = next((i for i in range(n) if ref_pids[i] != pids[i]), None)
+            if first is None and len(ref_pids) == len(pids):
+                status = "identical"
+            elif first is not None:
+                status = f"first-div @{first}"
+            else:
+                status = f"length {len(ref_pids)} vs {len(pids)}"
+            print(f"  vs {name:<12} prompt {n} tok: {status}")
         if ref_ids and ids:
             n = min(len(ref_ids), len(ids))
-            match = sum(1 for i in range(n) if ref_ids[i] == ids[i])
             first = next((i for i in range(n) if ref_ids[i] != ids[i]), None)
-            print(f"  vs {name:<12} token-id match {100*match//max(n,1)}%  "
+            match = first if first is not None else n
+            print(f"  vs {name:<12} token-id match {100.0*match/max(n,1):5.1f}%  "
                   f"first-div {first if first is not None else '-'}  (n={n})")
         elif ref_txt and txt:
-            same = ref_txt == txt
-            print(f"  vs {name:<12} text {'IDENTICAL' if same else 'DIFFERS'} "
-                  f"({len(ref_txt)} vs {len(txt)} chars)")
+            n = min(len(ref_txt), len(txt))
+            first = next((i for i in range(n) if ref_txt[i] != txt[i]), None)
+            match = first if first is not None else n
+            print(f"  vs {name:<12} text prefix {match}/{n} chars "
+                  f"({100.0*match/max(n,1):.1f}%)  "
+                  f"first-div {first if first is not None else '-'}")
         else:
             print(f"  vs {name:<12} (no token ids/text recorded)")
 
