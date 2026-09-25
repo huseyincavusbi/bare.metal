@@ -44,6 +44,7 @@ static void usage(const char* prog) {
     fprintf(stderr,
         "usage: %s --model DIR [options]\n"
         "  --prompt-tokens N   prompt length in tokens        (default 128)\n"
+        "  --raw-prompt        use the encoded prompt as-is, no tiling\n"
         "  --gen M             tokens to generate             (default 128)\n"
         "  --warmup W          discarded warmup reps          (default 2)\n"
         "  --reps R            measured reps                  (default 5)\n"
@@ -121,6 +122,7 @@ int main(int argc, char** argv) {
     float temp = 0.0f;
     uint64_t seed = 42;
     int   quant = 0;
+    int   raw_prompt = 0;
     int   raw = 1;
     int   profile = 0;    double avg_w = 0.0;
     double peak_gbps = 0.0, peak_gflops = 0.0;
@@ -141,6 +143,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--peak-gflops") && i+1 < argc)   peak_gflops = atof(argv[++i]);
         else if (!strcmp(argv[i], "--power") && i+1 < argc)         power_arg = argv[++i];
         else if (!strcmp(argv[i], "--no-raw"))                      raw = 0;
+        else if (!strcmp(argv[i], "--raw-prompt"))                  raw_prompt = 1;
         else if (!strcmp(argv[i], "--profile"))                     profile = 1;
         else if (!strcmp(argv[i], "--out") && i+1 < argc)           out_path = argv[++i];
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -203,6 +206,7 @@ int main(int argc, char** argv) {
     /* ---- prompt tokens: encode fixed text, tile to the requested length ---- */
     int* prompt = (int*)malloc((size_t)prompt_tokens * sizeof(int));
     if (!prompt) { fprintf(stderr, "prompt alloc failed\n"); return 1; }
+    int prompt_used = prompt_tokens;
     {
         const char* text =
             "Once upon a time, in a small village at the edge of a great forest, "
@@ -216,7 +220,13 @@ int main(int argc, char** argv) {
         bm_tokenizer_t* tok = bm_create_tokenizer(model_dir);
         if (tok) { ids = bm_encode(tok, text, &n_tok); }
         if (ids && n_tok > 0) {
-            for (int i = 0; i < prompt_tokens; i++) prompt[i] = ids[i % n_tok];
+            if (raw_prompt) {
+                int n = n_tok < prompt_tokens ? n_tok : prompt_tokens;
+                for (int i = 0; i < n; i++) prompt[i] = ids[i];
+                prompt_used = n;
+            } else {
+                for (int i = 0; i < prompt_tokens; i++) prompt[i] = ids[i % n_tok];
+            }
         } else {
             for (int i = 0; i < prompt_tokens; i++) prompt[i] = (100 + i) % (V > 1 ? V : 2);
         }
@@ -245,7 +255,7 @@ int main(int argc, char** argv) {
     for (int w = 0; w < warmup; w++) {
         bm_reset_session(sess);
         double tc0 = bm_now_ms();
-        float* lg_pre = bm_forward(sess, prompt, prompt_tokens);
+        float* lg_pre = bm_forward(sess, prompt, prompt_used);
         if (w == 0) first_call_ms = bm_now_ms() - tc0;   /* includes pipeline compile */
         bm_sampler_t* smp = bm_create_sampler(V, temp, 1.0f, seed);
         int tk = bm_sample(smp, lg_pre);
@@ -275,13 +285,13 @@ int main(int argc, char** argv) {
         bm_sampler_t* smp = bm_create_sampler(V, temp, 1.0f, seed);
 
         double t0 = bm_now_ms();
-        float* lg_prefill = bm_forward(sess, prompt, prompt_tokens);
+        float* lg_prefill = bm_forward(sess, prompt, prompt_used);
         double t1 = bm_now_ms();
         int tk = bm_sample(smp, lg_prefill);
         double t2 = bm_now_ms();
 
         prefill_ms[r] = t1 - t0;
-        prefill_tps[r] = prefill_ms[r] > 0.0 ? (double)prompt_tokens / (prefill_ms[r] / 1000.0) : 0.0;
+        prefill_tps[r] = prefill_ms[r] > 0.0 ? (double)prompt_used / (prefill_ms[r] / 1000.0) : 0.0;
         ttft_ms[r]    = t2 - t0;
         if (r == 0 && tok_n < gen_tokens) tok_ids[tok_n++] = tk;
 
@@ -535,7 +545,7 @@ int main(int argc, char** argv) {
     fprintf(out, "  },\n");
 
     fprintf(out, "  \"config\": {\n");
-    fprintf(out, "    \"prompt_tokens\": %d,\n", prompt_tokens);
+    fprintf(out, "    \"prompt_tokens\": %d,\n", prompt_used);
     fprintf(out, "    \"gen_tokens\": %d,\n", gen_tokens);
     fprintf(out, "    \"warmup\": %d,\n", warmup);
     fprintf(out, "    \"reps\": %d,\n", reps);
@@ -566,6 +576,9 @@ int main(int argc, char** argv) {
         fprintf(out, "      \"itl_ms\": ");      emit_arr(out, itl_all, itl_n);    fprintf(out, "\n");
         fprintf(out, "    },\n");
     }
+    fprintf(out, "    \"prompt_token_ids\": [");
+    for (int i = 0; i < prompt_used; i++) fprintf(out, i ? ", %d" : "%d", prompt[i]);
+    fprintf(out, "],\n");
     fprintf(out, "    \"generated_token_ids\": [");
     for (int i = 0; i < tok_n; i++) fprintf(out, i ? ", %d" : "%d", tok_ids[i]);
     fprintf(out, "],\n");
