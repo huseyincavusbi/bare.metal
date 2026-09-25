@@ -119,13 +119,13 @@ def engine_entry(ref, j):
     }
 
 
-def build(ref, runs, benchmark):
+def build(ref, runs, benchmark, date_override=None):
     rm = ref["meta"]
     now = datetime.datetime.now(datetime.timezone.utc)
-    date = now.strftime("%Y%m%dT%H%M%SZ")
+    date = date_override or now.strftime("%Y%m%dT%H%M%SZ")
     engines = [j["meta"].get("engine", j["_file"]) for j in runs]
     model = san(os.path.basename(str(rm.get("model", "model"))))
-    fname = f"{model}x{san('+'.join(engines))}x{date}x{san(benchmark)}.json"
+    fname = f"{model}x{san('+'.join(engines))}x{san(date)}x{san(benchmark)}.json"
     return {
         "schema": SCHEMA_CMP,
         "run": {
@@ -151,6 +151,7 @@ def main():
     ap.add_argument("paths", nargs="*", default=["bench/compare/results"])
     ap.add_argument("--outdir", help="dir to write <model>x<engines>x<date>x<benchmark>.json")
     ap.add_argument("--benchmark", default="cross-engine", help="benchmark label for the filename")
+    ap.add_argument("--date", help="override date token in the filename (default: now UTC)")
     ap.add_argument("--out", help="explicit output path (overrides --outdir naming)")
     ap.add_argument("--md", help="also write a markdown table here")
     a = ap.parse_args()
@@ -184,7 +185,7 @@ def main():
                      f"  first-div {gt['first_divergence'] if gt['first_divergence'] is not None else '-'}")
         print(line)
 
-    agg, fname = build(ref, runs, a.benchmark)
+    agg, fname = build(ref, runs, a.benchmark, a.date)
     path = a.out or (os.path.join(a.outdir, fname) if a.outdir else None)
     if path:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
