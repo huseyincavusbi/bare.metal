@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Apple MLX inference benchmark -> baremetal.bench/v2 JSON.
 
-Greedy, raw prompt (no tiling). Requires mlx-lm. Targets the common
-mlx_lm.stream_generate API.
+Greedy, raw prompt (no tiling). Requires mlx-lm. Prefill is a single explicit
+forward (timed with mx.eval) and decode is a manual greedy loop over a prompt
+cache, so prefill and decode are measured separately (no TTFT-derived estimate).
 """
 import argparse, json, time, platform, resource
 import mlx.core as mx
 from mlx.utils import tree_flatten
-from mlx_lm import load, stream_generate
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm import load
+from mlx_lm.models.cache import make_prompt_cache
 
 PROMPT_TEXT = (
     "Once upon a time, in a small village at the edge of a great forest, "
@@ -54,21 +55,23 @@ def main():
 
     prompt_ids = tok.encode(PROMPT_TEXT)
     n_prompt = len(prompt_ids)
-    sampler = make_sampler(temp=0.0)
 
     def run_once():
-        ids, itls = [], []
-        prev = first = None
+        cache = make_prompt_cache(model)
         t = time.perf_counter()
-        for resp in stream_generate(model, tok, prompt_ids, max_tokens=a.gen, sampler=sampler):
-            now = time.perf_counter()
-            if first is None:
-                first = now
-            ids.append(int(resp.token))
-            if prev is not None:
-                itls.append((now - prev) * 1000.0)
-            prev = now
-        return ids, itls, (first - t) * 1000.0 if first else 0.0
+        logits = model(mx.array([prompt_ids]), cache=cache)
+        mx.eval(logits)
+        prefill_ms = (time.perf_counter() - t) * 1000.0
+        cur = int(mx.argmax(logits[0, -1]))
+        ids, itls = [cur], []
+        for _ in range(a.gen - 1):
+            ti = time.perf_counter()
+            logits = model(mx.array([[cur]]), cache=cache)
+            mx.eval(logits)
+            cur = int(mx.argmax(logits[0, -1]))
+            itls.append((time.perf_counter() - ti) * 1000.0)
+            ids.append(cur)
+        return ids, itls, prefill_ms
 
     first_call_ms = None
     for _ in range(a.warmup):
@@ -77,22 +80,21 @@ def main():
         if first_call_ms is None:
             first_call_ms = (time.perf_counter() - t) * 1000.0
 
-    prefill_tps, decode_tps, ttft_ms, itl_all = [], [], [], []
-    last_ids = None
+    prefill_ms, decode_tps, itl_all, last_ids = [], [], [], None
     active_started = time.time()
     active_s = 0.0
     for _ in range(a.reps):
         rt = time.perf_counter()
-        ids, itls, ttft = run_once()
+        ids, itls, pms = run_once()
         active_s += time.perf_counter() - rt
         dec = sum(itls) / 1000.0
-        ttft_ms.append(ttft)
+        prefill_ms.append(pms)
         itl_all += itls
-        prefill_tps.append(n_prompt / (ttft / 1000.0) if ttft > 0 else 0.0)
         decode_tps.append((a.gen - 1) / dec if dec > 0 else 0.0)
         last_ids = ids
     active_ended = time.time()
 
+    prefill_tps = [n_prompt / (ms / 1000.0) if ms > 0 else 0.0 for ms in prefill_ms]
     text = tok.decode(last_ids)
     itl_mean = sum(itl_all) / len(itl_all) if itl_all else 0.0
     itl_s = itl_mean / 1000.0
@@ -108,9 +110,9 @@ def main():
         "results": {
             "load_ms": round(load_ms, 3),
             "first_call_ms": round(first_call_ms, 3) if first_call_ms else None,
-            "prefill": {"tok_s": stats(prefill_tps)},
+            "prefill": {"tok_s": stats(prefill_tps), "ms": stats(prefill_ms)},
             "decode": {"tok_s": stats(decode_tps)},
-            "ttft_ms": stats(ttft_ms),
+            "ttft_ms": stats(prefill_ms),
             "itl_ms": stats(itl_all),
             "prompt_token_ids": prompt_ids,
             "generated_token_ids": last_ids,
