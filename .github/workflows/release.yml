@@ -69,6 +69,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Install Metal toolchain (preview only)
+        if: matrix.experimental
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Write formula
         env:
           SRC_SHA: ${{ needs.release.outputs.src_sha256 }}
