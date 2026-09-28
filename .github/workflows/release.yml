@@ -83,7 +83,7 @@ jobs:
             license "MPL-2.0"
 
             depends_on arch: :arm64
-            depends_on macos: ">= :tahoe"
+            depends_on macos: :tahoe
             depends_on xcode: :build
 
             def install
@@ -153,7 +153,7 @@ jobs:
             echo "  head \"https://github.com/${GITHUB_REPOSITORY}.git\", branch: \"main\""
             echo ''
             echo '  depends_on arch: :arm64'
-            echo '  depends_on macos: ">= :tahoe"'
+            echo '  depends_on macos: :tahoe'
             echo '  depends_on xcode: :build'
             echo ''
             echo '  bottle do'
