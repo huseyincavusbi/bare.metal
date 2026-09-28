@@ -102,8 +102,13 @@ jobs:
 
       - name: Build bottle
         run: |
-          brew install --build-bottle Formula/baremetal.rb
-          brew bottle --no-rebuild Formula/baremetal.rb
+          brew tap-new tester/baremetal --no-git
+          TAPDIR="$(brew --repository)/Library/Taps/tester/homebrew-baremetal"
+          mkdir -p "$TAPDIR/Formula"
+          cp Formula/baremetal.rb "$TAPDIR/Formula/baremetal.rb"
+          brew trust tester/baremetal
+          brew install --build-bottle tester/baremetal/baremetal
+          brew bottle --no-rebuild tester/baremetal/baremetal
           bf="$(ls ./*.bottle*.tar.gz | head -1)"
           sha="$(shasum -a 256 "$bf" | awk '{print $1}')"
           echo "${{ matrix.tag }} $sha" > "bottle-info-${{ matrix.tag }}.txt"
