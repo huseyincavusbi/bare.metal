@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make baremetal baremetal-train
+
+      - name: Smoke test
+        run: ./build/baremetal 2>&1 | head -3 || true
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/baremetal build/baremetal-train dist/
+          cp build/kernels/default.metallib dist/
+          (cd dist && shasum -a 256 baremetal baremetal-train default.metallib > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      - name: Bump Homebrew tap
+        if: ${{ secrets.TAP_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          sha="$(curl -sSL "$url" | shasum -a 256 | awk '{print $1}')"
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/huseyincavusbi/homebrew-baremetal.git" tap
+          sed -i '' -E "s|^  url \".*\"|  url \"${url}\"|" tap/Formula/baremetal.rb
+          sed -i '' -E "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" tap/Formula/baremetal.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/baremetal.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "baremetal ${tag}"
+          git push
