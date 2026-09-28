@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Collect baremetal.bench/v2 JSON files from a cross-engine run.
+"""Collect baremetal.bench/v2 results.
 
-Prints a performance table, an output-consistency diff, and writes a single
-self-contained comparison file (baremetal.compare/v1) holding the FULL raw
-stats of every engine plus host/settings metadata.
+Two modes:
 
-Output file name:  <model>x<engines>x<date>x<benchmark>.json
-(stdout table is always printed)
+1. Directory mode (legacy): print a table + output diff for a folder of v2 JSONs
+   and optionally write a single comparison file.
+       collect.py [--out FILE | --outdir DIR] [--benchmark LABEL] [dir ...]
 
-Usage:
-  collect.py [--outdir DIR] [--benchmark LABEL] [--out FILE] [--md FILE] [dir ...]
+2. Run-dir mode: aggregate a bench/benchmarks/<...> run folder into
+       run.json, grand.json, models/<stem>.json, engines/<engine>.json
+   and print one table + diff per model.
+       collect.py --run-dir DIR [--settings STR]
 """
-import argparse, datetime, glob, json, os, re, sys
+import argparse, datetime, glob, json, os, re, subprocess, sys
 
 SCHEMA_RUN = "baremetal.bench/v2"
 SCHEMA_CMP = "baremetal.compare/v1"
+SCHEMA_ALL = "baremetal.benchmark/v1"
+SCHEMA_MODEL = "baremetal.model/v1"
+SCHEMA_ENGINE = "baremetal.engine/v1"
 
 
+# ---------------------------------------------------------------- helpers ----
 def load(paths):
     files = []
     for p in paths:
@@ -113,12 +118,152 @@ def engine_entry(ref, j):
         "model": m.get("model"),
         "precision": m.get("precision"),
         "quant": m.get("quant"),
-        "diff_vs_ref": diff_vs(ref, j),
+        "diff_vs_ref": diff_vs(ref, j) if ref else {},
         "summary": summary(j),
         "raw": raw,
     }
 
 
+def print_table(runs):
+    print(f"{'engine':<12}{'file':<26}{'prec':<7}{'q':<6}"
+          f"{'pre t/s':>9}{'dec t/s':>9}{'ttft ms':>9}{'itl ms':>8}{'rss MB':>8}{'W':>7}")
+    for j in runs:
+        m, r = j["meta"], j["results"]
+        print(f"{m.get('engine','?'):<12}{j['_file']:<26}{str(m.get('precision','?')):<7}"
+              f"{str(m.get('quant','?')):<6}{prefill(j):>9.1f}{decode(j):>9.1f}"
+              f"{g(r,'ttft_ms','p50',default=float('nan')):>9.2f}"
+              f"{g(r,'itl_ms','p50',default=float('nan')):>8.2f}"
+              f"{g(r,'memory','rss_peak_bytes',default=0)/1e6:>8.0f}"
+              f"{g(r,'energy','combined_w',default=float('nan')):>7.2f}")
+
+
+def print_diff(ref, runs):
+    print(f"  --- output diff vs {ref['meta'].get('engine', ref['_file'])} ---")
+    for j in runs:
+        if j is ref:
+            continue
+        d = diff_vs(ref, j)
+        line = f"    vs {j.get('_file', j['meta'].get('engine', '?')):<24}"
+        if "prompt" in d:
+            line += f" prompt:{d['prompt']}"
+        gt = d.get("generated_tokens") or d.get("generated_chars")
+        if gt:
+            key = "token" if "generated_tokens" in d else "text"
+            line += (f"  {key} match {gt.get('match_pct', gt.get('prefix_pct')):.1f}%"
+                     f"  first-div {gt['first_divergence'] if gt['first_divergence'] is not None else '-'}")
+        print(line)
+
+
+# --------------------------------------------------------- run-dir mode ------
+def parse_raw(run_dir):
+    models = {}
+    for stem_dir in sorted(glob.glob(os.path.join(run_dir, "raw", "*"))):
+        stem = os.path.basename(stem_dir)
+        m = models.setdefault(stem, {"engines": {}, "sweep": {}})
+        for f in sorted(glob.glob(os.path.join(stem_dir, "*.json"))):
+            base = os.path.basename(f)[:-5]
+            try:
+                j = json.load(open(f))
+            except Exception:
+                continue
+            if j.get("schema") != SCHEMA_RUN:
+                continue
+            if base.startswith("sweep__"):
+                m["sweep"][base[len("sweep__"):]] = j
+            elif "__" in base:
+                eng, fmt = base.split("__", 1)
+                m["engines"].setdefault(eng, {})[fmt] = j
+    return models
+
+
+def git_probe():
+    def run(cmd):
+        try:
+            return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+        except Exception:
+            return ""
+    return {"describe": run("git describe --tags --always --dirty 2>/dev/null"),
+            "commit": run("git rev-parse --short HEAD 2>/dev/null"),
+            "branch": run("git rev-parse --abbrev-ref HEAD 2>/dev/null")}
+
+
+def first_host(models):
+    for stem in models:
+        for eng in models[stem]["engines"]:
+            for fmt in models[stem]["engines"][eng]:
+                m = models[stem]["engines"][eng][fmt]["meta"]
+                return {k: m[k] for k in ("hw_model", "hw_machine", "gpu_name", "gpu_cores",
+                                          "macos", "os_build", "ram_bytes", "p_cores", "e_cores")
+                        if k in m}
+    return {}
+
+
+def aggregate(run_dir, settings_str):
+    models = parse_raw(run_dir)
+    if not models:
+        print(f"(no raw results under {run_dir}/raw)")
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    run_meta = {
+        "name": os.path.basename(run_dir),
+        "generated_at": now.isoformat(),
+        "version": git_probe(),
+        "host": first_host(models),
+        "settings": settings_str,
+        "models": sorted(models.keys()),
+    }
+
+    # per-model tables + diff
+    for stem in sorted(models):
+        runs = []
+        for eng in ("bare.metal", "llama.cpp", "mlx", "torch-mps"):
+            for fmt, j in sorted(models[stem]["engines"].get(eng, {}).items()):
+                jj = dict(j); jj["_file"] = f"{eng}__{fmt}"
+                runs.append(jj)
+        if not runs:
+            continue
+        print(f"\n=== {stem} ===")
+        print_table(runs)
+        ref = next((j for j in runs if j["meta"].get("engine") == "bare.metal"
+                    and j["meta"].get("quant") in ("none", None)), runs[0])
+        print_diff(ref, runs)
+        if models[stem]["sweep"]:
+            print(f"  sweep configs: {', '.join(sorted(models[stem]['sweep']))}")
+
+    # grand
+    grand_models = {}
+    for stem, data in sorted(models.items()):
+        engines = {}
+        for eng, variants in sorted(data["engines"].items()):
+            engines[eng] = {"variants": {fmt: {k: j[k] for k in ("meta", "config", "results") if k in j}
+                                         for fmt, j in sorted(variants.items())}}
+        sweep = {k: {kk: v[kk] for kk in ("meta", "config", "results") if kk in v}
+                 for k, v in sorted(data["sweep"].items())}
+        grand_models[stem] = {"engines": engines, "sweep": sweep}
+    grand = {"schema": SCHEMA_ALL, "run": run_meta, "models": grand_models}
+    json.dump(grand, open(os.path.join(run_dir, "grand.json"), "w"), indent=2)
+    json.dump(run_meta, open(os.path.join(run_dir, "run.json"), "w"), indent=2)
+
+    # per-model files
+    os.makedirs(os.path.join(run_dir, "models"), exist_ok=True)
+    for stem, data in grand_models.items():
+        json.dump({"schema": SCHEMA_MODEL, "run": run_meta, "model": stem, **data},
+                  open(os.path.join(run_dir, "models", f"{stem}.json"), "w"), indent=2)
+
+    # per-engine files
+    os.makedirs(os.path.join(run_dir, "engines"), exist_ok=True)
+    engines = {}
+    for stem, data in grand_models.items():
+        for eng, body in data["engines"].items():
+            engines.setdefault(eng, {})[stem] = body
+    for eng, body in engines.items():
+        json.dump({"schema": SCHEMA_ENGINE, "run": run_meta, "engine": eng, "models": body},
+                  open(os.path.join(run_dir, "engines", f"{san(eng)}.json"), "w"), indent=2)
+
+    print(f"\nwrote {run_dir}/run.json, grand.json, models/*.json, engines/*.json")
+
+
+# ------------------------------------------------------------- old mode ------
 def build(ref, runs, benchmark, date_override=None):
     rm = ref["meta"]
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -149,41 +294,27 @@ def build(ref, runs, benchmark, date_override=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="*", default=["bench/compare/results"])
+    ap.add_argument("--run-dir", help="aggregate a bench/benchmarks/<...> run folder")
+    ap.add_argument("--settings", default="", help="settings string recorded in run.json")
     ap.add_argument("--outdir", help="dir to write <model>x<engines>x<date>x<benchmark>.json")
-    ap.add_argument("--benchmark", default="cross-engine", help="benchmark label for the filename")
-    ap.add_argument("--date", help="override date token in the filename (default: now UTC)")
+    ap.add_argument("--benchmark", default="cross-engine")
+    ap.add_argument("--date", help="override date token in the filename")
     ap.add_argument("--out", help="explicit output path (overrides --outdir naming)")
     ap.add_argument("--md", help="also write a markdown table here")
     a = ap.parse_args()
+
+    if a.run_dir:
+        aggregate(a.run_dir, a.settings)
+        return
 
     runs = load(a.paths or ["bench/compare/results"])
     if not runs:
         print("(no baremetal.bench/v2 results found)")
         return
     ref = runs[0]
-
-    print(f"{'engine':<12}{'file':<24}{'prec':<6}{'q':<5}"
-          f"{'pre t/s':>9}{'dec t/s':>9}{'ttft ms':>9}{'itl ms':>8}{'rss MB':>8}")
-    for j in runs:
-        m, r = j["meta"], j["results"]
-        print(f"{m.get('engine','?'):<12}{j['_file']:<24}{m.get('precision','?'):<6}"
-              f"{m.get('quant','?'):<5}{prefill(j):>9.1f}{decode(j):>9.1f}"
-              f"{g(r,'ttft_ms','p50',default=float('nan')):>9.2f}"
-              f"{g(r,'itl_ms','p50',default=float('nan')):>8.2f}"
-              f"{g(r,'memory','rss_peak_bytes',default=0)/1e6:>8.0f}")
-
+    print_table(runs)
     print(f"\n--- output diff (greedy) vs {ref['meta'].get('engine', ref['_file'])} ---")
-    for j in runs[1:]:
-        d = diff_vs(ref, j)
-        line = f"  vs {j['meta'].get('engine', j['_file']):<12}"
-        if "prompt" in d:
-            line += f" prompt:{d['prompt']}"
-        gt = d.get("generated_tokens") or d.get("generated_chars")
-        if gt:
-            key = "token" if "generated_tokens" in d else "text"
-            line += (f"  {key} match {gt.get('match_pct', gt.get('prefix_pct')):.1f}%"
-                     f"  first-div {gt['first_divergence'] if gt['first_divergence'] is not None else '-'}")
-        print(line)
+    print_diff(ref, runs)
 
     agg, fname = build(ref, runs, a.benchmark, a.date)
     path = a.out or (os.path.join(a.outdir, fname) if a.outdir else None)

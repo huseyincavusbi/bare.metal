@@ -104,7 +104,23 @@ def main():
             qbits, qgroup = q.get("bits"), q.get("group_size")
         except Exception:
             pass
-    precision = a.precision or (f"int{qbits}" if qbits else "bf16")
+
+    def st_dtype(model_dir):
+        import glob as _glob
+        for f in sorted(_glob.glob(os.path.join(model_dir, "*.safetensors"))):
+            try:
+                with open(f, "rb") as fh:
+                    n = int.from_bytes(fh.read(8), "little")
+                    hdr = json.loads(fh.read(n))
+                for k, v in hdr.items():
+                    if k != "__metadata__" and isinstance(v, dict) and v.get("dtype"):
+                        return v["dtype"]
+            except Exception:
+                pass
+        return None
+
+    dt = {"BF16": "bf16", "F16": "fp16", "F32": "fp32"}.get(st_dtype(a.model) or "")
+    precision = a.precision or (f"int{qbits}" if qbits else (dt or "bf16"))
     quant = a.quant or (f"q{qbits}" if qbits else "none")
 
     prefill_tps = [n_prompt / (ms / 1000.0) if ms > 0 else 0.0 for ms in prefill_ms]

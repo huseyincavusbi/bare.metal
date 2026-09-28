@@ -11,3 +11,4 @@ docs/
 __pycache__/
 bench/results/
 bench/compare/results/
+bench/benchmarks/
