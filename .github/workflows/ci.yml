@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
     branches: [main]
   schedule:
@@ -32,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Metal toolchain (preview only)
         # macOS 26 bundles the Metal toolchain; the Xcode 27 preview image does not.
@@ -78,7 +79,7 @@ jobs:
           make baremetal-train
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
           enable-cache: true
@@ -88,7 +89,7 @@ jobs:
         run: uv sync --project test/grad --frozen
 
       - name: Cache model weights
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: data/smollm2-135m
           key: smollm2-135m-${{ runner.os }}-${{ runner.arch }}
