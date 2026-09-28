@@ -48,7 +48,8 @@ if command -v llama-quantize >/dev/null 2>&1; then
   for q in q8_0 q4_0; do
     echo "== $STEM : GGUF $q =="
     if [ ! -f "models/$STEM-$q.gguf" ]; then
-      llama-quantize "models/$STEM-f16.gguf" "models/$STEM-$q.gguf" "${q^^}" >/dev/null
+      qt="$(echo "$q" | tr '[:lower:]' '[:upper:]')"
+      llama-quantize "models/$STEM-f16.gguf" "models/$STEM-$q.gguf" "$qt" >/dev/null
     else
       echo "  exists: models/$STEM-$q.gguf"
     fi
