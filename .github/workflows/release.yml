@@ -9,11 +9,11 @@ permissions:
 
 jobs:
   release:
-    name: build and publish
+    name: release
     runs-on: macos-26
     timeout-minutes: 30
-    env:
-      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    outputs:
+      src_sha256: ${{ steps.src.outputs.sha256 }}
 
     steps:
       - name: Checkout
@@ -25,13 +25,21 @@ jobs:
       - name: Smoke test
         run: ./build/baremetal 2>&1 | head -3 || true
 
-      - name: Package
+      - name: Package binaries
         run: |
           mkdir -p dist
           cp build/baremetal build/baremetal-train dist/
           cp build/kernels/default.metallib dist/
           (cd dist && shasum -a 256 baremetal baremetal-train default.metallib > SHA256SUMS)
-          cat dist/SHA256SUMS
+
+      - name: Source tarball sha256
+        id: src
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          sha="$(curl -sSL "$url" | shasum -a 256 | awk '{print $1}')"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_REF_NAME" > dist/VERSION
+          echo "$sha" > dist/SOURCE_SHA256
 
       - name: Create GitHub Release
         env:
@@ -40,21 +48,145 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
 
-      - name: Bump Homebrew tap
+  bottle:
+    name: bottle (${{ matrix.tag }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            tag: arm64_tahoe
+            experimental: false
+          - os: xcode-27
+            tag: arm64_golden_gate
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write formula
+        env:
+          SRC_SHA: ${{ needs.release.outputs.src_sha256 }}
+        run: |
+          mkdir -p Formula
+          cat > Formula/baremetal.rb <<EOF
+          class Baremetal < Formula
+            desc "LLM inference and training engine for Apple Silicon"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            url "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+            sha256 "${SRC_SHA}"
+            license "MPL-2.0"
+
+            depends_on arch: :arm64
+            depends_on macos: ">= :tahoe"
+            depends_on xcode: :build
+
+            def install
+              system "make", "baremetal", "baremetal-train"
+              libexec.install "build/baremetal", "build/baremetal-train"
+              (share/"baremetal/kernels").install "build/kernels/default.metallib"
+              bin.install_symlink libexec/"baremetal"
+              bin.install_symlink libexec/"baremetal-train"
+            end
+
+            test do
+              assert_match "usage", shell_output("#{bin}/baremetal 2>&1", 1)
+            end
+          end
+          EOF
+
+      - name: Build bottle
+        run: |
+          brew install --build-bottle Formula/baremetal.rb
+          brew bottle --no-rebuild Formula/baremetal.rb
+          bf="$(ls ./*.bottle*.tar.gz | head -1)"
+          sha="$(shasum -a 256 "$bf" | awk '{print $1}')"
+          echo "${{ matrix.tag }} $sha" > "bottle-info-${{ matrix.tag }}.txt"
+          cat "bottle-info-${{ matrix.tag }}.txt"
+
+      - name: Upload bottle to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" ./*.bottle*.tar.gz --clobber
+
+      - name: Save bottle metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: bottle-${{ matrix.tag }}
+          path: bottle-info-${{ matrix.tag }}.txt
+
+  tap:
+    name: homebrew tap PR
+    needs: [release, bottle]
+    runs-on: macos-26
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+
+    steps:
+      - name: Download bottle metadata
+        if: env.TAP_TOKEN != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bottle-*
+          merge-multiple: true
+          path: bottles
+
+      - name: Update tap formula and open PR
         if: env.TAP_TOKEN != ''
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
-          sha="$(curl -sSL "$url" | shasum -a 256 | awk '{print $1}')"
-          git clone --depth 1 \
-            "https://x-access-token:${TAP_TOKEN}@github.com/huseyincavusbi/homebrew-baremetal.git" tap
-          sed -i '' -E "s|^  url \".*\"|  url \"${url}\"|" tap/Formula/baremetal.rb
-          sed -i '' -E "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" tap/Formula/baremetal.rb
+          export GH_TOKEN="$TAP_TOKEN"
+
+          {
+            echo 'class Baremetal < Formula'
+            echo '  desc "LLM inference and training engine for Apple Silicon"'
+            echo "  homepage \"https://github.com/${GITHUB_REPOSITORY}\""
+            echo "  url \"https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz\""
+            echo "  sha256 \"${{ needs.release.outputs.src_sha256 }}\""
+            echo '  license "MPL-2.0"'
+            echo "  head \"https://github.com/${GITHUB_REPOSITORY}.git\", branch: \"main\""
+            echo ''
+            echo '  depends_on arch: :arm64'
+            echo '  depends_on macos: ">= :tahoe"'
+            echo '  depends_on xcode: :build'
+            echo ''
+            echo '  bottle do'
+            echo "    root_url \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}\""
+            cat bottles/bottle-info-*.txt | while read -r t sha; do
+              echo "    sha256 ${t}: \"${sha}\""
+            done
+            echo '  end'
+            echo ''
+            echo '  def install'
+            echo '    system "make", "baremetal", "baremetal-train"'
+            echo '    libexec.install "build/baremetal", "build/baremetal-train"'
+            echo '    (share/"baremetal/kernels").install "build/kernels/default.metallib"'
+            echo '    bin.install_symlink libexec/"baremetal"'
+            echo '    bin.install_symlink libexec/"baremetal-train"'
+            echo '  end'
+            echo ''
+            echo '  test do'
+            echo '    assert_match "usage", shell_output("#{bin}/baremetal 2>&1", 1)'
+            echo '  end'
+            echo 'end'
+          } > formula.rb
+
+          gh repo clone huseyincavusbi/homebrew-baremetal tap
+          cp formula.rb tap/Formula/baremetal.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "baremetal-${tag}"
           git add Formula/baremetal.rb
-          git diff --cached --quiet && exit 0
           git commit -m "baremetal ${tag}"
-          git push
+          git push -u origin "baremetal-${tag}"
+          gh pr create --repo huseyincavusbi/homebrew-baremetal \
+            --title "baremetal ${tag}" \
+            --body "Automated formula update for ${tag} (source url/sha256 + tahoe/golden_gate bottles)." \
+            --base main --head "baremetal-${tag}"
