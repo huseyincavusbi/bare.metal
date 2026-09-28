@@ -6,7 +6,7 @@
  *   - TTFT                (time to first generated token)
  *   - ITL                 (inter-token latency, full distribution)
  *   - memory              (peak RSS, GPU-allocated bytes, KV bytes/token)
- *   - energy              (when avg watts are supplied by run_bench.sh)
+ *   - energy              (when avg watts are supplied by run_benchmark.sh)
  *
  * Full statistics (n/min/max/mean/stddev/p50/p90/p99) plus raw samples and the
  * generated token ids (greedy) are emitted so runs can be diffed across
