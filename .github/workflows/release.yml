@@ -113,6 +113,10 @@ jobs:
           brew trust tester/baremetal
           brew install --build-bottle tester/baremetal/baremetal
           brew bottle --no-rebuild tester/baremetal/baremetal
+          for f in ./*.bottle*.tar.gz; do
+            canon="${f/--/-}"
+            [ "$f" = "$canon" ] || mv "$f" "$canon"
+          done
           bf="$(ls ./*.bottle*.tar.gz | head -1)"
           sha="$(shasum -a 256 "$bf" | awk '{print $1}')"
           echo "${{ matrix.tag }} $sha" > "bottle-info-${{ matrix.tag }}.txt"
