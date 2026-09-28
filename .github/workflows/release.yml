@@ -12,6 +12,8 @@ jobs:
     name: build and publish
     runs-on: macos-26
     timeout-minutes: 30
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
 
     steps:
       - name: Checkout
@@ -39,9 +41,7 @@ jobs:
             --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
 
       - name: Bump Homebrew tap
-        if: ${{ secrets.TAP_TOKEN != '' }}
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        if: env.TAP_TOKEN != ''
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
