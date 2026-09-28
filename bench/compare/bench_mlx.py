@@ -5,7 +5,7 @@ Greedy, raw prompt (no tiling). Requires mlx-lm. Prefill is a single explicit
 forward (timed with mx.eval) and decode is a manual greedy loop over a prompt
 cache, so prefill and decode are measured separately (no TTFT-derived estimate).
 """
-import argparse, json, time, platform, resource
+import argparse, json, os, time, platform, resource
 import mlx.core as mx
 from mlx.utils import tree_flatten
 from mlx_lm import load
@@ -41,6 +41,8 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--peak-gflops", type=float, default=4200.0)
     ap.add_argument("--peak-gbps", type=float, default=120.0)
+    ap.add_argument("--precision", default=None, help="override (default: from config)")
+    ap.add_argument("--quant", default=None, help="override (default: from config)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -94,6 +96,17 @@ def main():
         last_ids = ids
     active_ended = time.time()
 
+    qbits = qgroup = None
+    cfg_path = os.path.join(a.model, "config.json")
+    if os.path.isfile(cfg_path):
+        try:
+            q = json.load(open(cfg_path)).get("quantization") or {}
+            qbits, qgroup = q.get("bits"), q.get("group_size")
+        except Exception:
+            pass
+    precision = a.precision or (f"int{qbits}" if qbits else "bf16")
+    quant = a.quant or (f"q{qbits}" if qbits else "none")
+
     prefill_tps = [n_prompt / (ms / 1000.0) if ms > 0 else 0.0 for ms in prefill_ms]
     text = tok.decode(last_ids)
     itl_mean = sum(itl_all) / len(itl_all) if itl_all else 0.0
@@ -102,8 +115,8 @@ def main():
     gflops = 2.0 * params / itl_s / 1e9 if itl_s > 0 else 0.0
     doc = {
         "schema": "baremetal.bench/v2",
-        "meta": {"engine": "mlx", "model": a.model, "precision": "bf16",
-                 "quant": "none", "host": platform.machine(),
+        "meta": {"engine": "mlx", "model": a.model, "precision": precision,
+                 "quant": quant, "quant_group": qgroup, "host": platform.machine(),
                  "mlx": getattr(mx, "__version__", None)},
         "config": {"prompt_tokens": n_prompt, "gen_tokens": a.gen,
                    "warmup": a.warmup, "reps": a.reps, "temp": 0.0},
