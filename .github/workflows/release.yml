@@ -151,6 +151,7 @@ jobs:
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           export GH_TOKEN="$TAP_TOKEN"
+          gh auth setup-git
 
           {
             echo 'class Baremetal < Formula'
