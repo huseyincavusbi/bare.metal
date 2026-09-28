@@ -9,6 +9,9 @@
 #include "backend/metal/device.h"
 #include "utils/log.h"
 #include <stdlib.h>
+#include <stdio.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
 
 backend_ctx_t* backend_create(void) {
     backend_ctx_t* ctx = calloc(1, sizeof(backend_ctx_t));
@@ -39,12 +42,43 @@ backend_ctx_t* backend_create(void) {
                  [[device name] UTF8String],
                  ctx->supports_bf16 ? "yes" : "no");
 
-    NSString* path = [[NSBundle mainBundle] pathForResource:@"default"
-                                                     ofType:@"metallib"];
+    NSString* path = nil;
+
+    const char* env = getenv("BAREMETAL_KERNELS");
+    if (env && env[0]) {
+        NSString* p = [NSString stringWithUTF8String:env];
+        BOOL isDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p isDirectory:&isDir] && isDir)
+            path = [p stringByAppendingPathComponent:@"default.metallib"];
+        else
+            path = p;
+    }
+
+    if (!path)
+        path = [[NSBundle mainBundle] pathForResource:@"default" ofType:@"metallib"];
+
     if (!path) {
-        NSString* exePath = [[NSProcessInfo processInfo] arguments][0];
-        NSString* exeDir = [exePath stringByDeletingLastPathComponent];
-        path = [exeDir stringByAppendingPathComponent:@"kernels/default.metallib"];
+        char exe[PATH_MAX];
+        uint32_t size = sizeof(exe);
+        NSString* exeDir = nil;
+        if (_NSGetExecutablePath(exe, &size) == 0) {
+            char real[PATH_MAX];
+            if (realpath(exe, real)) snprintf(exe, sizeof(exe), "%s", real);
+            exeDir = [[NSString stringWithUTF8String:exe] stringByDeletingLastPathComponent];
+        } else {
+            exeDir = [[[NSProcessInfo processInfo] arguments][0] stringByDeletingLastPathComponent];
+        }
+        NSArray* cands = @[
+            [exeDir stringByAppendingPathComponent:@"kernels/default.metallib"],
+            [exeDir stringByAppendingPathComponent:@"default.metallib"],
+            [exeDir stringByAppendingPathComponent:@"../share/baremetal/kernels/default.metallib"],
+            [exeDir stringByAppendingPathComponent:@"../libexec/baremetal/kernels/default.metallib"],
+        ];
+        for (NSString* c in cands) {
+            NSString* std = [c stringByStandardizingPath];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:std]) { path = std; break; }
+        }
+        if (!path) path = [cands[0] stringByStandardizingPath];
     }
 
     NSError* error = nil;
