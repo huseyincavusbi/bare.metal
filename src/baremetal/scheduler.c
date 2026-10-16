@@ -59,6 +59,7 @@ struct bmt_scheduler_s {
     int kv_dim;
     int n_layers;
     int seq_len;
+    int need_grads;
 
     /* phase profiling: GPU time of the command buffers the engine flushes at
      * the residual ADDs (even add -> attention block, odd -> mlp block). */
@@ -70,15 +71,16 @@ struct bmt_scheduler_s {
 };
 
 bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers) {
-    return bmt_scheduler_create_with_precision(backend, reg, graph, max_seq_len, kv_dim, n_layers, BM_PRECISION_FP32);
+    return bmt_scheduler_create_with_precision(backend, reg, graph, max_seq_len, kv_dim, n_layers, BM_PRECISION_FP32, 1);
 }
 
-bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision) {
+bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads) {
     bmt_scheduler_t* sched = calloc(1, sizeof(bmt_scheduler_t));
     sched->backend = backend;
     sched->reg = reg;
     sched->graph = graph;
     sched->precision = precision;
+    sched->need_grads = need_grads;
 
     sched->buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
     for (int i = 0; i < graph->n_tensors; i++) {
@@ -141,8 +143,10 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
 
     /* Gradient buffers: one per tensor, always fp32-sized (grads are fp32 even
      * for Q8 weights), zeroed (backward kernels accumulate via atomics where
-     * multiple producers write the same grad, e.g. residual stream). */
+     * multiple producers write the same grad, e.g. residual stream).
+     * Skipped for inference schedulers (need_grads == 0). */
     sched->grad_buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
+    if (need_grads) {
     for (int i = 0; i < graph->n_tensors; i++) {
         bmt_tensor_t* t = &graph->tensors[i];
         size_t n_elems = 1;
@@ -151,6 +155,7 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
         sched->grad_buffers[i] = backend_buffer_alloc(backend, n_elems * sizeof(float));
         memset(backend_buffer_map(sched->grad_buffers[i]), 0, n_elems * sizeof(float));
         backend_buffer_unmap(sched->grad_buffers[i]);
+    }
     }
 
     sched->param_bufs = malloc(graph->n_nodes * sizeof(backend_buffer_t*));
@@ -778,6 +783,7 @@ void bmt_scheduler_get_output(bmt_scheduler_t* sched, int tensor_id, void* data,
 
 void bmt_scheduler_set_grad(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size) {
     if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors || !data) return;
+    if (!sched->grad_buffers[tensor_id]) return;
     void* dst = backend_buffer_map(sched->grad_buffers[tensor_id]);
     memcpy(dst, data, size);
     backend_buffer_unmap(sched->grad_buffers[tensor_id]);
@@ -785,12 +791,14 @@ void bmt_scheduler_set_grad(bmt_scheduler_t* sched, int tensor_id, const void* d
 
 void bmt_scheduler_get_grad(bmt_scheduler_t* sched, int tensor_id, void* data, size_t size) {
     if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors || !data) return;
+    if (!sched->grad_buffers[tensor_id]) return;
     void* src = backend_buffer_map(sched->grad_buffers[tensor_id]);
     memcpy(data, src, size);
     backend_buffer_unmap(sched->grad_buffers[tensor_id]);
 }
 
 void bmt_scheduler_backward(bmt_scheduler_t* sched) {
+    if (!sched || !sched->need_grads) return;
     backend_encoder_t* enc = backend_encode_begin(sched->backend);
 
     for (int i = sched->graph->n_nodes - 1; i >= 0; i--) {

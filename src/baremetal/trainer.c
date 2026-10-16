@@ -49,7 +49,7 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     bmk_register(t->reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
     bmk_register(t->reg, BMK_OP_ACT_SWIGLU, BMK_VARIANT_NAIVE, "swiglu_forward");
 
-    t->sched = bmt_scheduler_create_with_precision(ctx->backend_ctx, t->reg, g, S, model->kv_dim, model->arch.n_layers, model->precision);
+    t->sched = bmt_scheduler_create_with_precision(ctx->backend_ctx, t->reg, g, S, model->kv_dim, model->arch.n_layers, model->precision, 1);
     t->precision = model->precision;
 
     /* AdamW state: one entry per WEIGHT tensor in the graph. */
