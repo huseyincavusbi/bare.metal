@@ -45,8 +45,7 @@ bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) {
     bmk_register(sess->reg, BMK_OP_FUSED_RESIDUAL_NORM, BMK_VARIANT_NAIVE, "residual_rmsnorm_forward");
     bmk_register(sess->reg, BMK_OP_FUSED_CLASSIFIER, BMK_VARIANT_NAIVE, "rmsnorm_matmul_forward");
     
-    sess->sched = bmt_scheduler_create(ctx->backend_ctx, sess->reg, model->graph, model->arch.max_seq_len, model->kv_dim, model->arch.n_layers);
-    bmt_scheduler_set_precision(sess->sched, model->precision);
+    sess->sched = bmt_scheduler_create_with_precision(ctx->backend_ctx, sess->reg, model->graph, model->arch.max_seq_len, model->kv_dim, model->arch.n_layers, model->precision, 0);
     bmt_model_release_host_weights(model);
     sess->logits = malloc(model->arch.vocab_size * sizeof(float));
     
