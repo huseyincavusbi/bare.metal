@@ -47,6 +47,7 @@ bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) {
     
     sess->sched = bmt_scheduler_create(ctx->backend_ctx, sess->reg, model->graph, model->arch.max_seq_len, model->kv_dim, model->arch.n_layers);
     bmt_scheduler_set_precision(sess->sched, model->precision);
+    bmt_model_release_host_weights(model);
     sess->logits = malloc(model->arch.vocab_size * sizeof(float));
     
     return sess;
