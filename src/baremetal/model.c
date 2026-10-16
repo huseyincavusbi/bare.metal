@@ -145,14 +145,11 @@ void bmt_model_release_host_weights(bm_model_t* model) {
     size_t wpe_bytes = (model->arch.pos_enc == BM_POS_LEARNED)
                        ? (size_t)model->arch.max_seq_len * (size_t)model->arch.dim * sizeof(float)
                        : 0;
-    float* keep = (float*)malloc(emb_bytes + wpe_bytes);
-    if (!keep) return;
-    memcpy(keep, model->token_embedding_table, emb_bytes);
-    if (wpe_bytes) memcpy((char*)keep + emb_bytes, model->wpe, wpe_bytes);
-    free(model->weight_buffer);
-    model->weight_buffer = (void*)keep;
-    model->token_embedding_table = keep;
-    model->wpe = wpe_bytes ? (float*)((char*)keep + emb_bytes) : NULL;
+    void* smaller = realloc(model->weight_buffer, emb_bytes + wpe_bytes);
+    if (!smaller) return;
+    model->weight_buffer = smaller;
+    model->token_embedding_table = (float*)smaller;
+    model->wpe = wpe_bytes ? (float*)((char*)smaller + emb_bytes) : NULL;
     bmt_graph_t* graph = (bmt_graph_t*)model->graph;
     if (graph) {
         for (int i = 0; i < graph->n_tensors; i++)
