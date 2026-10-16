@@ -55,6 +55,7 @@ struct bm_model_s {
 
 int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);
 void bmt_model_free_buffers(bm_model_t* model);
+void bmt_model_release_host_weights(bm_model_t* model);
 int  bmt_model_load_weights(bm_model_t* model, const char* path);
 
 #endif

@@ -4,6 +4,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "baremetal/model.h"
+#include "baremetal/graph.h"
 #include "utils/log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -133,4 +134,25 @@ void bmt_model_free_buffers(bm_model_t* model) {
     if (!model) return;
     free(model->weight_buffer);
     memset(model, 0, sizeof(bm_model_t));
+}
+
+void bmt_model_release_host_weights(bm_model_t* model) {
+    if (!model || !model->weight_buffer) return;
+    size_t vocab_size = model->arch.padded_vocab_size > 0
+                        ? model->arch.padded_vocab_size
+                        : model->arch.vocab_size;
+    size_t emb_bytes = vocab_size * (size_t)model->arch.dim * sizeof(float);
+    size_t wpe_bytes = (model->arch.pos_enc == BM_POS_LEARNED)
+                       ? (size_t)model->arch.max_seq_len * (size_t)model->arch.dim * sizeof(float)
+                       : 0;
+    void* smaller = realloc(model->weight_buffer, emb_bytes + wpe_bytes);
+    if (!smaller) return;
+    model->weight_buffer = smaller;
+    model->token_embedding_table = (float*)smaller;
+    model->wpe = wpe_bytes ? (float*)((char*)smaller + emb_bytes) : NULL;
+    bmt_graph_t* graph = (bmt_graph_t*)model->graph;
+    if (graph) {
+        for (int i = 0; i < graph->n_tensors; i++)
+            graph->tensors[i].weight_ptr = NULL;
+    }
 }
