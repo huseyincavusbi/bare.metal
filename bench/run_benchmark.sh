@@ -10,6 +10,7 @@
 #     grand.json                        all models x engines x formats (full raw)
 #     models/<stem>.json                per-model aggregate
 #     engines/<engine>.json             per-engine aggregate
+#     summary.md                        run summary (tables + output diffs)
 #     raw/<stem>/<engine>__<fmt>.json    individual baremetal.bench/v2 runs
 #     raw/<stem>/sweep__<cfg>.json      bare.metal context-scaling runs
 #     energy/                           raw powermetrics logs
@@ -30,6 +31,7 @@
 #   --name TAG       folder label                     (default: benchmark)
 #   --out DIR        base output dir                  (default: bench/benchmarks)
 #   --no-energy      skip powermetrics capture
+#   --no-publish     do not push results to the benchmarks repo
 #   --quick          smoke: prompt 32, gen 8, reps 1, no energy, skip sweep
 #   --dry-run        print the plan and exit
 #
@@ -37,6 +39,8 @@
 #   BENCH_VENV_HOME  dir with bench-venv + gguf-venv + llama.cpp (default ~/.cache/baremetal)
 #   PYTHON           python for the adapters        (default bench-venv python)
 #   PEAK_GBPS / PEAK_GFLOPPS  device peaks for % of peak (default M4: 120 / 4200)
+#   BENCH_RESULTS_REPO  results repo slug  (default huseyincavusbi/bare.metal-benchmarks)
+#   BENCH_RESULTS_DIR   results checkout   (default $BENCH_VENV_HOME/benchmarks-repo)
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,12 +61,15 @@ REPS=3
 NAME="benchmark"
 OUT="bench/benchmarks"
 ENERGY=1
+PUBLISH=1
+RESULTS_REPO="${BENCH_RESULTS_REPO:-huseyincavusbi/bare.metal-benchmarks}"
+RESULTS_DIR="${BENCH_RESULTS_DIR:-$CACHE/benchmarks-repo}"
 QUICK=0
 DRY=0
 PEAK_GBPS="${PEAK_GBPS:-120}"
 PEAK_GFLOPPS="${PEAK_GFLOPPS:-4200}"
 
-usage() { sed -n '2,42p' "$0"; }
+usage() { sed -n '2,43p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +84,8 @@ while [ $# -gt 0 ]; do
     --quick)         QUICK=1; shift;;
     --dry-run)       DRY=1; shift;;
     --no-energy)     ENERGY=0; shift;;
+    --no-publish)    PUBLISH=0; shift;;
+    --publish)       PUBLISH=1; shift;;
     -h|--help)       usage; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -381,6 +390,50 @@ sweep_model() {
   done
 }
 
+publish_run() {
+  local name; name="$(basename "$RUN_DIR")"
+  echo
+  echo "== publish =="
+  [ -f "$RUN_DIR/grand.json" ] || { echo "  no grand.json; skipping" >&2; return; }
+
+  if [ ! -d "$RESULTS_DIR/.git" ]; then
+    mkdir -p "$(dirname "$RESULTS_DIR")"
+    gh repo clone "$RESULTS_REPO" "$RESULTS_DIR" >/dev/null 2>&1 \
+      || { echo "  clone failed; results kept local: $RUN_DIR" >&2; return; }
+  fi
+  [ -n "$(git -C "$RESULTS_DIR" status --porcelain)" ] && {
+    echo "  results checkout dirty; skipping" >&2; return; }
+  git -C "$RESULTS_DIR" pull --ff-only -q >/dev/null 2>&1 \
+    || { echo "  pull failed; skipping" >&2; return; }
+
+  local dst="$RESULTS_DIR/runs/$name"
+  rm -rf "$dst"; mkdir -p "$dst"
+  cp -f "$RUN_DIR/run.json" "$RUN_DIR/grand.json" "$dst/" 2>/dev/null
+  [ -d "$RUN_DIR/models" ] && cp -R "$RUN_DIR/models" "$dst/"
+  [ -d "$RUN_DIR/engines" ] && cp -R "$RUN_DIR/engines" "$dst/"
+  [ -f "$RUN_DIR/summary.md" ] && cp -f "$RUN_DIR/summary.md" "$dst/"
+  if [ -d "$RUN_DIR/energy" ] && [ -n "$(ls -A "$RUN_DIR/energy" 2>/dev/null)" ]; then
+    tar czf "$dst/energy.tar.gz" -C "$RUN_DIR" energy 2>/dev/null || rm -f "$dst/energy.tar.gz"
+  fi
+
+  if [ -f "$RESULTS_DIR/tools/index.py" ]; then
+    "$BENCH_PY" "$RESULTS_DIR/tools/index.py" >/dev/null 2>&1 \
+      || python3 "$RESULTS_DIR/tools/index.py" >/dev/null 2>&1 \
+      || echo "  index generation failed" >&2
+  fi
+
+  git -C "$RESULTS_DIR" add -A
+  git -C "$RESULTS_DIR" diff --cached --quiet && { echo "  nothing to commit"; return; }
+  git -C "$RESULTS_DIR" commit -q -m "bench: $name" \
+    || { echo "  commit failed" >&2; return; }
+  if ! git -C "$RESULTS_DIR" push -q origin HEAD 2>/dev/null; then
+    git -C "$RESULTS_DIR" pull --rebase -q >/dev/null 2>&1 \
+      && git -C "$RESULTS_DIR" push -q origin HEAD 2>/dev/null \
+      || { echo "  push failed; commit is local" >&2; return; }
+  fi
+  echo "  published $name -> $RESULTS_REPO"
+}
+
 make bench >/dev/null 2>&1 || { echo "build failed" >&2; exit 1; }
 
 for stem in ${MODELS//,/ }; do
@@ -397,6 +450,9 @@ if want_stage aggregate; then
   "$BENCH_PY" bench/compare/collect.py --run-dir "$RUN_DIR" --settings \
       "prompt_cap=$PROMPT,gen=$GEN,reps=$REPS,formats=$FORMATS,stages=$STAGES" || \
     echo "aggregate failed" >&2
+  if [ "$PUBLISH" -eq 1 ] && [ "$QUICK" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+    publish_run
+  fi
 fi
 echo
 echo "done: $RUN_DIR"
