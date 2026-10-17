@@ -61,7 +61,7 @@ def bench_pp_tg(gguf, prompt_tokens, gen, reps):
 def gen_text(gguf, prompt_tokens, gen, seed):
     """Greedy generation via llama-completion; returns (text, peak_rss_bytes)."""
     args = ["llama-completion", "-m", gguf, "-p", PROMPT_TEXT, "-n", str(gen),
-            "--temp", "0", "--seed", str(seed), "--no-display-prompt",
+            "--temp", "0", "--seed", str(seed), "--no-display-prompt", "-no-cnv",
             "-c", str(prompt_tokens + gen + 64)]
     r = run(["/usr/bin/time", "-l"] + args) if os.path.exists("/usr/bin/time") else run(args)
     text = r.stdout
