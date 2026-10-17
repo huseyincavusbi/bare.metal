@@ -137,6 +137,38 @@ def print_table(runs):
               f"{g(r,'energy','combined_w',default=float('nan')):>7.2f}")
 
 
+def table_md(runs):
+    out = ["| engine | file | prec | q | pre t/s | dec t/s | ttft ms | itl ms | rss MB | W |",
+           "|---|---|---|---|---:|---:|---:|---:|---:|---:|"]
+    for j in runs:
+        m, r = j["meta"], j["results"]
+        out.append(
+            f"| {m.get('engine','?')} | {j['_file']} | {m.get('precision','?')} | {m.get('quant','?')} "
+            f"| {prefill(j):.1f} | {decode(j):.1f} "
+            f"| {g(r,'ttft_ms','p50',default=float('nan')):.2f} | {g(r,'itl_ms','p50',default=float('nan')):.2f} "
+            f"| {g(r,'memory','rss_peak_bytes',default=0)/1e6:.0f} "
+            f"| {g(r,'energy','combined_w',default=float('nan')):.2f} |")
+    return out
+
+
+def diff_md(ref, runs):
+    out = []
+    for j in runs:
+        if j is ref:
+            continue
+        d = diff_vs(ref, j)
+        line = f"- vs `{j.get('_file', '?')}`"
+        if "prompt" in d:
+            line += f" prompt:{d['prompt']}"
+        gt = d.get("generated_tokens") or d.get("generated_chars")
+        if gt:
+            key = "token" if "generated_tokens" in d else "text"
+            line += (f" - {key} match {gt.get('match_pct', gt.get('prefix_pct')):.1f}%"
+                     f" (first-div {gt['first_divergence'] if gt['first_divergence'] is not None else 'none'})")
+        out.append(line)
+    return out
+
+
 def print_diff(ref, runs):
     print(f"  --- output diff vs {ref['meta'].get('engine', ref['_file'])} ---")
     for j in runs:
@@ -212,6 +244,18 @@ def aggregate(run_dir, settings_str):
         "settings": settings_str,
         "models": sorted(models.keys()),
     }
+    rj_path = os.path.join(run_dir, "run.json")
+    if os.path.isfile(rj_path):
+        try:
+            prev = json.load(open(rj_path))
+            run_meta["version"] = prev.get("version", run_meta["version"])
+            run_meta["generated_at"] = prev.get("generated_at", run_meta["generated_at"])
+        except Exception:
+            pass
+
+    md = [f"# {run_meta['name']}", "",
+          f"- version: `{run_meta['version'].get('describe') or '?'}`",
+          f"- settings: `{settings_str}`", ""]
 
     # per-model tables + diff
     for stem in sorted(models):
@@ -227,8 +271,12 @@ def aggregate(run_dir, settings_str):
         ref = next((j for j in runs if j["meta"].get("engine") == "bare.metal"
                     and j["meta"].get("quant") in ("none", None)), runs[0])
         print_diff(ref, runs)
+        md += [f"## {stem}", ""] + table_md(runs) + ["", "Output diff vs reference:", ""] \
+              + diff_md(ref, runs) + [""]
         if models[stem]["sweep"]:
             print(f"  sweep configs: {', '.join(sorted(models[stem]['sweep']))}")
+            md += [f"Sweep configs: `{', '.join(sorted(models[stem]['sweep']))}`", ""]
+    open(os.path.join(run_dir, "summary.md"), "w").write("\n".join(md) + "\n")
 
     # grand
     grand_models = {}
