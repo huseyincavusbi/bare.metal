@@ -413,7 +413,13 @@ publish_run() {
   [ -d "$RUN_DIR/engines" ] && cp -R "$RUN_DIR/engines" "$dst/"
   [ -f "$RUN_DIR/summary.md" ] && cp -f "$RUN_DIR/summary.md" "$dst/"
   if [ -d "$RUN_DIR/energy" ] && [ -n "$(ls -A "$RUN_DIR/energy" 2>/dev/null)" ]; then
-    tar czf "$dst/energy.tar.gz" -C "$RUN_DIR" energy 2>/dev/null || rm -f "$dst/energy.tar.gz"
+    mkdir -p "$dst/energy"
+    for f in "$RUN_DIR"/energy/*.txt; do
+      [ -f "$f" ] || continue
+      grep -E "Sampled system activity|Power:|HW active frequency|HW active residency|die temperature" "$f" \
+        | sed -E 's/ \([^)]*\)//; s/ +$//' > "$dst/energy/$(basename "$f")"
+    done
+    tar czf "$dst/energy-raw.tar.gz" -C "$RUN_DIR" energy 2>/dev/null || rm -f "$dst/energy-raw.tar.gz"
   fi
 
   if [ -f "$RESULTS_DIR/tools/index.py" ]; then
