@@ -6,8 +6,36 @@
 #include "baremetal/model.h"
 #include "baremetal/graph.h"
 #include "utils/log.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+int bmt_arch_validate(const bm_arch_t* arch, int has_rope_scaling) {
+    const char* names[6];
+    int n = 0;
+
+    if (arch->bias)              names[n++] = "attention_bias";
+    if (arch->has_qk_norm)       names[n++] = "qk_norm";
+    if (arch->has_ffn_post_norm) names[n++] = "post_ffn_norm";
+    if (arch->gemma_norm)        names[n++] = "gemma_norm";
+    if (arch->embed_scale)       names[n++] = "embed_scale";
+    if (has_rope_scaling)        names[n++] = "rope_scaling";
+
+    if (n == 0) return 0;
+
+    char list[128];
+    size_t off = 0;
+    for (int i = 0; i < n && off < sizeof(list); i++) {
+        int wrote = snprintf(list + off, sizeof(list) - off, "%s%s",
+                             i > 0 ? ", " : "", names[i]);
+        if (wrote < 0) break;
+        off += (size_t)wrote;
+    }
+
+    BMT_LOG_ERROR("Unsupported architecture feature%s: %s",
+                  n > 1 ? "s" : "", list);
+    return -1;
+}
 
 int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
     memset(model, 0, sizeof(bm_model_t));
