@@ -18,6 +18,8 @@ OBJC_SRCS := src/backend/metal/device.m \
              src/backend/metal/dispatch.m
 C_SRCS    := src/utils/log.c \
              src/baremetal/context.c \
+             src/baremetal/json.c \
+             src/baremetal/config.c \
              src/baremetal/model.c \
              src/baremetal/checkpoint.c \
              src/baremetal/checkpoint_st.c \
