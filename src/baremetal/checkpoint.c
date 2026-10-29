@@ -56,6 +56,11 @@ int bmt_checkpoint_load(bm_model_t* model, const char* path) {
     if (arch.rope_theta <= 0.0f) arch.rope_theta = 10000.0f;
     arch.padded_vocab_size = arch.vocab_size;
 
+    if (bmt_arch_validate(&arch, 0) != 0) {
+        fclose(file);
+        return -1;
+    }
+
     if (bmt_model_alloc_buffers(model, &arch) != 0) {
         fclose(file);
         return -1;
