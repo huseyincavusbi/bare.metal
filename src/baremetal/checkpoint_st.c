@@ -4,6 +4,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "baremetal/checkpoint.h"
+#include "baremetal/config.h"
 #include "utils/log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,93 +172,25 @@ static float bf16_to_f32(uint16_t bf16) {
     return result;
 }
 
+static void tensor_name(char* out, size_t out_len, const char* prefix,
+                        int layer, const char* suffix) {
+    snprintf(out, out_len, "%s%d.%s", prefix, layer, suffix);
+}
+
 int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
-    // Read config.json
-    char config_path[1024];
-    snprintf(config_path, sizeof(config_path), "%s/config.json", dir_path);
-    FILE* cf = fopen(config_path, "r");
-    if (!cf) { BMT_LOG_ERROR("Cannot open %s", config_path); return -1; }
-    fseek(cf, 0, SEEK_END);
-    long cflen = ftell(cf);
-    fseek(cf, 0, SEEK_SET);
-    char* config_json = malloc(cflen + 1);
-    fread(config_json, 1, cflen, cf);
-    fclose(cf);
-    config_json[cflen] = '\0';
+    bmt_config_t cfg;
+    if (bmt_config_load(dir_path, &cfg) != 0) return -1;
 
-    // Minimal JSON parsing for key config values
+    const bmt_arch_spec_t* spec = bmt_arch_spec_for_config(&cfg);
+    if (!spec->supported) {
+        BMT_LOG_ERROR("Unsupported architecture '%s': %s",
+                      cfg.model_type[0] ? cfg.model_type : "(missing model_type)",
+                      spec->unsupported_reason ? spec->unsupported_reason : "not implemented");
+        return -1;
+    }
+
     bm_arch_t arch;
-    memset(&arch, 0, sizeof(arch));
-
-    #define JINT(key, field) do { \
-        char* p = strstr(config_json, "\"" key "\""); \
-        if (p) { p = strstr(p, ":"); if (p) arch.field = (int)strtol(p+1, NULL, 10); } \
-    } while(0)
-
-    JINT("hidden_size", dim);
-    JINT("intermediate_size", hidden_dim);
-    JINT("num_hidden_layers", n_layers);
-    JINT("num_attention_heads", n_heads);
-    JINT("num_key_value_heads", n_kv_heads);
-    if (arch.n_kv_heads == 0) arch.n_kv_heads = arch.n_heads;
-    JINT("vocab_size", vocab_size);
-    JINT("max_position_embeddings", max_seq_len);
-    if (arch.max_seq_len == 0) JINT("n_positions", max_seq_len);
-    if (arch.max_seq_len == 0) arch.max_seq_len = 2048;
-
-    arch.padded_vocab_size = arch.vocab_size;
-
-    // RMSNorm detection
-    arch.norm = (strstr(config_json, "rms_norm_eps") != NULL) ? BM_NORM_RMSNORM : BM_NORM_LAYERNORM;
-
-    // Activation detection
-    char* act = strstr(config_json, "hidden_activation");
-    if (!act) act = strstr(config_json, "hidden_act");
-    if (act) {
-        act = strstr(act, ":");
-        if (act) {
-            if (strstr(act, "silu") || strstr(act, "swiglu"))
-                arch.activation = BM_ACT_SWIGLU;
-            else
-                arch.activation = BM_ACT_GELU;
-        }
-    }
-
-    // Position encoding
-    arch.pos_enc = (strstr(config_json, "rope_theta") != NULL) ? BM_POS_ROPE : BM_POS_LEARNED;
-
-    // Attention type
-    arch.attention = (arch.n_kv_heads < arch.n_heads) ? BM_ATTN_GQA : BM_ATTN_MHA;
-
-    // Bias
-    arch.bias = (strstr(config_json, "\"attention_bias\": true") != NULL) ? 1 : 0;
-
-    // Head dim detection
-    arch.head_dim = 0;
-    char* hd = strstr(config_json, "\"head_dim\"");
-    if (hd) { hd = strstr(hd, ":"); if (hd) arch.head_dim = (int)strtol(hd+1, NULL, 10); }
-
-    // Weight tie - prefer config, fall back to safetensors presence
-    arch.weight_tie = (strstr(config_json, "\"tie_word_embeddings\": true") != NULL) ? 1 : 0;
-    arch.gemma_norm = (strstr(config_json, "\"gemma") != NULL) ? 1 : 0;
-
-    char* rt = strstr(config_json, "\"rope_theta\"");
-    if (rt) { rt = strstr(rt, ":"); if (rt) arch.rope_theta = strtof(rt+1, NULL); }
-    if (arch.rope_theta <= 0.0f) arch.rope_theta = 10000.0f;
-    arch.precision = BM_PRECISION_FP32;
-
-    int has_rope_scaling = 0;
-    const char* rs = strstr(config_json, "\"rope_scaling\"");
-    if (rs) {
-        rs = strchr(rs, ':');
-        if (rs) {
-            rs++;
-            while (*rs == ' ' || *rs == '\t' || *rs == '\n' || *rs == '\r') rs++;
-            has_rope_scaling = (*rs == '{');
-        }
-    }
-
-    free(config_json);
+    if (bmt_config_to_arch(&cfg, spec, &arch) != 0) return -1;
 
     // Load safetensors files
     bmt_st_file_t* st_files[16];
@@ -280,7 +213,6 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     // Detect qk_norm, ffn_post_norm, gated_mlp, weight_tie from tensor names
     arch.has_qk_norm = 0;
     arch.has_ffn_post_norm = 0;
-    arch.gated_mlp = 0;
     int saw_lm_head = 0;
     for (int i = 0; i < n_st; i++) {
         for (int j = 0; j < st_files[i]->n_entries; j++) {
@@ -293,7 +225,7 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     }
     if (!saw_lm_head) arch.weight_tie = 1;
 
-    if (bmt_arch_validate(&arch, has_rope_scaling) != 0) {
+    if (bmt_arch_validate(&arch, cfg.has_rope_scaling) != 0) {
         for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
         return -1;
     }
@@ -326,7 +258,9 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
         } \
     } while(0)
 
-    CPT("model.embed_tokens.weight", w, V * D);
+    const bmt_tensor_map_t* t = spec->tensors;
+
+    CPT(t->embed, w, V * D);
     w += V * D;
 
     // Group weights by type to match model.c layout
@@ -334,87 +268,89 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
     // ln1w: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.input_layernorm.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->input_norm);
         CPT(buf, w, D); w += D;
     }
 
     // qw: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.q_proj.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->q);
         CPT(buf, w, NH * HD * D); w += NH * HD * D;
     }
 
     // kw: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.k_proj.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->k);
         CPT(buf, w, model->n_kv_heads * HD * D); w += model->n_kv_heads * HD * D;
     }
 
     // vw: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.v_proj.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->v);
         CPT(buf, w, model->n_kv_heads * HD * D); w += model->n_kv_heads * HD * D;
     }
 
     // QK norm
     if (arch.has_qk_norm) {
         for (int l = 0; l < L; l++) {
-            snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.q_norm.weight", l);
+            tensor_name(buf, sizeof(buf), t->layers, l, t->q_norm);
             CPT(buf, w, HD); w += HD;
         }
         for (int l = 0; l < L; l++) {
-            snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.k_norm.weight", l);
+            tensor_name(buf, sizeof(buf), t->layers, l, t->k_norm);
             CPT(buf, w, model->n_kv_heads * HD); w += model->n_kv_heads * HD;
         }
     }
 
     // attprojw: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.self_attn.o_proj.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->o);
         CPT(buf, w, D * NH * HD); w += NH * HD * D;
     }
 
     // ln2w: all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.post_attention_layernorm.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->post_attn_norm);
         CPT(buf, w, D); w += D;
     }
 
-    // fcw (gate): all layers
-    for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.mlp.gate_proj.weight", l);
-        CPT(buf, w, H * D); w += H * D;
-    }
+    if (arch.gated_mlp) {
+        // fcw (gate): all layers
+        for (int l = 0; l < L; l++) {
+            tensor_name(buf, sizeof(buf), t->layers, l, t->gate);
+            CPT(buf, w, H * D); w += H * D;
+        }
 
-    // fcw3 (up): all layers
-    for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.mlp.up_proj.weight", l);
-        CPT(buf, w, H * D); w += H * D;
+        // fcw3 (up): all layers
+        for (int l = 0; l < L; l++) {
+            tensor_name(buf, sizeof(buf), t->layers, l, t->up);
+            CPT(buf, w, H * D); w += H * D;
+        }
     }
 
     // fcprojw (down): all layers
     for (int l = 0; l < L; l++) {
-        snprintf(buf, sizeof(buf), "model.layers.%d.mlp.down_proj.weight", l);
+        tensor_name(buf, sizeof(buf), t->layers, l, t->down);
         CPT(buf, w, D * H); w += D * H;
     }
 
     if (arch.has_ffn_post_norm) {
         for (int l = 0; l < L; l++) {
-            snprintf(buf, sizeof(buf), "model.layers.%d.pre_feedforward_layernorm.weight", l);
+            tensor_name(buf, sizeof(buf), t->layers, l, t->pre_ffn_norm);
             CPT(buf, w, D); w += D;
         }
         for (int l = 0; l < L; l++) {
-            snprintf(buf, sizeof(buf), "model.layers.%d.post_feedforward_layernorm.weight", l);
+            tensor_name(buf, sizeof(buf), t->layers, l, t->post_ffn_norm);
             CPT(buf, w, D); w += D;
         }
     }
 
     // Final norm
-    CPT("model.norm.weight", w, D); w += D;
+    CPT(t->final_norm, w, D); w += D;
 
     if (!arch.weight_tie) {
-        CPT("lm_head.weight", w, V * D);
-        CPT("model.embed_tokens.weight", w, V * D); // fallback
+        CPT(t->lm_head, w, V * D);
+        CPT(t->embed, w, V * D); // fallback
         w += V * D;
     }
 
