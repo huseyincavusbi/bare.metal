@@ -246,6 +246,17 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     if (arch.rope_theta <= 0.0f) arch.rope_theta = 10000.0f;
     arch.precision = BM_PRECISION_FP32;
 
+    int has_rope_scaling = 0;
+    const char* rs = strstr(config_json, "\"rope_scaling\"");
+    if (rs) {
+        rs = strchr(rs, ':');
+        if (rs) {
+            rs++;
+            while (*rs == ' ' || *rs == '\t' || *rs == '\n' || *rs == '\r') rs++;
+            has_rope_scaling = (*rs == '{');
+        }
+    }
+
     free(config_json);
 
     // Load safetensors files
@@ -281,6 +292,11 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
         }
     }
     if (!saw_lm_head) arch.weight_tie = 1;
+
+    if (bmt_arch_validate(&arch, has_rope_scaling) != 0) {
+        for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
+        return -1;
+    }
 
     // Allocate model buffers
     if (bmt_model_alloc_buffers(model, &arch) != 0) {
