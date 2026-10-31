@@ -10,6 +10,7 @@
 #include "backend/backend.h"
 #include "kernels/registry.h"
 #include "baremetal/graph.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -19,9 +20,15 @@ struct bm_session_s {
     bm_model_t* model;
     bmt_scheduler_t* sched;
     bmk_registry_t* reg;
-    
+
     int pos;
     float* logits;
+
+    bmt_scheduler_t* prefill_sched;
+    bmt_graph_t*     prefill_graph;
+    int              prefill_S;
+    int*             prefill_k;
+    int*             prefill_v;
 };
 
 bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) {
@@ -54,6 +61,10 @@ bm_session_t* bm_create_session(bm_context_t* ctx, bm_model_t* model) {
 
 void bm_destroy_session(bm_session_t* sess) {
     if (!sess) return;
+    if (sess->prefill_sched) bmt_scheduler_destroy(sess->prefill_sched);
+    if (sess->prefill_graph) bmt_graph_destroy(sess->prefill_graph);
+    free(sess->prefill_k);
+    free(sess->prefill_v);
     bmt_scheduler_destroy(sess->sched);
     bmk_registry_destroy(sess->reg);
     free(sess->logits);
@@ -72,11 +83,66 @@ void bm_reset_session(bm_session_t* sess) {
     if (sess) sess->pos = 0;
 }
 
-float* bm_forward(bm_session_t* sess, const int* tokens, int n_tokens) {
-    for (int i = 0; i < n_tokens; i++) {
-        bm_step(sess, tokens[i]);
+static float* bm_prefill(bm_session_t* sess, const int* tokens, int n_tokens) {
+    bm_model_t* m = sess->model;
+    int D = m->arch.dim;
+    int L = m->arch.n_layers;
+    int V = m->arch.vocab_size;
+    int MS = m->arch.max_seq_len;
+
+    if (sess->prefill_S != n_tokens) {
+        if (sess->prefill_sched) bmt_scheduler_destroy(sess->prefill_sched);
+        if (sess->prefill_graph) bmt_graph_destroy(sess->prefill_graph);
+        free(sess->prefill_k);
+        free(sess->prefill_v);
+
+        sess->prefill_k = malloc((size_t)L * sizeof(int));
+        sess->prefill_v = malloc((size_t)L * sizeof(int));
+        sess->prefill_graph = bmt_graph_build_prefill(m, n_tokens, sess->prefill_k, sess->prefill_v);
+        sess->prefill_sched = bmt_scheduler_create_shared(
+            sess->ctx->backend_ctx, sess->reg, sess->prefill_graph, MS,
+            m->kv_dim, L, m->precision, 0, sess->sched);
+        bmt_scheduler_set_prefill(sess->prefill_sched, 1);
+        sess->prefill_S = n_tokens;
     }
+
+    float* x = malloc((size_t)n_tokens * D * sizeof(float));
+    for (int i = 0; i < n_tokens; i++) {
+        memcpy(x + (size_t)i * D,
+               m->token_embedding_table + (size_t)tokens[i] * D,
+               (size_t)D * sizeof(float));
+        if (m->arch.embed_scale) {
+            float esc = sqrtf((float)D);
+            for (int d = 0; d < D; d++) x[(size_t)i * D + d] *= esc;
+        }
+        if (m->arch.pos_enc == BM_POS_LEARNED && m->wpe) {
+            for (int d = 0; d < D; d++) x[(size_t)i * D + d] += m->wpe[(size_t)i * D + d];
+        }
+    }
+
+    bmt_scheduler_set_input(sess->prefill_sched, 0, x, (size_t)n_tokens * D * sizeof(float));
+    bmt_scheduler_forward_train(sess->prefill_sched, n_tokens);
+    bmt_scheduler_get_output(sess->prefill_sched,
+                             sess->prefill_graph->n_tensors - 1,
+                             sess->logits, (size_t)V * sizeof(float));
+    bmt_scheduler_copy_prefill_kv(sess->sched, sess->prefill_sched,
+                                  n_tokens, sess->prefill_k, sess->prefill_v);
+
+    sess->pos = n_tokens;
+    free(x);
     return sess->logits;
+}
+
+float* bm_forward(bm_session_t* sess, const int* tokens, int n_tokens) {
+    if (n_tokens <= 0) return sess->logits;
+    /* The q4/q8 matmul kernels are decode-only (batch 1); prefill falls back
+     * to the token loop until batched quantized matmuls exist. */
+    if (n_tokens == 1 || sess->pos != 0 || sess->model->quant_bits != 0 ||
+        n_tokens > sess->model->arch.max_seq_len) {
+        for (int i = 0; i < n_tokens; i++) bm_step(sess, tokens[i]);
+        return sess->logits;
+    }
+    return bm_prefill(sess, tokens, n_tokens);
 }
 
 float* bm_step(bm_session_t* sess, int token) {
