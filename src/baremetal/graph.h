@@ -26,6 +26,7 @@ typedef struct {
     int dims[BMT_MAX_TENSOR_DIMS];
     int n_dims;
     void* weight_ptr;
+    void* original_weight_ptr;
     int   quantized;   /* 0 = fp, 8 = upload Q8, 4 = upload Q4 */
 } bmt_tensor_t;
 
@@ -69,5 +70,6 @@ int bmt_graph_add_node(bmt_graph_t* graph, bmk_op_type_t op_type,
 struct bm_model_s;
 void bmt_graph_build(struct bm_model_s* model);
 void bmt_graph_build_train(struct bm_model_s* model, int S);   /* training: S-sized, separate residuals, no fusion */
+bmt_graph_t* bmt_graph_build_prefill(struct bm_model_s* model, int S, int* k_ids, int* v_ids);
 
 #endif

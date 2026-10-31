@@ -1055,6 +1055,52 @@ kernel void attention_forward_seq(
     }
 }
 
+// attention_forward_prefill (inference prefill: full sequence, causal, GQA)
+// Online softmax: no sequence-length cap, one pass over the prompt's K/V.
+// buffers: [0]=Q[S,NH,HD] [1]=K[S,NKV,HD] [2]=V [3]=out
+//          [4]=params{NH,S,HD,NKV,kv_mul} [5]=scale
+#define ATTN_PREFILL_MAX_HD 128
+kernel void attention_forward_prefill(
+    device const float* Q   [[buffer(0)]],
+    device const float* K   [[buffer(1)]],
+    device const float* V   [[buffer(2)]],
+    device float* out       [[buffer(3)]],
+    constant int* p         [[buffer(4)]],
+    constant float& scale   [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
+    int h = (int)gid / S;
+    int i = (int)gid - h * S;
+    if (h >= NH || i >= S || HD > ATTN_PREFILL_MAX_HD) return;
+    int kh = h / kv_mul;
+    const device float* qi = Q + (i * NH + h) * HD;
+
+    thread float acc[ATTN_PREFILL_MAX_HD];
+    for (int d = 0; d < HD; d++) acc[d] = 0.0f;
+
+    float m = -INFINITY, l = 0.0f;
+    for (int j = 0; j <= i; j++) {
+        const device float* kj = K + (j * NKV + kh) * HD;
+        float s = 0.0f;
+        for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
+        s *= scale;
+
+        float m_new = fmax(m, s);
+        float alpha = exp(m - m_new);
+        float beta = exp(s - m_new);
+        l = l * alpha + beta;
+
+        const device float* vj = V + (j * NKV + kh) * HD;
+        for (int d = 0; d < HD; d++) acc[d] = acc[d] * alpha + beta * vj[d];
+        m = m_new;
+    }
+
+    float inv = 1.0f / l;
+    device float* oi = out + (i * NH + h) * HD;
+    for (int d = 0; d < HD; d++) oi[d] = acc[d] * inv;
+}
+
 // ----------------------------------------------------------------
 // rope_forward_seq (training forward RoPE, full sequence, [S,NH,HD] layout)
 // For each (position s, head h): freq=1/theta^(2i/HD); apply rotation by pos=s.

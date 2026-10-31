@@ -20,8 +20,13 @@ bmt_graph_t* bmt_graph_create(void) {
 }
 
 int bmt_graph_find_weight(bmt_graph_t* graph, void* ptr) {
-    for (int i = 0; i < graph->n_tensors; i++)
-        if (graph->tensors[i].type == BMT_TENSOR_TYPE_WEIGHT && graph->tensors[i].weight_ptr == ptr) return i;
+    for (int i = 0; i < graph->n_tensors; i++) {
+        if (graph->tensors[i].type != BMT_TENSOR_TYPE_WEIGHT) continue;
+        void* p = graph->tensors[i].original_weight_ptr
+                  ? graph->tensors[i].original_weight_ptr
+                  : graph->tensors[i].weight_ptr;
+        if (p == ptr) return i;
+    }
     return -1;
 }
 
@@ -53,6 +58,7 @@ int bmt_graph_add_tensor(bmt_graph_t* graph, bmt_tensor_type_t type, int n_dims,
 void bmt_graph_set_weight_ptr(bmt_graph_t* graph, int tensor_id, void* ptr) {
     if (tensor_id >= 0 && tensor_id < graph->n_tensors) {
         graph->tensors[tensor_id].weight_ptr = ptr;
+        graph->tensors[tensor_id].original_weight_ptr = ptr;
     }
 }
 
@@ -238,11 +244,8 @@ void bmt_graph_build(bm_model_t* m) {
  *  - residual ADDs write to NEW tensors (not in-place on t_x): in-place residual
  *    would make the ADD backward self-add grad[t_x] += grad[t_x] (doubling it).
  *  - no Q8 marking, no fusion (caller must NOT run bmt_compiler_run). */
-void bmt_graph_build_train(bm_model_t* m, int S) {
-    if (m->graph) bmt_graph_destroy(m->graph);
-    bmt_graph_t* g = bmt_graph_create();
-    m->graph = g;
-
+static void graph_build_seq(bm_model_t* m, bmt_graph_t* g, int S,
+                            int last_only, int* k_ids, int* v_ids) {
     int D  = m->arch.dim;
     int H  = m->arch.hidden_dim;
     int NH = m->arch.n_heads;
@@ -266,6 +269,8 @@ void bmt_graph_build_train(bm_model_t* m, int S) {
         int t_q = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, NH*HD});
         int t_k = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, KV});
         int t_v = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, KV});
+        if (k_ids) k_ids[l] = t_k;
+        if (v_ids) v_ids[l] = t_v;
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_qw}, t_q, 3, (int[]){S, D, NH*HD}, 0, NULL);
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_kw}, t_k, 3, (int[]){S, D, KV}, 0, NULL);
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_vw}, t_v, 3, (int[]){S, D, KV}, 0, NULL);
@@ -328,7 +333,36 @@ void bmt_graph_build_train(bm_model_t* m, int S) {
     bmt_graph_add_node(g, BMK_OP_NORM_RMS, 2, (int[]){t_x, t_lnfw}, t_norm_f, 2, (int[]){S, D}, 1, (float[]){eps});
 
     int t_wcls = bmt_graph_add_weight(g, m->wcls, 2, (int[]){V, D});
-    int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, V});
-    bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm_f, t_wcls}, t_logits, 3, (int[]){S, D, V}, 0, NULL);
+    if (last_only) {
+        int t_last = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){1, D});
+        bmt_graph_add_node(g, BMK_OP_COPY_LAST, 1, (int[]){t_norm_f}, t_last,
+                           2, (int[]){D, S}, 0, NULL);
+        int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){1, V});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_last, t_wcls}, t_logits,
+                           3, (int[]){1, D, V}, 0, NULL);
+    } else {
+        int t_logits = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, V});
+        bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm_f, t_wcls}, t_logits, 3, (int[]){S, D, V}, 0, NULL);
+    }
+}
+
+void bmt_graph_build_train(bm_model_t* m, int S) {
+    if (m->graph) bmt_graph_destroy(m->graph);
+    bmt_graph_t* g = bmt_graph_create();
+    m->graph = g;
+    graph_build_seq(m, g, S, 0, NULL, NULL);
+}
+
+bmt_graph_t* bmt_graph_build_prefill(bm_model_t* m, int S, int* k_ids, int* v_ids) {
+    bmt_graph_t* g = bmt_graph_create();
+    graph_build_seq(m, g, S, 1, k_ids, v_ids);
+    if (m->quant_bits) {
+        for (int i = 0; i < g->n_tensors; i++) {
+            bmt_tensor_t* t = &g->tensors[i];
+            if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->n_dims == 2 && t->dims[1] % 32 == 0)
+                t->quantized = m->quant_bits;
+        }
+    }
+    return g;
 }
 

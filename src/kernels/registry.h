@@ -22,6 +22,7 @@ typedef enum {
     BMK_OP_ADD,
     BMK_OP_FUSED_RESIDUAL_NORM,
     BMK_OP_FUSED_CLASSIFIER,
+    BMK_OP_COPY_LAST,
     BMK_OP_COUNT
 } bmk_op_type_t;
 
