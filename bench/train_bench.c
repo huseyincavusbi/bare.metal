@@ -37,6 +37,8 @@ static void usage(const char* prog) {
         "  --steps N          measured optimizer steps      (default 20)\n"
         "  --warmup N         discarded warmup steps        (default 2)\n"
         "  --batch-size N     sequences per optimizer step  (default 1)\n"
+        "  --grad-accum N     micro-steps per optimizer step (default 1)\n"
+        "  --state-out FILE   save final trainer state\n"
         "  --lr F             learning rate                 (default 1e-4)\n"
         "  --precision P      fp32|fp16|bf16 (default device)\n"
         "  --avg-w W          average watts (from powermetrics)\n"
@@ -111,7 +113,8 @@ int main(int argc, char** argv) {
     const char* out_path = NULL;
     const char* ref_path = NULL;
     const char* prec_arg = NULL;
-    int seq_len = 64, steps = 20, warmup = 2, batch_size = 1;
+    int seq_len = 64, steps = 20, warmup = 2, batch_size = 1, grad_accum = 1;
+    const char* state_out = NULL;
     int raw = 1, check = 0, parity_steps = 1;
     float lr = 1e-4f, tol = 1e-6f;
     double avg_w = 0.0;
@@ -123,6 +126,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--steps") && i+1 < argc)      steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warmup") && i+1 < argc)     warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--batch-size") && i+1 < argc) batch_size = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-accum") && i+1 < argc) grad_accum = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--state-out") && i+1 < argc)  state_out = argv[++i];
         else if (!strcmp(argv[i], "--lr") && i+1 < argc)         lr = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--precision") && i+1 < argc)  prec_arg = argv[++i];
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)      avg_w = atof(argv[++i]);
@@ -140,6 +145,7 @@ int main(int argc, char** argv) {
     if (steps < 1) steps = 1;
     if (warmup < 0) warmup = 0;
     if (batch_size < 1) batch_size = 1;
+    if (grad_accum < 1) grad_accum = 1;
     if (parity_steps < 1) parity_steps = 1;
     if (tol <= 0.0f) tol = 1e-6f;
 
@@ -177,7 +183,7 @@ int main(int argc, char** argv) {
     cfg.grad_clip = 1.0f;
     cfg.warmup_steps = 0;
     cfg.max_steps = steps;
-    cfg.grad_accum_steps = 1;
+    cfg.grad_accum_steps = grad_accum;
     cfg.seq_len = seq_len;
 
     bm_trainer_t* trainer = bm_create_trainer(ctx, m, &cfg);
@@ -252,6 +258,8 @@ int main(int argc, char** argv) {
         }
     }
     active_end_unix = time(NULL);
+    bm_train_flush(trainer);
+    if (state_out) bm_save_state(trainer, state_out);
 
     int n_cp = 0;
     int marks[5] = { 0, steps / 4, steps / 2, (3 * steps) / 4, steps - 1 };
@@ -381,6 +389,7 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"stage\": \"train\",\n");
     fprintf(out, "    \"seq_len\": %d,\n", seq_len);
     fprintf(out, "    \"batch_size\": %d,\n", batch_size);
+    fprintf(out, "    \"grad_accum_steps\": %d,\n", grad_accum);
     fprintf(out, "    \"steps\": %d,\n", steps);
     fprintf(out, "    \"warmup\": %d,\n", warmup);
     fprintf(out, "    \"learning_rate\": %.9g,\n", (double)lr);

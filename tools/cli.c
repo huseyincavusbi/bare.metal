@@ -70,6 +70,7 @@ static void print_usage(const char* prog) {
     printf("      --steps <int>       Max training steps (default: 100)\n");
     printf("      --seq-len <int>     Sequence length S (default: 64)\n");
     printf("      --batch-size <int>  Batch size B (default: 1)\n");
+    printf("      --grad-accum <int>  Micro-steps per optimizer step (default: 1)\n");
     printf("      --lr <float>        Learning rate (default: 3e-4)\n");
     printf("      --save-every <int>  Save checkpoint every N steps (default: 0)\n");
     printf("      --resume <path>     Resume from checkpoint\n");
@@ -406,6 +407,7 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "  --steps <int>       Max training steps (default: 100)\n");
         fprintf(stderr, "  --seq-len <int>     Sequence length S (default: 64)\n");
         fprintf(stderr, "  --batch-size <int>  Batch size B (default: 1)\n");
+        fprintf(stderr, "  --grad-accum <int>  Micro-steps per optimizer step (default: 1)\n");
         fprintf(stderr, "  --lr <float>        Learning rate (default: 3e-4)\n");
         fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
         fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
@@ -419,6 +421,7 @@ static int cmd_train(int argc, char** argv) {
     int max_steps = 100;
     int seq_len = 64;
     int batch_size = 1;
+    int grad_accum = 1;
     float lr = 3e-4f;
     int save_every = 0;
     const char* resume_path = NULL;
@@ -428,6 +431,7 @@ static int cmd_train(int argc, char** argv) {
         if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--seq-len") == 0 && i+1 < argc) seq_len = atoi(argv[++i]);
         else if (strcmp(argv[i], "--batch-size") == 0 && i+1 < argc) batch_size = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--grad-accum") == 0 && i+1 < argc) grad_accum = atoi(argv[++i]);
         else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
@@ -477,6 +481,7 @@ static int cmd_train(int argc, char** argv) {
     cfg.epsilon = 1e-8f;
     cfg.weight_decay = 0.0f;
     cfg.grad_clip = 1.0f;
+    cfg.grad_accum_steps = grad_accum > 0 ? grad_accum : 1;
     cfg.warmup_steps = 10;
     cfg.max_steps = max_steps;
     cfg.seq_len = seq_len;
@@ -533,6 +538,7 @@ static int cmd_train(int argc, char** argv) {
         }
     }
 
+    bm_train_flush(trainer);
     printf("Avg step time: %.1fms\n", total_step_time / max_steps);
 
     free(inputs);

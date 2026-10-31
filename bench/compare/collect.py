@@ -194,6 +194,7 @@ def train_summary(j):
     return {
         "precision": j.get("meta", {}).get("precision"),
         "batch_size": g(j, "config", "batch_size", default=None),
+        "grad_accum": g(j, "config", "grad_accum_steps", default=1),
         "seq_len": g(j, "config", "seq_len", default=None),
         "steps": g(j, "config", "steps", default=None),
         "step_ms": g(t, "step_ms", "p50", default=None),
@@ -213,14 +214,14 @@ def nfmt(x, nd=1, dash="-"):
 
 
 def train_table_md(train):
-    out = ["| cfg | prec | B | S | steps | step ms | tok/s | loss | RSS MB | GPU MB | W | parity |",
-           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    out = ["| cfg | prec | B | G | S | steps | step ms | tok/s | loss | RSS MB | GPU MB | W | parity |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for cfg, j in sorted(train.items()):
         t = train_summary(j)
         par = "-" if t["parity_pass"] is None else ("PASS" if t["parity_pass"] else "FAIL")
         if t["parity_rel_err"] is not None:
             par += f" ({t['parity_rel_err']:.1e})"
-        out.append(f"| {cfg} | {t['precision']} | {t['batch_size']} | {t['seq_len']} | {t['steps']} "
+        out.append(f"| {cfg} | {t['precision']} | {t['batch_size']} | {t['grad_accum']} | {t['seq_len']} | {t['steps']} "
                    f"| {nfmt(t['step_ms'])} | {nfmt(t['tokens_per_s'])} "
                    f"| {nfmt(t['loss_first'], 4)} -> {nfmt(t['loss_last'], 4)} "
                    f"| {nfmt((t['rss_peak_bytes'] or 0)/1e6, 0)} | {nfmt((t['gpu_peak_bytes'] or 0)/1e6, 0)} "
@@ -229,10 +230,10 @@ def train_table_md(train):
 
 
 def print_train_table(train):
-    print(f"{'cfg':<14}{'prec':<7}{'B':>3}{'S':>5}{'step ms':>9}{'tok/s':>9}{'loss':>16}{'RSS MB':>9}{'GPU MB':>9}")
+    print(f"{'cfg':<14}{'prec':<7}{'B':>3}{'G':>3}{'S':>5}{'step ms':>9}{'tok/s':>9}{'loss':>16}{'RSS MB':>9}{'GPU MB':>9}")
     for cfg, j in sorted(train.items()):
         t = train_summary(j)
-        print(f"{cfg:<14}{str(t['precision']):<7}{str(t['batch_size']):>3}{str(t['seq_len']):>5}"
+        print(f"{cfg:<14}{str(t['precision']):<7}{str(t['batch_size']):>3}{str(t['grad_accum']):>3}{str(t['seq_len']):>5}"
               f"{(t['step_ms'] or 0):>9.1f}{(t['tokens_per_s'] or 0):>9.1f}"
               f"{(t['loss_first'] or 0):>8.3f}->{(t['loss_last'] or 0):<7.3f}"
               f"{((t['rss_peak_bytes'] or 0)/1e6):>9.0f}{((t['gpu_peak_bytes'] or 0)/1e6):>9.0f}")

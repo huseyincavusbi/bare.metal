@@ -36,6 +36,7 @@ struct bm_trainer_s {
     backend_buffer_t*   k_embed_param;/* [D] for embedding_backward */
 
     int                 step;         /* optimizer step count (for bias correction) */
+    int                 accum_count;  /* micro-steps in the current accumulation window */
     bm_train_config_t   cfg;
 
     float*              x_in;         /* S*D embedding scratch */

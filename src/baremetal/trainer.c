@@ -367,14 +367,19 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         return -1.0f;
     }
 
-    /* zero all grad buffers once at the start (gradients accumulate across B sequences) */
+    int accum = t->cfg.grad_accum_steps > 0 ? t->cfg.grad_accum_steps : 1;
+
+    /* Gradients accumulate across B sequences and across micro-steps; zero only
+     * at the start of an optimizer window. */
     bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
-    for (int i = 0; i < g->n_tensors; i++) {
-        size_t n = 1;
-        for (int d = 0; d < g->tensors[i].n_dims; d++) n *= g->tensors[i].dims[d];
-        if (n == 0) n = 1024;
-        memset(backend_buffer_map(bmt_scheduler_get_grad_buffer(t->sched, i)), 0, n * sizeof(float));
-        backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, i));
+    if (t->accum_count == 0) {
+        for (int i = 0; i < g->n_tensors; i++) {
+            size_t n = 1;
+            for (int d = 0; d < g->tensors[i].n_dims; d++) n *= g->tensors[i].dims[d];
+            if (n == 0) n = 1024;
+            memset(backend_buffer_map(bmt_scheduler_get_grad_buffer(t->sched, i)), 0, n * sizeof(float));
+            backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, i));
+        }
     }
 
     /* Sequential batching: process B sequences one at a time, accumulating gradients */
@@ -398,10 +403,22 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         embed_backward(t, seq_inputs, S);
     }
 
-    /* 5. AdamW step (once per batch, after all B sequences) */
-    adamw_apply(t);
+    /* 5. AdamW step once the accumulation window is full. */
+    t->accum_count++;
+    if (t->accum_count >= accum) {
+        adamw_apply(t);
+        t->accum_count = 0;
+    }
 
     return total_loss / (float)B;
+}
+
+void bm_train_flush(bm_trainer_t* t) {
+    if (!t) return;
+    if (t->accum_count > 0) {
+        adamw_apply(t);
+        t->accum_count = 0;
+    }
 }
 
 #endif /* BAREMETAL_TRAIN */
