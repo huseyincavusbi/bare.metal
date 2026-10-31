@@ -5,6 +5,7 @@
 BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
 BENCH_BIN := build/bench/bench
+TRAIN_BENCH_BIN := build/bench/train_bench
 PARITY_BIN := build/parity
 PARITY_MODEL ?= models/smollm2-135m
 PARITY_FIXTURE ?= test/parity/$(notdir $(PARITY_MODEL)).json
@@ -58,7 +59,7 @@ baremetal-train: dirs $(BINARY_TRAIN)
 
 tests: dirs $(TEST_BINS)
 
-bench: dirs $(BENCH_BIN)
+bench: dirs $(BENCH_BIN) $(TRAIN_BENCH_BIN)
 
 parity: dirs $(PARITY_BIN)
 	./$(PARITY_BIN) --model $(PARITY_MODEL) --fixture $(PARITY_FIXTURE)
@@ -76,6 +77,14 @@ $(BENCH_BIN): bench/bench.c bench/metrics.h $(OBJS) $(METAL_BIN)
 	@mkdir -p build/bench/kernels
 	@ln -sf ../../kernels/default.metallib build/bench/kernels/default.metallib
 	@echo "  Built: $@"
+
+$(TRAIN_BENCH_BIN): bench/train_bench.c bench/metrics.h $(OBJS_TRAIN) $(METAL_BIN)
+	@mkdir -p build/bench
+	$(CC) $(CFLAGS_TRAIN) -o $@ bench/train_bench.c $(OBJS_TRAIN) $(LDFLAGS)
+	@mkdir -p build/bench/kernels
+	@ln -sf ../../kernels/default.metallib build/bench/kernels/default.metallib
+	@echo "  Built: $@"
+
 
 dirs:
 	@mkdir -p build/src/utils

@@ -186,12 +186,64 @@ def print_diff(ref, runs):
         print(line)
 
 
+def train_summary(j):
+    r = j.get("results", {})
+    t = r.get("train", {})
+    loss = t.get("loss", {})
+    par = t.get("parity", {})
+    return {
+        "precision": j.get("meta", {}).get("precision"),
+        "batch_size": g(j, "config", "batch_size", default=None),
+        "seq_len": g(j, "config", "seq_len", default=None),
+        "steps": g(j, "config", "steps", default=None),
+        "step_ms": g(t, "step_ms", "p50", default=None),
+        "tokens_per_s": g(t, "tokens_per_s", "mean", default=None),
+        "loss_first": loss.get("first"),
+        "loss_last": loss.get("last"),
+        "rss_peak_bytes": g(r, "memory", "rss_peak_bytes", default=None),
+        "gpu_peak_bytes": g(r, "memory", "gpu_peak_bytes", default=None),
+        "combined_w": g(r, "energy", "combined_w", default=None),
+        "parity_pass": par.get("pass"),
+        "parity_rel_err": par.get("drift_max_rel_err", par.get("max_rel_err")),
+    }
+
+
+def nfmt(x, nd=1, dash="-"):
+    return dash if x is None else f"{x:.{nd}f}"
+
+
+def train_table_md(train):
+    out = ["| cfg | prec | B | S | steps | step ms | tok/s | loss | RSS MB | GPU MB | W | parity |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    for cfg, j in sorted(train.items()):
+        t = train_summary(j)
+        par = "-" if t["parity_pass"] is None else ("PASS" if t["parity_pass"] else "FAIL")
+        if t["parity_rel_err"] is not None:
+            par += f" ({t['parity_rel_err']:.1e})"
+        out.append(f"| {cfg} | {t['precision']} | {t['batch_size']} | {t['seq_len']} | {t['steps']} "
+                   f"| {nfmt(t['step_ms'])} | {nfmt(t['tokens_per_s'])} "
+                   f"| {nfmt(t['loss_first'], 4)} -> {nfmt(t['loss_last'], 4)} "
+                   f"| {nfmt((t['rss_peak_bytes'] or 0)/1e6, 0)} | {nfmt((t['gpu_peak_bytes'] or 0)/1e6, 0)} "
+                   f"| {nfmt(t['combined_w'], 2)} | {par} |")
+    return out
+
+
+def print_train_table(train):
+    print(f"{'cfg':<14}{'prec':<7}{'B':>3}{'S':>5}{'step ms':>9}{'tok/s':>9}{'loss':>16}{'RSS MB':>9}{'GPU MB':>9}")
+    for cfg, j in sorted(train.items()):
+        t = train_summary(j)
+        print(f"{cfg:<14}{str(t['precision']):<7}{str(t['batch_size']):>3}{str(t['seq_len']):>5}"
+              f"{(t['step_ms'] or 0):>9.1f}{(t['tokens_per_s'] or 0):>9.1f}"
+              f"{(t['loss_first'] or 0):>8.3f}->{(t['loss_last'] or 0):<7.3f}"
+              f"{((t['rss_peak_bytes'] or 0)/1e6):>9.0f}{((t['gpu_peak_bytes'] or 0)/1e6):>9.0f}")
+
+
 # --------------------------------------------------------- run-dir mode ------
 def parse_raw(run_dir):
     models = {}
     for stem_dir in sorted(glob.glob(os.path.join(run_dir, "raw", "*"))):
         stem = os.path.basename(stem_dir)
-        m = models.setdefault(stem, {"engines": {}, "sweep": {}})
+        m = models.setdefault(stem, {"engines": {}, "sweep": {}, "train": {}})
         for f in sorted(glob.glob(os.path.join(stem_dir, "*.json"))):
             base = os.path.basename(f)[:-5]
             try:
@@ -200,7 +252,9 @@ def parse_raw(run_dir):
                 continue
             if j.get("schema") != SCHEMA_RUN:
                 continue
-            if base.startswith("sweep__"):
+            if base.startswith("train__"):
+                m["train"][base[len("train__"):]] = j
+            elif base.startswith("sweep__"):
                 m["sweep"][base[len("sweep__"):]] = j
             elif "__" in base:
                 eng, fmt = base.split("__", 1)
@@ -227,6 +281,11 @@ def first_host(models):
                 return {k: m[k] for k in ("hw_model", "hw_machine", "gpu_name", "gpu_cores",
                                           "macos", "os_build", "ram_bytes", "p_cores", "e_cores")
                         if k in m}
+        for cfg in models[stem].get("train", {}):
+            m = models[stem]["train"][cfg]["meta"]
+            return {k: m[k] for k in ("hw_model", "hw_machine", "gpu_name", "gpu_cores",
+                                      "macos", "os_build", "ram_bytes", "p_cores", "e_cores")
+                    if k in m}
     return {}
 
 
@@ -264,18 +323,23 @@ def aggregate(run_dir, settings_str):
             for fmt, j in sorted(models[stem]["engines"].get(eng, {}).items()):
                 jj = dict(j); jj["_file"] = f"{eng}__{fmt}"
                 runs.append(jj)
-        if not runs:
-            continue
-        print(f"\n=== {stem} ===")
-        print_table(runs)
-        ref = next((j for j in runs if j["meta"].get("engine") == "bare.metal"
-                    and j["meta"].get("quant") in ("none", None)), runs[0])
-        print_diff(ref, runs)
-        md += [f"## {stem}", ""] + table_md(runs) + ["", "Output diff vs reference:", ""] \
-              + diff_md(ref, runs) + [""]
+        if runs:
+            print(f"\n=== {stem} ===")
+            print_table(runs)
+            ref = next((j for j in runs if j["meta"].get("engine") == "bare.metal"
+                        and j["meta"].get("quant") in ("none", None)), runs[0])
+            print_diff(ref, runs)
+            md += [f"## {stem}", ""] + table_md(runs) + ["", "Output diff vs reference:", ""] \
+                  + diff_md(ref, runs) + [""]
+        else:
+            md += [f"## {stem}", ""]
         if models[stem]["sweep"]:
             print(f"  sweep configs: {', '.join(sorted(models[stem]['sweep']))}")
             md += [f"Sweep configs: `{', '.join(sorted(models[stem]['sweep']))}`", ""]
+        if models[stem]["train"]:
+            print(f"  training configs: {', '.join(sorted(models[stem]['train']))}")
+            print_train_table(models[stem]["train"])
+            md += ["### Training", ""] + train_table_md(models[stem]["train"]) + [""]
     open(os.path.join(run_dir, "summary.md"), "w").write("\n".join(md) + "\n")
 
     # grand
@@ -287,7 +351,9 @@ def aggregate(run_dir, settings_str):
                                          for fmt, j in sorted(variants.items())}}
         sweep = {k: {kk: v[kk] for kk in ("meta", "config", "results") if kk in v}
                  for k, v in sorted(data["sweep"].items())}
-        grand_models[stem] = {"engines": engines, "sweep": sweep}
+        train = {k: {kk: v[kk] for kk in ("meta", "config", "results") if kk in v}
+                 for k, v in sorted(data["train"].items())}
+        grand_models[stem] = {"engines": engines, "sweep": sweep, "train": train}
     grand = {"schema": SCHEMA_ALL, "run": run_meta, "models": grand_models}
     json.dump(grand, open(os.path.join(run_dir, "grand.json"), "w"), indent=2)
     json.dump(run_meta, open(os.path.join(run_dir, "run.json"), "w"), indent=2)

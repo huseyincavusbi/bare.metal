@@ -22,6 +22,9 @@
 #
 # Options:
 #   --models LIST    comma-separated stems           (default: all HF dirs in models/)
+#   --train-models L comma-separated stems for train  (default: smollm2-135m)
+#   --train-steps N  measured training steps          (default: 20)
+#   --train-seq-len N training sequence length        (default: 64)
 #   --stages LIST    prep,cross,sweep,aggregate      (default: all)
 #   --formats LIST   size classes: bf16,fp16,q8,q4   (default: all; mapped per
 #                    engine, unsupported classes skipped)
@@ -52,14 +55,18 @@ BENCH_PY="${PYTHON:-$CACHE/bench-venv/bin/python}"
 CONVERT_PY="$CACHE/gguf-venv/bin/python"
 LLAMACPP_DIR="${LLAMACPP_DIR:-$CACHE/llama.cpp}"
 BENCH="./build/bench/bench"
+TRAIN_BENCH="./build/bench/train_bench"
 
 MODELS=""
-STAGES="prep,cross,sweep,aggregate"
+STAGES="prep,cross,sweep,train,aggregate"
 FORMATS="bf16,fp16,q8,q4"
 PROMPT=128
 GEN=128
 REPS=3
 NAME="benchmark"
+TRAIN_MODELS="${TRAIN_MODELS:-smollm2-135m}"
+TRAIN_STEPS="${TRAIN_STEPS:-20}"
+TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-64}"
 OUT="bench/benchmarks"
 ENERGY=1
 PUBLISH=1
@@ -78,6 +85,9 @@ usage() { sed -n '2,43p' "$0"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --models)        MODELS="$2"; shift 2;;
+    --train-models)  TRAIN_MODELS="$2"; shift 2;;
+    --train-steps)   TRAIN_STEPS="$2"; shift 2;;
+    --train-seq-len) TRAIN_SEQ_LEN="$2"; shift 2;;
     --stages)        STAGES="$2"; shift 2;;
     --formats)       FORMATS="$2"; shift 2;;
     --prompt-tokens) PROMPT="$2"; shift 2;;
@@ -96,8 +106,8 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$QUICK" -eq 1 ]; then
-  GEN=8; REPS=1; ENERGY=0
-  [ "$STAGES" = "prep,cross,sweep,aggregate" ] && STAGES="prep,cross,aggregate"
+  GEN=8; REPS=1; ENERGY=0; TRAIN_STEPS=2; TRAIN_SEQ_LEN=8
+  [ "$STAGES" = "prep,cross,sweep,train,aggregate" ] && STAGES="prep,cross,train,aggregate"
 fi
 [ "$ENERGY" -eq 1 ] && [ "$QUICK" -eq 1 ] && ENERGY=0
 
@@ -155,6 +165,10 @@ if [ -z "$MODELS" ]; then
   done
 fi
 [ -n "$MODELS" ] || { echo "no models found under models/" >&2; exit 1; }
+if [ ! -d "models/$TRAIN_MODELS" ]; then
+  first_model="${MODELS%%,*}"
+  [ -d "models/$first_model" ] && TRAIN_MODELS="$first_model"
+fi
 
 RUN_DIR="$OUT/$(date +%m-%d-%Y-%H%M)-$NAME"
 mkdir -p "$RUN_DIR/raw" "$RUN_DIR/energy" "$RUN_DIR/models" "$RUN_DIR/engines"
@@ -394,6 +408,35 @@ sweep_model() {
   done
 }
 
+train_model() {
+  local stem="$1"
+  echo "== train $stem =="
+  for prec in bf16 fp32; do
+    for B in 1 4; do
+      local cfg="${prec}_b${B}"
+      local dir="$RUN_DIR/raw/$stem"
+      local ref="$dir/ref/train_ref__${cfg}.json"
+      local out="$dir/train__${cfg}.json"
+      mkdir -p "$dir/ref"
+      "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
+        --seq-len "$TRAIN_SEQ_LEN" --steps 3 --warmup 0 --batch-size "$B" \
+        --out "$ref" >/dev/null 2>&1 || { echo "  FAILED ref $stem $cfg"; continue; }
+      if [ "$HAVE_ENERGY" -eq 1 ]; then
+        energy_exec "$out" "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
+          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" \
+          --parity-steps 2 --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
+          || echo "  FAILED parity $stem $cfg"
+      else
+        "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
+          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" \
+          --parity-steps 2 --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
+          || echo "  FAILED parity $stem $cfg"
+      fi
+      echo "  $cfg"
+    done
+  done
+}
+
 publish_run() {
   local name; name="$(basename "$RUN_DIR")"
   echo
@@ -455,10 +498,13 @@ done
 for stem in ${MODELS//,/ }; do
   want_stage sweep && sweep_model "$stem"
 done
+for stem in ${TRAIN_MODELS//,/ }; do
+  want_stage train && train_model "$stem"
+done
 if want_stage aggregate; then
   echo
   "$BENCH_PY" bench/compare/collect.py --run-dir "$RUN_DIR" --settings \
-      "prompt_cap=$PROMPT,gen=$GEN,reps=$REPS,formats=$FORMATS,stages=$STAGES" || \
+      "prompt_cap=$PROMPT,gen=$GEN,reps=$REPS,formats=$FORMATS,stages=$STAGES,train_steps=$TRAIN_STEPS,train_seq=$TRAIN_SEQ_LEN" || \
     echo "aggregate failed" >&2
   if [ "$PUBLISH" -eq 1 ] && [ "$QUICK" -eq 0 ] && [ "$DRY" -eq 0 ]; then
     publish_run
