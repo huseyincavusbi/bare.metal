@@ -6,6 +6,7 @@
 #include "baremetal/checkpoint.h"
 #include "baremetal/config.h"
 #include "baremetal/json.h"
+#include "baremetal/graph.h"
 #include "utils/log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -182,6 +183,19 @@ static void bmt_st_close(bmt_st_file_t* sf) {
     free(sf);
 }
 
+typedef struct {
+    bmt_st_file_t** files;
+    int count;
+    int cap;
+} bmt_st_set_t;
+
+static void bmt_st_set_close(bmt_st_set_t* set);
+
+static void bmt_st_close_void(void* p) {
+    bmt_st_set_close((bmt_st_set_t*)p);
+    free(p);
+}
+
 static void* bmt_st_get_tensor(bmt_st_file_t* sf, const char* name, size_t* out_size, int* out_is_bf16) {
     for (int i = 0; i < sf->n_entries; i++) {
         if (strcmp(sf->entries[i].name, name) == 0) {
@@ -192,12 +206,6 @@ static void* bmt_st_get_tensor(bmt_st_file_t* sf, const char* name, size_t* out_
     }
     return NULL;
 }
-
-typedef struct {
-    bmt_st_file_t** files;
-    int count;
-    int cap;
-} bmt_st_set_t;
 
 static char* read_text_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -458,10 +466,25 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
         return -1;
     }
 
+#ifndef BAREMETAL_TRAIN
+    int stream = 1;
+#else
+    int stream = 0;
+#endif
     // Allocate model buffers
-    if (bmt_model_alloc_buffers(model, &arch) != 0) {
+    if (bmt_model_alloc_buffers_ex(model, &arch, stream) != 0) {
         bmt_st_set_close(&set);
         return -1;
+    }
+    if (stream) {
+        int src_cap = 0;
+        for (int i = 0; i < set.count; i++) src_cap += set.files[i]->n_entries;
+        model->weight_srcs = malloc((size_t)src_cap * sizeof(bmt_weight_src_t));
+        if (!model->weight_srcs) {
+            bmt_st_set_close(&set);
+            bmt_model_free_buffers(model);
+            return -1;
+        }
     }
 
     int L = arch.n_layers, D = arch.dim, H = arch.hidden_dim, V = arch.vocab_size;
@@ -473,9 +496,35 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     int load_errors = 0;
     int loaded = 0;
 
-    #define CPT(name, ptr, count) do { \
-        (void)bmt_st_load_tensor(&set, (name), (ptr), (size_t)(count), \
-                                 &missing, &load_errors, &loaded); \
+    #define CPT(name, dstp, count) do { \
+        if (stream) { \
+            size_t sz = 0; int bf16 = 0; \
+            void* raw = bmt_st_set_find(&set, (name), &sz, &bf16); \
+            if (!raw) { \
+                missing_add(&missing, (name)); \
+            } else if (sz != (size_t)(count) * (bf16 ? 2u : 4u)) { \
+                BMT_LOG_ERROR("tensor %s: %zu bytes, expected %zu (%s)", \
+                              (name), sz, (size_t)(count) * (bf16 ? 2u : 4u), bf16 ? "bf16" : "f32"); \
+                load_errors++; \
+            } else { \
+                bmt_weight_src_t* src = &model->weight_srcs[model->n_weight_srcs++]; \
+                src->offset = (size_t)((char*)(dstp) - (char*)model->weight_buffer); \
+                src->ptr = raw; \
+                src->is_bf16 = bf16; \
+                if ((void*)(dstp) == (void*)model->token_embedding_table) { \
+                    if (bf16) { \
+                        const uint16_t* s16 = (const uint16_t*)raw; \
+                        for (size_t i = 0; i < (size_t)(count); i++) ((float*)(dstp))[i] = bf16_to_f32(s16[i]); \
+                    } else { \
+                        memcpy((void*)(dstp), raw, (size_t)(count) * sizeof(float)); \
+                    } \
+                } \
+                loaded++; \
+            } \
+        } else { \
+            (void)bmt_st_load_tensor(&set, (name), (dstp), (size_t)(count), \
+                                     &missing, &load_errors, &loaded); \
+        } \
     } while (0)
 
     const bmt_tensor_map_t* t = spec->tensors;
@@ -593,8 +642,41 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
         return -1;
     }
 
-    bmt_st_set_close(&set);
-    BMT_LOG_INFO("Loaded safetensors: %s (%zu params, %d shard(s), %d tensors)",
-                 dir_path, model->n_parameters, shards, loaded);
+    if (stream) {
+        bmt_st_set_t* heap = malloc(sizeof(*heap));
+        if (!heap) {
+            bmt_st_set_close(&set);
+            bmt_model_free_buffers(model);
+            return -1;
+        }
+        *heap = set;
+        model->stream_set = heap;
+        model->stream_close = bmt_st_close_void;
+    } else {
+        bmt_st_set_close(&set);
+    }
+    BMT_LOG_INFO("Loaded safetensors: %s (%zu params, %d shard(s), %d tensors, %s)",
+                 dir_path, model->n_parameters, shards, loaded,
+                 stream ? "streaming" : "staged");
     return 0;
+}
+
+void bmt_checkpoint_bind_sources(bm_model_t* model) {
+    if (!model || !model->graph || !model->weight_srcs) return;
+    bmt_graph_t* g = (bmt_graph_t*)model->graph;
+    int missing = 0;
+    for (int i = 0; i < g->n_tensors; i++) {
+        bmt_tensor_t* t = &g->tensors[i];
+        if (t->type != BMT_TENSOR_TYPE_WEIGHT || !t->weight_ptr) continue;
+        size_t off = (size_t)((char*)t->weight_ptr - (char*)model->weight_buffer);
+        for (int j = 0; j < model->n_weight_srcs; j++) {
+            if (model->weight_srcs[j].offset == off) {
+                t->src_ptr = model->weight_srcs[j].ptr;
+                t->src_is_bf16 = model->weight_srcs[j].is_bf16;
+                break;
+            }
+        }
+        if (!t->src_ptr) missing++;
+    }
+    BMT_LOG_INFO("Streaming bind: %d weights, %d missing", model->n_weight_srcs, missing);
 }
