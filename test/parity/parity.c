@@ -108,21 +108,23 @@ int main(int argc, char** argv) {
     const char* fixture_path = NULL;
     const char* prec_arg = NULL;
     int max_gen = 0;
+    int max_seq = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_dir = argv[++i];
         else if (strcmp(argv[i], "--fixture") == 0 && i + 1 < argc) fixture_path = argv[++i];
         else if (strcmp(argv[i], "--precision") == 0 && i + 1 < argc) prec_arg = argv[++i];
         else if (strcmp(argv[i], "--gen") == 0 && i + 1 < argc) max_gen = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--max-seq") == 0 && i + 1 < argc) max_seq = atoi(argv[++i]);
         else {
             fprintf(stderr,
-                    "usage: %s --model DIR --fixture FILE [--precision fp32|fp16|bf16] [--gen N]\n",
+                    "usage: %s --model DIR --fixture FILE [--precision fp32|fp16|bf16] [--gen N] [--max-seq N]\n",
                     argv[0]);
             return 2;
         }
     }
     if (!model_dir || !fixture_path) {
-        fprintf(stderr, "usage: %s --model DIR --fixture FILE [--precision P] [--gen N]\n", argv[0]);
+        fprintf(stderr, "usage: %s --model DIR --fixture FILE [--precision P] [--gen N] [--max-seq N]\n", argv[0]);
         return 2;
     }
 
@@ -200,6 +202,7 @@ int main(int argc, char** argv) {
         bm_destroy(ctx);
         return 1;
     }
+    if (max_seq > 0) m->arch.max_seq_len = max_seq;
     m->precision = precision;
     bm_compile(m);
     bm_session_t* sess = bm_create_session(ctx, m);
