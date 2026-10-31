@@ -14,10 +14,14 @@ typedef struct bmt_scheduler_s bmt_scheduler_t;
 
 bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers);
 bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads);
+bmt_scheduler_t* bmt_scheduler_create_shared(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src);
 void bmt_scheduler_set_precision(bmt_scheduler_t* sched, bm_precision_t precision);
 void bmt_scheduler_destroy(bmt_scheduler_t* sched);
 void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len);
 void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S);
+void bmt_scheduler_set_prefill(bmt_scheduler_t* sched, int enabled);
+void bmt_scheduler_copy_prefill_kv(bmt_scheduler_t* dst, bmt_scheduler_t* src,
+                                   int S, const int* k_ids, const int* v_ids);
 
 /* Backward walk: reverse topological order, dispatch each node's backward
  * kernel using the forward activations (in buffers[]) + gradient buffers.
