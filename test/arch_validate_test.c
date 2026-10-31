@@ -117,6 +117,12 @@ int main(void) {
     failures += expect_reject("rope_scaling", base_arch(), 1);
 
     arch = base_arch();
+    arch.rope_scaling = BM_ROPE_LLAMA3;
+    rc = bmt_arch_validate(&arch, 1);
+    printf("%s: llama3 rope scaling accepted\n", rc == 0 ? "PASS" : "FAIL");
+    if (rc != 0) failures++;
+
+    arch = base_arch();
     arch.bias = 1;
     arch.has_qk_norm = 1;
     failures += expect_reject("multiple features", arch, 1);
