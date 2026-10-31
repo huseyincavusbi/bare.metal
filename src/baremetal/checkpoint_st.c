@@ -468,6 +468,8 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
 
 #ifndef BAREMETAL_TRAIN
     int stream = 1;
+    const char* no_stream = getenv("BM_NO_STREAM");
+    if (no_stream && *no_stream) stream = 0;
 #else
     int stream = 0;
 #endif
@@ -513,8 +515,14 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
                 src->is_bf16 = bf16; \
                 if ((void*)(dstp) == (void*)model->token_embedding_table) { \
                     if (bf16) { \
-                        const uint16_t* s16 = (const uint16_t*)raw; \
-                        for (size_t i = 0; i < (size_t)(count); i++) ((float*)(dstp))[i] = bf16_to_f32(s16[i]); \
+                        size_t eb = (size_t)(count) * sizeof(bm_bf16_t); \
+                        model->token_embedding_bf16 = malloc(eb); \
+                        if (model->token_embedding_bf16) { \
+                            memcpy(model->token_embedding_bf16, raw, eb); \
+                        } else { \
+                            const uint16_t* s16 = (const uint16_t*)raw; \
+                            for (size_t i = 0; i < (size_t)(count); i++) ((float*)(dstp))[i] = bf16_to_f32(s16[i]); \
+                        } \
                     } else { \
                         memcpy((void*)(dstp), raw, (size_t)(count) * sizeof(float)); \
                     } \
