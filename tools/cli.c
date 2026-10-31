@@ -26,6 +26,15 @@ extern int bm_run_tokens(bm_context_t* ctx, bm_model_t* model,
                          int steps, float temperature, int top_k, float top_p,
                          uint64_t seed, bm_token_cb_t callback, void* user_data);
 
+static int load_model_or_fail(bm_model_t* model, const char* path) {
+    bm_load_weights(model, path);
+    if (!model->weight_buffer) {
+        fprintf(stderr, "error: failed to load weights from %s\n", path);
+        return -1;
+    }
+    return 0;
+}
+
 #ifdef BAREMETAL_TRAIN
 static double get_time_ms(void) {
     struct timeval tv;
@@ -320,7 +329,12 @@ static int cmd_run_tokens(int argc, char** argv) {
 
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
     bm_model_t* model = calloc(1, sizeof(*model));
-    bm_load_weights(model, ckpt_path);
+    if (load_model_or_fail(model, ckpt_path) != 0) {
+        free(prompt_ids);
+        bm_destroy_model(model);
+        bm_destroy(ctx);
+        return 1;
+    }
     bm_print_model_info(model);
 
     token_collector_t collector = {NULL, 0, 0};
@@ -351,7 +365,11 @@ static int cmd_tok_test(int argc, char** argv) {
 
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
     bm_model_t* model = calloc(1, sizeof(*model));
-    bm_load_weights(model, model_dir);
+    if (load_model_or_fail(model, model_dir) != 0) {
+        bm_destroy_model(model);
+        bm_destroy(ctx);
+        return 1;
+    }
 
     bm_tokenizer_t tok;
     bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
@@ -423,7 +441,11 @@ static int cmd_train(int argc, char** argv) {
 
     bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
     bm_model_t* model = calloc(1, sizeof(*model));
-    bm_load_weights(model, model_dir);
+    if (load_model_or_fail(model, model_dir) != 0) {
+        bm_destroy_model(model);
+        bm_destroy(ctx);
+        return 1;
+    }
     bm_print_model_info(model);
 
     bm_tokenizer_t tok;
@@ -541,7 +563,11 @@ int main(int argc, char** argv) {
         if (argc < 3) { print_usage(argv[0]); return 1; }
         bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
         bm_model_t* model = calloc(1, sizeof(*model));
-        bm_load_weights(model, argv[2]);
+        if (load_model_or_fail(model, argv[2]) != 0) {
+            bm_destroy_model(model);
+            bm_destroy(ctx);
+            return 1;
+        }
         bm_print_model_info(model);
         bm_destroy_model(model);
         bm_destroy(ctx);
@@ -582,7 +608,11 @@ int main(int argc, char** argv) {
 
         bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
         bm_model_t* model = calloc(1, sizeof(*model));
-        bm_load_weights(model, model_dir);
+        if (load_model_or_fail(model, model_dir) != 0) {
+            bm_destroy_model(model);
+            bm_destroy(ctx);
+            return 1;
+        }
         model->quant_bits = quant;
         if (prec_str) {
             if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;

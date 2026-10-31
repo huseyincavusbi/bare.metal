@@ -30,5 +30,8 @@ int               bmt_json_bool(const bmt_json_t* value, int* out);
 const char*       bmt_json_string(const bmt_json_t* value);
 int               bmt_json_array_count(const bmt_json_t* value);
 const bmt_json_t* bmt_json_array_get(const bmt_json_t* value, int index);
+int               bmt_json_object_count(const bmt_json_t* value);
+const char*       bmt_json_object_key(const bmt_json_t* value, int index);
+const bmt_json_t* bmt_json_object_value(const bmt_json_t* value, int index);
 
 #endif
