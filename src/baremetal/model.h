@@ -51,9 +51,23 @@ struct bm_model_s {
     void*    graph;
 
     int      quant_bits;  /* 0 = fp, 8 = Q8, 4 = Q4 */
+
+    int      weight_is_mmap;
+    size_t   weight_map_size;
+    struct bmt_weight_src_s* weight_srcs;
+    int      n_weight_srcs;
+    void*    stream_set;
+    void     (*stream_close)(void*);
 };
 
+typedef struct bmt_weight_src_s {
+    size_t     offset;
+    const void* ptr;
+    int        is_bf16;
+} bmt_weight_src_t;
+
 int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);
+int  bmt_model_alloc_buffers_ex(bm_model_t* model, const bm_arch_t* arch, int use_mmap);
 void bmt_model_free_buffers(bm_model_t* model);
 void bmt_model_release_host_weights(bm_model_t* model);
 int  bmt_model_load_weights(bm_model_t* model, const char* path);
