@@ -39,6 +39,7 @@
 #   BENCH_VENV_HOME  dir with bench-venv + gguf-venv + llama.cpp (default ~/.cache/baremetal)
 #   PYTHON           python for the adapters        (default bench-venv python)
 #   PEAK_GBPS / PEAK_GFLOPPS  device peaks for % of peak (default M4: 120 / 4200)
+#   BENCH_MAX_SEQ  cap bare.metal KV/context (optional; e.g. 2048)
 #   BENCH_RESULTS_REPO  results repo slug  (default huseyincavusbi/bare.metal-benchmarks)
 #   BENCH_RESULTS_DIR   results checkout   (default $BENCH_VENV_HOME/benchmarks-repo)
 set -uo pipefail
@@ -68,6 +69,9 @@ QUICK=0
 DRY=0
 PEAK_GBPS="${PEAK_GBPS:-120}"
 PEAK_GFLOPPS="${PEAK_GFLOPPS:-4200}"
+MAX_SEQ="${BENCH_MAX_SEQ:-}"
+MAX_SEQ_ARG=""
+[ -n "$MAX_SEQ" ] && MAX_SEQ_ARG="--max-seq $MAX_SEQ"
 
 usage() { sed -n '2,43p' "$0"; }
 
@@ -340,7 +344,7 @@ cross_model() {
       # shellcheck disable=SC2086
       run_engine "$out/bare.metal__$fmt.json" "$BENCH" --model "models/$stem" --seed 42 \
         --prompt-tokens "$PROMPT" --raw-prompt --gen "$GEN" --warmup 1 --reps "$REPS" \
-        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$fmt") \
+        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$fmt") $MAX_SEQ_ARG \
         --out "$out/bare.metal__$fmt.json"
     fi
     # llama.cpp
@@ -381,11 +385,11 @@ sweep_model() {
     if [ "$HAVE_ENERGY" -eq 1 ]; then
       energy_exec "$out" "$BENCH" --model "models/$stem" --seed 42 \
         --prompt-tokens "$p" --gen "$GEN" --warmup 1 --reps "$REPS" \
-        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$pr") --out "$out"
+        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$pr") $MAX_SEQ_ARG --out "$out"
     else
       "$BENCH" --model "models/$stem" --seed 42 \
         --prompt-tokens "$p" --gen "$GEN" --warmup 1 --reps "$REPS" \
-        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$pr") --out "$out" >/dev/null
+        --peak-gbps "$PEAK_GBPS" --peak-gflops "$PEAK_GFLOPPS" $(bare_args_for "$pr") $MAX_SEQ_ARG --out "$out" >/dev/null
     fi
   done
 }
