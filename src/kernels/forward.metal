@@ -44,6 +44,52 @@ kernel void matmul_forward_naive(
 // Reads bf16, casts to float for computation, outputs float.
 // ----------------------------------------------------------------
 #if __HAVE_BFLOAT__
+kernel void matmul_forward_bf16_vec(
+    device const float* inp [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    const device bfloat* wrow = weight + (size_t)oc * C;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    if ((C & 3) == 0) {
+        int n4 = C >> 2;
+        const device bfloat4* w4 = (const device bfloat4*)wrow;
+        const device float4* x4 = (const device float4*)x;
+        for (int i = tid; i < n4; i += tptg) {
+            bfloat4 wv = w4[i];
+            float4 xv = x4[i];
+            sum += xv.x * (float)wv.x + xv.y * (float)wv.y
+                 + xv.z * (float)wv.z + xv.w * (float)wv.w;
+        }
+    } else {
+        for (int i = tid; i < C; i += tptg)
+            sum += x[i] * (float)wrow[i];
+    }
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid3.x & 31, sg = tid3.x >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = (tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
+
 kernel void matmul_forward_bf16(
     device const float* inp [[buffer(0)]],
     device const bfloat* weight [[buffer(1)]],
@@ -68,6 +114,52 @@ kernel void matmul_forward_bf16(
 // Same as naive but weights stored as fp16 (2x memory savings).
 // Reads half, casts to float for computation, outputs float.
 // ----------------------------------------------------------------
+kernel void matmul_forward_fp16_vec(
+    device const float* inp [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    const device half* wrow = weight + (size_t)oc * C;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    if ((C & 3) == 0) {
+        int n4 = C >> 2;
+        const device half4* w4 = (const device half4*)wrow;
+        const device float4* x4 = (const device float4*)x;
+        for (int i = tid; i < n4; i += tptg) {
+            half4 wv = w4[i];
+            float4 xv = x4[i];
+            sum += xv.x * (float)wv.x + xv.y * (float)wv.y
+                 + xv.z * (float)wv.z + xv.w * (float)wv.w;
+        }
+    } else {
+        for (int i = tid; i < C; i += tptg)
+            sum += x[i] * (float)wrow[i];
+    }
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid3.x & 31, sg = tid3.x >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = (tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
+
 kernel void matmul_forward_fp16(
     device const float* inp [[buffer(0)]],
     device const half* weight [[buffer(1)]],
@@ -159,6 +251,56 @@ typedef struct {
     char  q[32];
 } q8_block_metal;  // 36 bytes — must match C q8_block_t layout
 
+kernel void matmul_forward_q8_vec(
+    device const float* inp [[buffer(0)]],
+    device const q8_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    int nblocks = C / 32;
+    const device q8_block_metal* wrow = weight + (size_t)oc * nblocks;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    if ((C & 3) == 0) {
+        int n4 = C >> 2;
+        const device float4* x4 = (const device float4*)x;
+        for (int g = tid; g < n4; g += tptg) {
+            int idx = g << 2;
+            int b = idx >> 5, j = idx & 31;
+            char4 qv = *(const device char4*)(wrow[b].q + j);
+            float4 xv = x4[g];
+            sum += (xv.x * (float)qv.x + xv.y * (float)qv.y
+                  + xv.z * (float)qv.z + xv.w * (float)qv.w) * wrow[b].scale;
+        }
+    } else {
+        for (int idx = tid; idx < C; idx += tptg) {
+            int b = idx >> 5, j = idx & 31;
+            sum += x[idx] * ((float)wrow[b].q[j] * wrow[b].scale);
+        }
+    }
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid3.x & 31, sg = tid3.x >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = (tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
+
 kernel void matmul_forward_q8(
     device const float* inp [[buffer(0)]],
     device const q8_block_metal* weight [[buffer(1)]],
@@ -192,6 +334,177 @@ typedef struct {
     float   scale;
     uchar   qs[16];
 } q4_block_metal;  // 20 bytes — must match C q4_block_t layout
+
+static inline float dot8_nibbles(float4 x0, float4 x1, uchar4 bytes) {
+    int q0 = (int)(char)(bytes.x << 4) >> 4;
+    int q1 = (int)(char)bytes.x >> 4;
+    int q2 = (int)(char)(bytes.y << 4) >> 4;
+    int q3 = (int)(char)bytes.y >> 4;
+    int q4 = (int)(char)(bytes.z << 4) >> 4;
+    int q5 = (int)(char)bytes.z >> 4;
+    int q6 = (int)(char)(bytes.w << 4) >> 4;
+    int q7 = (int)(char)bytes.w >> 4;
+    return x0.x * q0 + x0.y * q1 + x0.z * q2 + x0.w * q3
+         + x1.x * q4 + x1.y * q5 + x1.z * q6 + x1.w * q7;
+}
+
+kernel void matmul_forward_q4_vec4(
+    device const float* inp [[buffer(0)]],
+    device const q4_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc0 = (int)tgid.x * 4, bt = (int)tgid.y;
+    if (bt >= BT || oc0 >= OC) return;
+    int nr = OC - oc0; if (nr > 4) nr = 4;
+    int i1 = oc0 + 1 < OC ? oc0 + 1 : OC - 1;
+    int i2 = oc0 + 2 < OC ? oc0 + 2 : OC - 1;
+    int i3 = oc0 + 3 < OC ? oc0 + 3 : OC - 1;
+    int nblocks = C / 32;
+    const device q4_block_metal* w0 = weight + (size_t)oc0 * nblocks;
+    const device q4_block_metal* w1 = weight + (size_t)i1 * nblocks;
+    const device q4_block_metal* w2 = weight + (size_t)i2 * nblocks;
+    const device q4_block_metal* w3 = weight + (size_t)i3 * nblocks;
+    const device float* x = inp + bt * C;
+
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+    if ((C & 7) == 0) {
+        int n8 = C >> 3;
+        const device float4* x4 = (const device float4*)x;
+        for (int g = tid; g < n8; g += tptg) {
+            int idx = g << 3;
+            int b = idx >> 5, j = idx & 31;
+            float4 x0 = x4[g * 2];
+            float4 x1 = x4[g * 2 + 1];
+            uchar4 b0 = *(const device uchar4*)(w0[b].qs + (j >> 1));
+            a0 += w0[b].scale * dot8_nibbles(x0, x1, b0);
+            if (nr > 1) {
+                uchar4 b1 = *(const device uchar4*)(w1[b].qs + (j >> 1));
+                a1 += w1[b].scale * dot8_nibbles(x0, x1, b1);
+            }
+            if (nr > 2) {
+                uchar4 b2 = *(const device uchar4*)(w2[b].qs + (j >> 1));
+                a2 += w2[b].scale * dot8_nibbles(x0, x1, b2);
+            }
+            if (nr > 3) {
+                uchar4 b3 = *(const device uchar4*)(w3[b].qs + (j >> 1));
+                a3 += w3[b].scale * dot8_nibbles(x0, x1, b3);
+            }
+        }
+    } else {
+        for (int idx = tid; idx < C; idx += tptg) {
+            int b = idx >> 5, j = idx & 31;
+            float xv = x[idx];
+            uchar byte0 = w0[b].qs[j >> 1];
+            int q0 = (j & 1) ? ((int)(char)byte0 >> 4) : ((int)(char)(byte0 << 4) >> 4);
+            a0 += xv * ((float)q0 * w0[b].scale);
+            if (nr > 1) {
+                uchar byte1 = w1[b].qs[j >> 1];
+                int q1 = (j & 1) ? ((int)(char)byte1 >> 4) : ((int)(char)(byte1 << 4) >> 4);
+                a1 += xv * ((float)q1 * w1[b].scale);
+            }
+            if (nr > 2) {
+                uchar byte2 = w2[b].qs[j >> 1];
+                int q2 = (j & 1) ? ((int)(char)byte2 >> 4) : ((int)(char)(byte2 << 4) >> 4);
+                a2 += xv * ((float)q2 * w2[b].scale);
+            }
+            if (nr > 3) {
+                uchar byte3 = w3[b].qs[j >> 1];
+                int q3 = (j & 1) ? ((int)(char)byte3 >> 4) : ((int)(char)(byte3 << 4) >> 4);
+                a3 += xv * ((float)q3 * w3[b].scale);
+            }
+        }
+    }
+
+    a0 = simd_sum(a0); a1 = simd_sum(a1);
+    a2 = simd_sum(a2); a3 = simd_sum(a3);
+    threadgroup float red[4][32];
+    uint lane = tid & 31, sg = tid >> 5;
+    if (lane == 0) { red[0][sg] = a0; red[1][sg] = a1; red[2][sg] = a2; red[3][sg] = a3; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float t0 = 0.0f, t1 = 0.0f, t2 = 0.0f, t3 = 0.0f;
+        int nsg = (tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) {
+            t0 += red[0][i]; t1 += red[1][i]; t2 += red[2][i]; t3 += red[3][i];
+        }
+        int base = bt * OC + oc0;
+        out[base] = t0 + (has_bias ? bias[oc0] : 0.0f);
+        if (nr > 1) out[base + 1] = t1 + (has_bias ? bias[i1] : 0.0f);
+        if (nr > 2) out[base + 2] = t2 + (has_bias ? bias[i2] : 0.0f);
+        if (nr > 3) out[base + 3] = t3 + (has_bias ? bias[i3] : 0.0f);
+    }
+}
+
+kernel void matmul_forward_q4_vec(
+    device const float* inp [[buffer(0)]],
+    device const q4_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    int nblocks = C / 32;
+    const device q4_block_metal* wrow = weight + (size_t)oc * nblocks;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    if ((C & 7) == 0) {
+        int n8 = C >> 3;
+        const device float4* x4 = (const device float4*)x;
+        for (int g = (int)tid; g < n8; g += (int)tptg) {
+            int idx = g << 3;
+            int b = idx >> 5, j = idx & 31;
+            float s = wrow[b].scale;
+            uchar4 bytes = *(const device uchar4*)(wrow[b].qs + (j >> 1));
+            float4 x0 = x4[g * 2];
+            float4 x1 = x4[g * 2 + 1];
+            int q0 = (int)(char)(bytes.x << 4) >> 4;
+            int q1 = (int)(char)bytes.x >> 4;
+            int q2 = (int)(char)(bytes.y << 4) >> 4;
+            int q3 = (int)(char)bytes.y >> 4;
+            int q4v = (int)(char)(bytes.z << 4) >> 4;
+            int q5 = (int)(char)bytes.z >> 4;
+            int q6 = (int)(char)(bytes.w << 4) >> 4;
+            int q7 = (int)(char)bytes.w >> 4;
+            sum += s * (x0.x * q0 + x0.y * q1 + x0.z * q2 + x0.w * q3
+                      + x1.x * q4v + x1.y * q5 + x1.z * q6 + x1.w * q7);
+        }
+    } else {
+        for (int idx = (int)tid; idx < C; idx += (int)tptg) {
+            int b = idx >> 5, j = idx & 31;
+            float s = wrow[b].scale;
+            uchar byte = wrow[b].qs[j >> 1];
+            int q = (j & 1) ? ((int)(char)byte >> 4)
+                            : ((int)(char)(byte << 4) >> 4);
+            sum += x[idx] * ((float)q * s);
+        }
+    }
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid & 31, sg = tid >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = ((int)tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
 
 kernel void matmul_forward_q4(
     device const float* inp [[buffer(0)]],
@@ -678,6 +991,33 @@ kernel void rope_forward(
     }
 }
 
+// kv_store: write the current token's roped K/V into the decode cache.
+// buffers: [0]=kv cache [1]=k [2]=v [3]=params{layer,pos,max_seq,kv_dim}
+kernel void kv_store(
+    device float* kvc          [[buffer(0)]],
+    device const float* k      [[buffer(1)]],
+    device const float* v      [[buffer(2)]],
+    constant int* p            [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int layer = p[0], pos = p[1], MS = p[2], KV = p[3];
+    if ((int)gid >= KV) return;
+    size_t base = ((size_t)layer * 2 * MS + pos) * KV + gid;
+    kvc[base] = k[gid];
+    kvc[base + (size_t)MS * KV] = v[gid];
+}
+
+// add_forward: elementwise residual add.
+kernel void add_forward(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* out     [[buffer(2)]],
+    constant int& n       [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid < n) out[gid] = a[gid] + b[gid];
+}
+
 // ----------------------------------------------------------------
 // attention_forward
 // One threadgroup per query head. Within each threadgroup:
@@ -841,6 +1181,111 @@ kernel void attention_forward_flash(
 // Computes out = matmul(rmsnorm(inp, norm_weight, eps), wcls)
 // Saves a D-element VRAM roundtrip.
 // ----------------------------------------------------------------
+#if __HAVE_BFLOAT__
+kernel void rmsnorm_matmul_forward_bf16_vec(
+    device const float* inp [[buffer(0)]],
+    device const float* norm_weight [[buffer(1)]],
+    device const bfloat* wcls [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* p [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int C = p[0], V = p[1];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    threadgroup float sx[4096];
+
+    float ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = inp[j];
+        sx[j] = v;
+        ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        ss += simd_shuffle_down(ss, (ushort)off);
+
+    threadgroup float rb[32];
+    if ((tid & 31) == 0) rb[tid >> 5] = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? rb[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) rb[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv = 1.0f / sqrt((rb[0] / (float)C) + eps);
+    for (int j = tid; j < C; j += tptg)
+        sx[j] = sx[j] * inv * norm_weight[j];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int warp = tid >> 5, lane = tid & 31;
+    int oc = (int)tgid.x * 16 + warp;
+    if (oc >= V) return;
+    const device bfloat* row = wcls + (size_t)oc * C;
+    float sum = 0.0f;
+    for (int j = lane; j < C; j += 32)
+        sum += sx[j] * (float)row[j];
+    sum = simd_sum(sum);
+    if (lane == 0) out[oc] = sum;
+}
+
+#endif
+
+kernel void rmsnorm_matmul_forward_fp16_vec(
+    device const float* inp [[buffer(0)]],
+    device const float* norm_weight [[buffer(1)]],
+    device const half* wcls [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* p [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int C = p[0], V = p[1];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    threadgroup float sx[4096];
+
+    float ss = 0.0f;
+    for (int j = tid; j < C; j += tptg) {
+        float v = inp[j];
+        sx[j] = v;
+        ss += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        ss += simd_shuffle_down(ss, (ushort)off);
+
+    threadgroup float rb[32];
+    if ((tid & 31) == 0) rb[tid >> 5] = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float v = (tid < (tptg + 31) / 32) ? rb[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1)
+            v += simd_shuffle_down(v, (ushort)off);
+        if (tid == 0) rb[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv = 1.0f / sqrt((rb[0] / (float)C) + eps);
+    for (int j = tid; j < C; j += tptg)
+        sx[j] = sx[j] * inv * norm_weight[j];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int warp = tid >> 5, lane = tid & 31;
+    int oc = (int)tgid.x * 16 + warp;
+    if (oc >= V) return;
+    const device half* row = wcls + (size_t)oc * C;
+    float sum = 0.0f;
+    for (int j = lane; j < C; j += 32)
+        sum += sx[j] * (float)row[j];
+    sum = simd_sum(sum);
+    if (lane == 0) out[oc] = sum;
+}
+
 kernel void rmsnorm_matmul_forward(
     device const float* inp [[buffer(0)]],
     device const float* norm_weight [[buffer(1)]],
