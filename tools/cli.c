@@ -388,7 +388,7 @@ static int cmd_tok_test(int argc, char** argv) {
 
     printf("decoded:");
     for (int i = 0; i < n_tokens; i++) {
-        char* d = bm_tokenizer_decode(&tok, i > 0 ? tokens[i-1] : 0, tokens[i]);
+        char* d = bm_tokenizer_decode(&tok, i > 0 ? tokens[i-1] : 1, tokens[i]);
         printf("%s", d);
     }
     printf("\n");
