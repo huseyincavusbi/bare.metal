@@ -678,6 +678,33 @@ kernel void rope_forward(
     }
 }
 
+// kv_store: write the current token's roped K/V into the decode cache.
+// buffers: [0]=kv cache [1]=k [2]=v [3]=params{layer,pos,max_seq,kv_dim}
+kernel void kv_store(
+    device float* kvc          [[buffer(0)]],
+    device const float* k      [[buffer(1)]],
+    device const float* v      [[buffer(2)]],
+    constant int* p            [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int layer = p[0], pos = p[1], MS = p[2], KV = p[3];
+    if ((int)gid >= KV) return;
+    size_t base = ((size_t)layer * 2 * MS + pos) * KV + gid;
+    kvc[base] = k[gid];
+    kvc[base + (size_t)MS * KV] = v[gid];
+}
+
+// add_forward: elementwise residual add.
+kernel void add_forward(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* out     [[buffer(2)]],
+    constant int& n       [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((int)gid < n) out[gid] = a[gid] + b[gid];
+}
+
 // ----------------------------------------------------------------
 // attention_forward
 // One threadgroup per query head. Within each threadgroup:
