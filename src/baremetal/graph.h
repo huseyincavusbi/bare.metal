@@ -27,6 +27,8 @@ typedef struct {
     int n_dims;
     void* weight_ptr;
     void* original_weight_ptr;
+    const void* src_ptr;  /* mmap-backed source for streaming loads */
+    int   src_is_bf16;
     int   quantized;   /* 0 = fp, 8 = upload Q8, 4 = upload Q4 */
 } bmt_tensor_t;
 
