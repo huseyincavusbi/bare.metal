@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 struct bmt_scheduler_s {
     backend_ctx_t* backend;
@@ -87,6 +90,23 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     return bmt_scheduler_create_with_precision(backend, reg, graph, max_seq_len, kv_dim, n_layers, BM_PRECISION_FP32, 1);
 }
 
+static void drop_source_pages(const void* p, size_t bytes) {
+    if (!p || !bytes) return;
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    uintptr_t start = (uintptr_t)p & ~((uintptr_t)ps - 1);
+    uintptr_t end = ((uintptr_t)p + bytes + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
+    madvise((void*)start, (size_t)(end - start), MADV_DONTNEED);
+}
+
+static const void* tensor_weight_src(const bmt_tensor_t* t) {
+    return t->src_ptr ? t->src_ptr : t->weight_ptr;
+}
+
+static int tensor_weight_src_bf16(const bmt_tensor_t* t) {
+    return t->src_ptr && t->src_is_bf16;
+}
+
 static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src) {
     bmt_scheduler_t* sched = calloc(1, sizeof(bmt_scheduler_t));
     sched->backend = backend;
@@ -117,54 +137,76 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
         if (n_elems == 0) n_elems = 1024;
         size_t fp32_bytes = n_elems * sizeof(float);
 
-        int do_q8 = (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr && t->quantized == 8
+        int do_q8 = (t->type == BMT_TENSOR_TYPE_WEIGHT && (t->weight_ptr || t->src_ptr) && t->quantized == 8
                      && t->n_dims == 2 && (t->dims[1] % 32 == 0));
-        int do_q4 = (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr && t->quantized == 4
+        int do_q4 = (t->type == BMT_TENSOR_TYPE_WEIGHT && (t->weight_ptr || t->src_ptr) && t->quantized == 4
                      && t->n_dims == 2 && (t->dims[1] % 32 == 0));
 
         int do_bf16 = (!do_q8 && !do_q4 && precision == BM_PRECISION_BF16
-                       && t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr
+                       && t->type == BMT_TENSOR_TYPE_WEIGHT && (t->weight_ptr || t->src_ptr)
                        && t->n_dims >= 2);
         int do_fp16 = (!do_q8 && !do_q4 && precision == BM_PRECISION_FP16
-                       && t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr
+                       && t->type == BMT_TENSOR_TYPE_WEIGHT && (t->weight_ptr || t->src_ptr)
                        && t->n_dims >= 2);
 
         if (do_q8) {
             size_t qbytes = bmt_q8_bytes(n_elems);
             sched->buffers[i] = backend_buffer_alloc(backend, qbytes);
             q8_block_t* dst = (q8_block_t*)backend_buffer_map(sched->buffers[i]);
-            bmt_quantize_q8((const float*)t->weight_ptr, dst, n_elems);
+            if (tensor_weight_src_bf16(t))
+                bmt_quantize_q8_bf16((const bm_bf16_t*)tensor_weight_src(t), dst, n_elems);
+            else
+                bmt_quantize_q8((const float*)tensor_weight_src(t), dst, n_elems);
             backend_buffer_unmap(sched->buffers[i]);
         } else if (do_q4) {
             size_t qbytes = bmt_q4_bytes(n_elems);
             sched->buffers[i] = backend_buffer_alloc(backend, qbytes);
             q4_block_t* dst = (q4_block_t*)backend_buffer_map(sched->buffers[i]);
-            bmt_quantize_q4((const float*)t->weight_ptr, dst, n_elems);
+            if (tensor_weight_src_bf16(t))
+                bmt_quantize_q4_bf16((const bm_bf16_t*)tensor_weight_src(t), dst, n_elems);
+            else
+                bmt_quantize_q4((const float*)tensor_weight_src(t), dst, n_elems);
             backend_buffer_unmap(sched->buffers[i]);
         } else if (do_bf16) {
             size_t bytes = n_elems * sizeof(bm_bf16_t);
             sched->buffers[i] = backend_buffer_alloc(backend, bytes);
             bm_bf16_t* dst = (bm_bf16_t*)backend_buffer_map(sched->buffers[i]);
-            bm_f32_to_bf16_array((const float*)t->weight_ptr, dst, n_elems);
+            if (tensor_weight_src_bf16(t))
+                memcpy(dst, tensor_weight_src(t), n_elems * sizeof(bm_bf16_t));
+            else
+                bm_f32_to_bf16_array((const float*)tensor_weight_src(t), dst, n_elems);
             backend_buffer_unmap(sched->buffers[i]);
         } else if (do_fp16) {
             size_t bytes = n_elems * sizeof(bm_fp16_t);
             sched->buffers[i] = backend_buffer_alloc(backend, bytes);
-            const float* src = (const float*)t->weight_ptr;
             bm_fp16_t* dst = (bm_fp16_t*)backend_buffer_map(sched->buffers[i]);
-            for (size_t j = 0; j < n_elems; j++) {
-                __fp16 h = (__fp16)src[j];
-                memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+            if (tensor_weight_src_bf16(t)) {
+                const bm_bf16_t* src = (const bm_bf16_t*)tensor_weight_src(t);
+                for (size_t j = 0; j < n_elems; j++) {
+                    __fp16 h = (__fp16)bm_bf16_to_f32(src[j]);
+                    memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+                }
+            } else {
+                const float* src = (const float*)tensor_weight_src(t);
+                for (size_t j = 0; j < n_elems; j++) {
+                    __fp16 h = (__fp16)src[j];
+                    memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+                }
             }
             backend_buffer_unmap(sched->buffers[i]);
         } else {
             sched->buffers[i] = backend_buffer_alloc(backend, fp32_bytes);
-            if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr) {
+            if (t->type == BMT_TENSOR_TYPE_WEIGHT && (t->weight_ptr || t->src_ptr)) {
                 void* dst = backend_buffer_map(sched->buffers[i]);
-                memcpy(dst, t->weight_ptr, fp32_bytes);
+                if (tensor_weight_src_bf16(t))
+                    bm_bf16_to_f32_array((const bm_bf16_t*)tensor_weight_src(t), (float*)dst, n_elems);
+                else
+                    memcpy(dst, tensor_weight_src(t), fp32_bytes);
                 backend_buffer_unmap(sched->buffers[i]);
             }
         }
+        if (t->src_ptr)
+            drop_source_pages(t->src_ptr, n_elems * (t->src_is_bf16 ? sizeof(bm_bf16_t) : sizeof(float)));
     }
 
     /* Gradient buffers: one per tensor, always fp32-sized (grads are fp32 even
@@ -316,7 +358,7 @@ void bmt_scheduler_set_precision(bmt_scheduler_t* sched, bm_precision_t precisio
     /* Re-upload weight tensors in the new precision */
     for (int i = 0; i < sched->graph->n_tensors; i++) {
         bmt_tensor_t* t = &sched->graph->tensors[i];
-        if (t->type != BMT_TENSOR_TYPE_WEIGHT || !t->weight_ptr) continue;
+        if (t->type != BMT_TENSOR_TYPE_WEIGHT || (!t->weight_ptr && !t->src_ptr)) continue;
         /* Skip Q8-quantized tensors (Q8 takes priority) */
         if (t->quantized) continue;
         /* Skip 1D tensors (norm weights stay fp32 for precision) */
@@ -332,17 +374,28 @@ void bmt_scheduler_set_precision(bmt_scheduler_t* sched, bm_precision_t precisio
             size_t bytes = n_elems * sizeof(bm_bf16_t);
             sched->buffers[i] = backend_buffer_alloc(sched->backend, bytes);
             bm_bf16_t* dst = (bm_bf16_t*)backend_buffer_map(sched->buffers[i]);
-            bm_f32_to_bf16_array((const float*)t->weight_ptr, dst, n_elems);
+            if (tensor_weight_src_bf16(t))
+                memcpy(dst, tensor_weight_src(t), n_elems * sizeof(bm_bf16_t));
+            else
+                bm_f32_to_bf16_array((const float*)tensor_weight_src(t), dst, n_elems);
             backend_buffer_unmap(sched->buffers[i]);
         } else if (precision == BM_PRECISION_FP16) {
             size_t bytes = n_elems * sizeof(bm_fp16_t);
             sched->buffers[i] = backend_buffer_alloc(sched->backend, bytes);
             /* fp16 conversion: use __fp16 hardware if available, else bit-cast */
-            const float* src = (const float*)t->weight_ptr;
             bm_fp16_t* dst = (bm_fp16_t*)backend_buffer_map(sched->buffers[i]);
-            for (size_t j = 0; j < n_elems; j++) {
-                __fp16 h = (__fp16)src[j];
-                memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+            if (tensor_weight_src_bf16(t)) {
+                const bm_bf16_t* src = (const bm_bf16_t*)tensor_weight_src(t);
+                for (size_t j = 0; j < n_elems; j++) {
+                    __fp16 h = (__fp16)bm_bf16_to_f32(src[j]);
+                    memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+                }
+            } else {
+                const float* src = (const float*)tensor_weight_src(t);
+                for (size_t j = 0; j < n_elems; j++) {
+                    __fp16 h = (__fp16)src[j];
+                    memcpy(&dst[j], &h, sizeof(bm_fp16_t));
+                }
             }
             backend_buffer_unmap(sched->buffers[i]);
         } else {

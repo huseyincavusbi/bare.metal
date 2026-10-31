@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "baremetal/types.h"
 
 /* Q8_0 block: one fp32 scale per 32 int8 quantized values.
  * 36 bytes per 32 weights (vs 128 bytes fp32) -> ~3.55x smaller.
@@ -23,6 +24,7 @@ typedef struct {
 /* Quantize n floats into q8 blocks. n MUST be a multiple of Q8_BLOCK_SIZE.
  * Returns the number of blocks written (n / Q8_BLOCK_SIZE), or 0 on bad input. */
 size_t bmt_quantize_q8(const float* src, q8_block_t* dst, size_t n);
+size_t bmt_quantize_q8_bf16(const bm_bf16_t* src, q8_block_t* dst, size_t n);
 
 /* Byte size of the q8 representation for n elements (n must be a multiple of 32). */
 static inline size_t bmt_q8_bytes(size_t n) {
@@ -42,6 +44,7 @@ typedef struct {
 /* Quantize n floats into q4 blocks. n MUST be a multiple of Q4_BLOCK_SIZE.
  * Returns the number of blocks written (n / Q4_BLOCK_SIZE), or 0 on bad input. */
 size_t bmt_quantize_q4(const float* src, q4_block_t* dst, size_t n);
+size_t bmt_quantize_q4_bf16(const bm_bf16_t* src, q4_block_t* dst, size_t n);
 
 static inline size_t bmt_q4_bytes(size_t n) {
     return (n / Q4_BLOCK_SIZE) * sizeof(q4_block_t);

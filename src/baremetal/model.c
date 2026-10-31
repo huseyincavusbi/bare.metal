@@ -6,6 +6,7 @@
 #include "baremetal/model.h"
 #include "baremetal/graph.h"
 #include "utils/log.h"
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,10 @@ int bmt_arch_validate(const bm_arch_t* arch, int has_rope_scaling) {
 }
 
 int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
+    return bmt_model_alloc_buffers_ex(model, arch, 0);
+}
+
+int bmt_model_alloc_buffers_ex(bm_model_t* model, const bm_arch_t* arch, int use_mmap) {
     memset(model, 0, sizeof(bm_model_t));
     model->arch = *arch;
 
@@ -97,10 +102,23 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
 
     model->n_parameters = total_bytes / sizeof(float);
 
-    void* raw = calloc(1, total_bytes);
+    void* raw = NULL;
+    if (use_mmap) {
+        raw = mmap(NULL, total_bytes, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (raw != MAP_FAILED) {
+            model->weight_is_mmap = 1;
+            model->weight_map_size = total_bytes;
+        } else {
+            raw = NULL;
+        }
+    }
     if (!raw) {
-        BMT_LOG_ERROR("Failed to allocate weight buffer (%zu bytes)", total_bytes);
-        return -1;
+        raw = calloc(1, total_bytes);
+        if (!raw) {
+            BMT_LOG_ERROR("Failed to allocate weight buffer (%zu bytes)", total_bytes);
+            return -1;
+        }
     }
     float* w = (float*)raw;
 
@@ -161,7 +179,17 @@ int bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch) {
 
 void bmt_model_free_buffers(bm_model_t* model) {
     if (!model) return;
-    free(model->weight_buffer);
+    if (model->stream_close && model->stream_set) {
+        model->stream_close(model->stream_set);
+        model->stream_close = NULL;
+        model->stream_set = NULL;
+    }
+    if (model->weight_is_mmap && model->weight_buffer)
+        munmap(model->weight_buffer, model->weight_map_size);
+    else
+        free(model->weight_buffer);
+    free(model->weight_srcs);
+    free(model->token_embedding_bf16);
     memset(model, 0, sizeof(bm_model_t));
 }
 
@@ -174,14 +202,38 @@ void bmt_model_release_host_weights(bm_model_t* model) {
     size_t wpe_bytes = (model->arch.pos_enc == BM_POS_LEARNED)
                        ? (size_t)model->arch.max_seq_len * (size_t)model->arch.dim * sizeof(float)
                        : 0;
-    void* smaller = realloc(model->weight_buffer, emb_bytes + wpe_bytes);
-    if (!smaller) return;
-    model->weight_buffer = smaller;
-    model->token_embedding_table = (float*)smaller;
-    model->wpe = wpe_bytes ? (float*)((char*)smaller + emb_bytes) : NULL;
+    size_t keep = emb_bytes + wpe_bytes;
+    if (model->weight_is_mmap) {
+        if (model->token_embedding_bf16) {
+            madvise(model->weight_buffer, model->weight_map_size, MADV_DONTNEED);
+            model->wpe = NULL;
+        } else {
+            if (keep < model->weight_map_size)
+                madvise((char*)model->weight_buffer + keep, model->weight_map_size - keep, MADV_DONTNEED);
+            model->token_embedding_table = (float*)model->weight_buffer;
+            model->wpe = wpe_bytes ? (float*)((char*)model->weight_buffer + emb_bytes) : NULL;
+        }
+    } else {
+        void* smaller = realloc(model->weight_buffer, keep);
+        if (!smaller) return;
+        model->weight_buffer = smaller;
+        model->token_embedding_table = (float*)smaller;
+        model->wpe = wpe_bytes ? (float*)((char*)smaller + emb_bytes) : NULL;
+    }
     bmt_graph_t* graph = (bmt_graph_t*)model->graph;
     if (graph) {
-        for (int i = 0; i < graph->n_tensors; i++)
+        for (int i = 0; i < graph->n_tensors; i++) {
             graph->tensors[i].weight_ptr = NULL;
+            graph->tensors[i].src_ptr = NULL;
+            graph->tensors[i].src_is_bf16 = 0;
+        }
+    }
+    free(model->weight_srcs);
+    model->weight_srcs = NULL;
+    model->n_weight_srcs = 0;
+    if (model->stream_close && model->stream_set) {
+        model->stream_close(model->stream_set);
+        model->stream_close = NULL;
+        model->stream_set = NULL;
     }
 }

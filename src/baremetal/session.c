@@ -108,9 +108,14 @@ static float* bm_prefill(bm_session_t* sess, const int* tokens, int n_tokens) {
 
     float* x = malloc((size_t)n_tokens * D * sizeof(float));
     for (int i = 0; i < n_tokens; i++) {
-        memcpy(x + (size_t)i * D,
-               m->token_embedding_table + (size_t)tokens[i] * D,
-               (size_t)D * sizeof(float));
+        if (m->token_embedding_bf16) {
+            const bm_bf16_t* emb = m->token_embedding_bf16 + (size_t)tokens[i] * D;
+            for (int d = 0; d < D; d++) x[(size_t)i * D + d] = bm_bf16_to_f32(emb[d]);
+        } else {
+            memcpy(x + (size_t)i * D,
+                   m->token_embedding_table + (size_t)tokens[i] * D,
+                   (size_t)D * sizeof(float));
+        }
         if (m->arch.embed_scale) {
             float esc = sqrtf((float)D);
             for (int d = 0; d < D; d++) x[(size_t)i * D + d] *= esc;
@@ -149,7 +154,12 @@ float* bm_step(bm_session_t* sess, int token) {
     int D = sess->model->arch.dim;
     float* wte = sess->model->token_embedding_table;
     float* x_in = malloc(D * sizeof(float));
-    memcpy(x_in, wte + token * D, D * sizeof(float));
+    if (sess->model->token_embedding_bf16) {
+        const bm_bf16_t* emb = sess->model->token_embedding_bf16 + (size_t)token * D;
+        for (int d = 0; d < D; d++) x_in[d] = bm_bf16_to_f32(emb[d]);
+    } else {
+        memcpy(x_in, wte + token * D, D * sizeof(float));
+    }
     
     if (sess->model->arch.embed_scale) {
         float esc = sqrtf((float)D);

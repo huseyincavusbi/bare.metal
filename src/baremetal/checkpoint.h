@@ -14,5 +14,6 @@
 int bmt_checkpoint_load(bm_model_t* model, const char* path);
 int bmt_checkpoint_save(bm_model_t* model, const char* path);
 int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path);
+void bmt_checkpoint_bind_sources(bm_model_t* model);
 
 #endif
