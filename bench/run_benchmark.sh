@@ -392,7 +392,7 @@ cross_model() {
 sweep_model() {
   local stem="$1"
   echo "== sweep $stem (bare.metal) =="
-  for cfg in 128:bf16 128:fp16 128:q8 128:q4 512:bf16 1024:bf16; do
+  for cfg in 128:bf16 128:fp16 128:q8 128:q4 512:bf16 512:q4 512:q8 1024:bf16 1024:q4 1024:q8; do
     local p="${cfg%%:*}" pr="${cfg##*:}"
     local out="$RUN_DIR/raw/$stem/sweep__p${p}_${pr}.json"
     # shellcheck disable=SC2086
