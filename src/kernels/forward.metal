@@ -1181,6 +1181,7 @@ kernel void attention_forward_flash(
 // Computes out = matmul(rmsnorm(inp, norm_weight, eps), wcls)
 // Saves a D-element VRAM roundtrip.
 // ----------------------------------------------------------------
+#if __HAVE_BFLOAT__
 kernel void rmsnorm_matmul_forward_bf16_vec(
     device const float* inp [[buffer(0)]],
     device const float* norm_weight [[buffer(1)]],
@@ -1231,6 +1232,8 @@ kernel void rmsnorm_matmul_forward_bf16_vec(
     sum = simd_sum(sum);
     if (lane == 0) out[oc] = sum;
 }
+
+#endif
 
 kernel void rmsnorm_matmul_forward_fp16_vec(
     device const float* inp [[buffer(0)]],
