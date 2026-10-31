@@ -13,6 +13,12 @@ typedef struct {
     int id;
 } bm_token_index_t;
 
+typedef enum {
+    BM_TOKENIZER_BPE = 0,      /* GPT-2 byte-level BPE */
+    BM_TOKENIZER_SPM_BPE,      /* SentencePiece BPE (metaspace) */
+    BM_TOKENIZER_UNIGRAM,      /* SentencePiece Unigram */
+} bm_tokenizer_kind_t;
+
 typedef struct bm_tokenizer_s {
     char**            vocab;
     float*            vocab_scores;
@@ -23,6 +29,13 @@ typedef struct bm_tokenizer_s {
     unsigned char     byte_pieces[512];
     int               b2u[256];
     unsigned char     u2b[512];
+    bm_tokenizer_kind_t kind;
+    int               byte_fallback;
+    int               unk_id;
+    int               bos_id;
+    int               eos_id;
+    int               prepend_space;
+    int               split_words;
 } bm_tokenizer_t;
 
 void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size);
