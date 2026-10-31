@@ -5,6 +5,7 @@
 
 #include "baremetal/checkpoint.h"
 #include "baremetal/config.h"
+#include "baremetal/json.h"
 #include "utils/log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,9 +32,12 @@ typedef struct {
 typedef struct {
     bmt_st_entry_t* entries;
     int             n_entries;
-    void*           data;       // mmap'd data
+    void*           map_base;   // mmap base (for munmap)
+    size_t          map_size;
+    void*           data;       // data section start
     size_t          data_size;
     int             fd;
+    char            path[1024];
 } bmt_st_file_t;
 
 static int bmt_st_parse_header(const char* json, size_t len, bmt_st_entry_t** out_entries, int* out_n) {
@@ -119,35 +123,59 @@ static bmt_st_file_t* bmt_st_open(const char* path) {
 
     uint64_t header_len;
     if (read(fd, &header_len, 8) != 8) { close(fd); return NULL; }
+    if (header_len == 0 || header_len > (1u << 24)) {
+        close(fd);
+        return NULL;
+    }
 
     char* header = malloc(header_len + 1);
+    if (!header) { close(fd); return NULL; }
     if (read(fd, header, header_len) != (ssize_t)header_len) {
         free(header); close(fd); return NULL;
     }
     header[header_len] = '\0';
 
-    bmt_st_file_t* sf = calloc(1, sizeof(bmt_st_file_t));
-    bmt_st_parse_header(header, header_len, &sf->entries, &sf->n_entries);
-    free(header);
-
-    off_t data_start = 8 + header_len;
     struct stat st;
-    fstat(fd, &st);
-    sf->data_size = st.st_size - data_start;
-    sf->data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    sf->fd = fd;
-
-    if (sf->data != MAP_FAILED) {
-        sf->data = (char*)sf->data + data_start;
+    if (fstat(fd, &st) != 0) {
+        free(header); close(fd); return NULL;
+    }
+    off_t data_start = (off_t)(8 + header_len);
+    if (st.st_size < data_start) {
+        free(header); close(fd); return NULL;
     }
 
+    void* base = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (base == MAP_FAILED) {
+        free(header); close(fd); return NULL;
+    }
+
+    bmt_st_file_t* sf = calloc(1, sizeof(bmt_st_file_t));
+    if (!sf) {
+        munmap(base, (size_t)st.st_size);
+        free(header); close(fd); return NULL;
+    }
+    bmt_st_parse_header(header, header_len, &sf->entries, &sf->n_entries);
+    free(header);
+    if (sf->n_entries <= 0) {
+        munmap(base, (size_t)st.st_size);
+        free(sf->entries);
+        free(sf); close(fd);
+        return NULL;
+    }
+
+    sf->map_base = base;
+    sf->map_size = (size_t)st.st_size;
+    sf->data = (char*)base + data_start;
+    sf->data_size = (size_t)(st.st_size - data_start);
+    sf->fd = fd;
+    snprintf(sf->path, sizeof(sf->path), "%s", path);
     return sf;
 }
 
 static void bmt_st_close(bmt_st_file_t* sf) {
     if (!sf) return;
-    if (sf->data && sf->data != MAP_FAILED) {
-        munmap(sf->data, sf->data_size);
+    if (sf->map_base && sf->map_base != MAP_FAILED) {
+        munmap(sf->map_base, sf->map_size);
     }
     close(sf->fd);
     free(sf->entries);
@@ -163,6 +191,220 @@ static void* bmt_st_get_tensor(bmt_st_file_t* sf, const char* name, size_t* out_
         }
     }
     return NULL;
+}
+
+typedef struct {
+    bmt_st_file_t** files;
+    int count;
+    int cap;
+} bmt_st_set_t;
+
+static char* read_text_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long len = ftell(f);
+    if (len < 0) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char* buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
+}
+
+static char* dup_name(const char* s) {
+    size_t n = strlen(s) + 1;
+    char* p = malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+static int cmp_name(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
+static int bmt_st_set_add(bmt_st_set_t* set, const char* path) {
+    if (set->count == set->cap) {
+        int cap = set->cap ? set->cap * 2 : 8;
+        bmt_st_file_t** files = realloc(set->files, (size_t)cap * sizeof(*files));
+        if (!files) return -1;
+        set->files = files;
+        set->cap = cap;
+    }
+    bmt_st_file_t* sf = bmt_st_open(path);
+    if (!sf) return -1;
+    set->files[set->count++] = sf;
+    return 0;
+}
+
+static void bmt_st_set_close(bmt_st_set_t* set) {
+    for (int i = 0; i < set->count; i++) bmt_st_close(set->files[i]);
+    free(set->files);
+    set->files = NULL;
+    set->count = 0;
+    set->cap = 0;
+}
+
+static int bmt_st_set_open(bmt_st_set_t* set, const char* dir_path) {
+    memset(set, 0, sizeof(*set));
+
+    char index_path[1024];
+    snprintf(index_path, sizeof(index_path), "%s/model.safetensors.index.json", dir_path);
+    char* text = read_text_file(index_path);
+    if (text) {
+        char err[160];
+        bmt_json_t* root = bmt_json_parse(text, err, sizeof(err));
+        free(text);
+        if (!root) {
+            BMT_LOG_ERROR("Invalid index JSON %s: %s", index_path, err);
+            return -1;
+        }
+        const bmt_json_t* map = bmt_json_get(root, "weight_map");
+        if (bmt_json_type(map) != BMT_JSON_OBJECT) {
+            BMT_LOG_ERROR("%s: missing weight_map", index_path);
+            bmt_json_free(root);
+            return -1;
+        }
+        int n = bmt_json_object_count(map);
+        for (int i = 0; i < n; i++) {
+            const char* shard = bmt_json_string(bmt_json_object_value(map, i));
+            if (!shard) continue;
+            char path[2048];
+            snprintf(path, sizeof(path), "%s/%s", dir_path, shard);
+            int seen = 0;
+            for (int j = 0; j < set->count; j++) {
+                if (strcmp(set->files[j]->path, path) == 0) { seen = 1; break; }
+            }
+            if (seen) continue;
+            if (bmt_st_set_add(set, path) != 0) {
+                BMT_LOG_ERROR("Cannot open shard: %s", path);
+                bmt_json_free(root);
+                bmt_st_set_close(set);
+                return -1;
+            }
+        }
+        bmt_json_free(root);
+        if (set->count == 0) {
+            BMT_LOG_ERROR("%s: weight_map references no shards", index_path);
+            return -1;
+        }
+        return 0;
+    }
+
+    DIR* d = opendir(dir_path);
+    if (!d) {
+        BMT_LOG_ERROR("Cannot open directory: %s", dir_path);
+        return -1;
+    }
+
+    char** names = NULL;
+    int n_names = 0, cap = 0;
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (len < 12 || strcmp(de->d_name + len - 12, ".safetensors") != 0)
+            continue;
+        if (n_names == cap) {
+            int next = cap ? cap * 2 : 8;
+            char** grown = realloc(names, (size_t)next * sizeof(*grown));
+            if (!grown) break;
+            names = grown;
+            cap = next;
+        }
+        names[n_names] = dup_name(de->d_name);
+        if (!names[n_names]) break;
+        n_names++;
+    }
+    closedir(d);
+
+    if (n_names == 0) {
+        BMT_LOG_ERROR("No safetensors files found in %s", dir_path);
+        free(names);
+        return -1;
+    }
+
+    qsort(names, (size_t)n_names, sizeof(*names), cmp_name);
+    int rc = 0;
+    for (int i = 0; i < n_names; i++) {
+        char path[2048];
+        snprintf(path, sizeof(path), "%s/%s", dir_path, names[i]);
+        if (bmt_st_set_add(set, path) != 0) {
+            BMT_LOG_ERROR("Cannot open safetensors file: %s", path);
+            rc = -1;
+            break;
+        }
+    }
+    for (int i = 0; i < n_names; i++) free(names[i]);
+    free(names);
+    if (rc != 0) {
+        bmt_st_set_close(set);
+        return -1;
+    }
+    return 0;
+}
+
+static void* bmt_st_set_find(const bmt_st_set_t* set, const char* name,
+                             size_t* out_size, int* out_is_bf16) {
+    for (int i = 0; i < set->count; i++) {
+        void* p = bmt_st_get_tensor(set->files[i], name, out_size, out_is_bf16);
+        if (p) return p;
+    }
+    return NULL;
+}
+
+static int bmt_st_set_has(const bmt_st_set_t* set, const char* name) {
+    size_t sz;
+    int bf16;
+    return bmt_st_set_find(set, name, &sz, &bf16) != NULL;
+}
+
+static float bf16_to_f32(uint16_t bf16);
+
+typedef struct {
+    char names[64][192];
+    int count;
+    int overflow;
+} bmt_missing_t;
+
+static void missing_add(bmt_missing_t* m, const char* name) {
+    int cap = (int)(sizeof(m->names) / sizeof(m->names[0]));
+    if (m->count < cap) {
+        snprintf(m->names[m->count], sizeof(m->names[0]), "%s", name);
+        m->count++;
+    } else {
+        m->overflow = 1;
+    }
+}
+
+static int bmt_st_load_tensor(const bmt_st_set_t* set, const char* name,
+                              float* dst, size_t count, bmt_missing_t* missing,
+                              int* errors, int* loaded) {
+    size_t sz = 0;
+    int bf16 = 0;
+    void* raw = bmt_st_set_find(set, name, &sz, &bf16);
+    if (!raw) {
+        missing_add(missing, name);
+        return -1;
+    }
+
+    size_t expected = bf16 ? count * 2 : count * 4;
+    if (sz != expected) {
+        BMT_LOG_ERROR("tensor %s: %zu bytes, expected %zu (%s)",
+                      name, sz, expected, bf16 ? "bf16" : "f32");
+        (*errors)++;
+        return -1;
+    }
+
+    if (bf16) {
+        const uint16_t* src = (const uint16_t*)raw;
+        for (size_t i = 0; i < count; i++) dst[i] = bf16_to_f32(src[i]);
+    } else {
+        memcpy(dst, raw, count * sizeof(float));
+    }
+    (*loaded)++;
+    return 0;
 }
 
 static float bf16_to_f32(uint16_t bf16) {
@@ -192,31 +434,17 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     bm_arch_t arch;
     if (bmt_config_to_arch(&cfg, spec, &arch) != 0) return -1;
 
-    // Load safetensors files
-    bmt_st_file_t* st_files[16];
-    int n_st = 0;
-    DIR* d = opendir(dir_path);
-    if (!d) { BMT_LOG_ERROR("Cannot open directory: %s", dir_path); return -1; }
-    struct dirent* de;
-    while ((de = readdir(d)) != NULL && n_st < 16) {
-        if (strstr(de->d_name, ".safetensors")) {
-            char fpath[1024];
-            snprintf(fpath, sizeof(fpath), "%s/%s", dir_path, de->d_name);
-            st_files[n_st] = bmt_st_open(fpath);
-            if (st_files[n_st]) n_st++;
-        }
-    }
-    closedir(d);
-
-    if (n_st == 0) { BMT_LOG_ERROR("No safetensors files found"); return -1; }
+    // Load safetensors files (single file, or shards via index.json)
+    bmt_st_set_t set;
+    if (bmt_st_set_open(&set, dir_path) != 0) return -1;
 
     // Detect qk_norm, ffn_post_norm, gated_mlp, weight_tie from tensor names
     arch.has_qk_norm = 0;
     arch.has_ffn_post_norm = 0;
     int saw_lm_head = 0;
-    for (int i = 0; i < n_st; i++) {
-        for (int j = 0; j < st_files[i]->n_entries; j++) {
-            const char* n = st_files[i]->entries[j].name;
+    for (int i = 0; i < set.count; i++) {
+        for (int j = 0; j < set.files[i]->n_entries; j++) {
+            const char* n = set.files[i]->entries[j].name;
             if (strstr(n, ".q_norm")) arch.has_qk_norm = 1;
             if (strstr(n, ".up_proj")) arch.gated_mlp = 1;
             if (strstr(n, "post_feedforward")) arch.has_ffn_post_norm = 1;
@@ -226,37 +454,29 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     if (!saw_lm_head) arch.weight_tie = 1;
 
     if (bmt_arch_validate(&arch, cfg.has_rope_scaling) != 0) {
-        for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
+        bmt_st_set_close(&set);
         return -1;
     }
 
     // Allocate model buffers
     if (bmt_model_alloc_buffers(model, &arch) != 0) {
-        for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
+        bmt_st_set_close(&set);
         return -1;
     }
 
     int L = arch.n_layers, D = arch.dim, H = arch.hidden_dim, V = arch.vocab_size;
     int NH = arch.n_heads, HD = model->head_size;
     float* w = (float*)model->weight_buffer;
-    size_t sz;
+
+    bmt_missing_t missing;
+    memset(&missing, 0, sizeof(missing));
+    int load_errors = 0;
+    int loaded = 0;
 
     #define CPT(name, ptr, count) do { \
-        for (int _i = 0; _i < n_st; _i++) { \
-            int _bf16 = 0; \
-            void* _raw = bmt_st_get_tensor(st_files[_i], name, &sz, &_bf16); \
-            if (_raw) { \
-                if (_bf16) { \
-                    uint16_t* _src = (uint16_t*)_raw; \
-                    size_t _n = ((size_t)(count) < sz/2 ? (size_t)(count) : sz/2); \
-                    for (size_t _j = 0; _j < _n; _j++) (ptr)[_j] = bf16_to_f32(_src[_j]); \
-                } else { \
-                    memcpy(ptr, _raw, sz < (count)*sizeof(float) ? sz : (count)*sizeof(float)); \
-                } \
-                break; \
-            } \
-        } \
-    } while(0)
+        (void)bmt_st_load_tensor(&set, (name), (ptr), (size_t)(count), \
+                                 &missing, &load_errors, &loaded); \
+    } while (0)
 
     const bmt_tensor_map_t* t = spec->tensors;
 
@@ -349,13 +569,32 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
     CPT(t->final_norm, w, D); w += D;
 
     if (!arch.weight_tie) {
-        CPT(t->lm_head, w, V * D);
-        CPT(t->embed, w, V * D); // fallback
+        if (bmt_st_set_has(&set, t->lm_head)) {
+            CPT(t->lm_head, w, V * D);
+        } else {
+            BMT_LOG_WARN("lm_head missing; using embedding weights");
+            CPT(t->embed, w, V * D);
+        }
         w += V * D;
     }
 
-    for (int i = 0; i < n_st; i++) bmt_st_close(st_files[i]);
+    int shards = set.count;
+    int missing_total = missing.count + (missing.overflow ? 1 : 0);
 
-    BMT_LOG_INFO("Loaded safetensors: %s (%zu params)", dir_path, model->n_parameters);
+    if (missing_total > 0 || load_errors > 0) {
+        BMT_LOG_ERROR("Failed to load %s: %d missing, %d size errors",
+                      dir_path, missing_total, load_errors);
+        for (int i = 0; i < missing.count; i++)
+            BMT_LOG_ERROR("  missing: %s", missing.names[i]);
+        if (missing.overflow)
+            BMT_LOG_ERROR("  ... more missing tensors not listed");
+        bmt_st_set_close(&set);
+        bmt_model_free_buffers(model);
+        return -1;
+    }
+
+    bmt_st_set_close(&set);
+    BMT_LOG_INFO("Loaded safetensors: %s (%zu params, %d shard(s), %d tensors)",
+                 dir_path, model->n_parameters, shards, loaded);
     return 0;
 }
