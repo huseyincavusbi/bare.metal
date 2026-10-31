@@ -5,6 +5,9 @@
 BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
 BENCH_BIN := build/bench/bench
+PARITY_BIN := build/parity
+PARITY_MODEL ?= models/smollm2-135m
+PARITY_FIXTURE ?= test/parity/$(notdir $(PARITY_MODEL)).json
 
 TEST_SRCS := $(wildcard test/*_test.c)
 TEST_BINS := $(patsubst test/%.c,build/test/%,$(TEST_SRCS))
@@ -45,7 +48,7 @@ TOOL_OBJS_TRAIN := $(patsubst %.c,build/train/%.o,$(TOOL_SRCS))
 METAL_SRC := src/kernels/forward.metal src/kernels/backward.metal src/anneal/adamw.metal
 METAL_BIN := build/kernels/default.metallib
 
-.PHONY: all clean baremetal baremetal-train dirs tests bench
+.PHONY: all clean baremetal baremetal-train dirs tests bench parity parity-build
 
 all: dirs baremetal
 
@@ -56,6 +59,16 @@ baremetal-train: dirs $(BINARY_TRAIN)
 tests: dirs $(TEST_BINS)
 
 bench: dirs $(BENCH_BIN)
+
+parity: dirs $(PARITY_BIN)
+	./$(PARITY_BIN) --model $(PARITY_MODEL) --fixture $(PARITY_FIXTURE)
+
+parity-build: dirs $(PARITY_BIN)
+
+$(PARITY_BIN): test/parity/parity.c $(OBJS) $(METAL_BIN)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ test/parity/parity.c $(OBJS) $(LDFLAGS)
+	@echo "  Built: $@"
 
 $(BENCH_BIN): bench/bench.c bench/metrics.h $(OBJS) $(METAL_BIN)
 	@mkdir -p build/bench
