@@ -189,6 +189,7 @@ void bmt_model_free_buffers(bm_model_t* model) {
     else
         free(model->weight_buffer);
     free(model->weight_srcs);
+    free(model->token_embedding_bf16);
     memset(model, 0, sizeof(bm_model_t));
 }
 
@@ -203,10 +204,15 @@ void bmt_model_release_host_weights(bm_model_t* model) {
                        : 0;
     size_t keep = emb_bytes + wpe_bytes;
     if (model->weight_is_mmap) {
-        if (keep < model->weight_map_size)
-            madvise((char*)model->weight_buffer + keep, model->weight_map_size - keep, MADV_DONTNEED);
-        model->token_embedding_table = (float*)model->weight_buffer;
-        model->wpe = wpe_bytes ? (float*)((char*)model->weight_buffer + emb_bytes) : NULL;
+        if (model->token_embedding_bf16) {
+            madvise(model->weight_buffer, model->weight_map_size, MADV_DONTNEED);
+            model->wpe = NULL;
+        } else {
+            if (keep < model->weight_map_size)
+                madvise((char*)model->weight_buffer + keep, model->weight_map_size - keep, MADV_DONTNEED);
+            model->token_embedding_table = (float*)model->weight_buffer;
+            model->wpe = wpe_bytes ? (float*)((char*)model->weight_buffer + emb_bytes) : NULL;
+        }
     } else {
         void* smaller = realloc(model->weight_buffer, keep);
         if (!smaller) return;
