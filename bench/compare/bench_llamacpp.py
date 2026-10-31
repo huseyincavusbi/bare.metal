@@ -95,6 +95,8 @@ def main():
     active_ended = time.time()
     model_size = model_size or os.path.getsize(a.gguf)
     gen_ids = tokenize(a.gguf, text) if text else []
+    if gen_ids and prompt_ids and gen_ids[0] == prompt_ids[0]:
+        gen_ids = gen_ids[1:]
 
     # llama-bench reports pp/tg rates; derive TTFT and ITL from them.
     ttft_ms = n_prompt / pp * 1000.0 if pp > 0 else 0.0
