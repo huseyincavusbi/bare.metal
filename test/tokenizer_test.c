@@ -1,5 +1,6 @@
 /* tokenizer_test.c — SentencePiece BPE, Unigram, byte fallback, normalization.
  * Real-tokenizer cases run only when the tokenizer directory exists. */
+#include "baremetal.h"
 #include "baremetal/tokenizer.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,6 +247,14 @@ static void test_real(const char* name, const char* dir, int vocab_size,
 
     bm_tokenizer_t t;
     bm_tokenizer_init(&t, dir, vocab_size);
+    if (strcmp(name, "Llama 3.2") == 0) {
+        check(t.add_bos == 1, "Llama add_bos detected");
+        check(t.bos_id == 128000, "Llama bos id");
+        int pn = 0;
+        int* pids = bm_encode(&t, "Once upon a time", &pn);
+        check(pids && pn > 0 && pids[0] == 128000, "Llama public encode BOS");
+        free(pids);
+    }
     expect_ids(name, &t, "Once upon a time", want, nwant);
     bm_tokenizer_free(&t);
 }
