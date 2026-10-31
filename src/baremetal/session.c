@@ -140,9 +140,7 @@ static float* bm_prefill(bm_session_t* sess, const int* tokens, int n_tokens) {
 
 float* bm_forward(bm_session_t* sess, const int* tokens, int n_tokens) {
     if (n_tokens <= 0) return sess->logits;
-    /* The q4/q8 matmul kernels are decode-only (batch 1); prefill falls back
-     * to the token loop until batched quantized matmuls exist. */
-    if (n_tokens == 1 || sess->pos != 0 || sess->model->quant_bits != 0 ||
+    if (n_tokens == 1 || sess->pos != 0 ||
         n_tokens > sess->model->arch.max_seq_len) {
         for (int i = 0; i < n_tokens; i++) bm_step(sess, tokens[i]);
         return sess->logits;

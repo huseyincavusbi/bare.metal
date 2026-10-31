@@ -243,7 +243,8 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->max_seq_len = max_seq_len;
     sched->kv_dim = kv_dim;
     sched->n_layers = n_layers;
-    sched->bkvc = backend_buffer_alloc(backend, n_layers * 2 * max_seq_len * kv_dim * sizeof(float));
+    sched->bkvc = weight_src ? NULL
+        : backend_buffer_alloc(backend, n_layers * 2 * max_seq_len * kv_dim * sizeof(float));
     
     sched->dummy_bias = backend_buffer_alloc(backend, 131072 * sizeof(float));
     void* db = backend_buffer_map(sched->dummy_bias);

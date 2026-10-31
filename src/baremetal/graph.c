@@ -359,7 +359,8 @@ bmt_graph_t* bmt_graph_build_prefill(bm_model_t* m, int S, int* k_ids, int* v_id
     if (m->quant_bits) {
         for (int i = 0; i < g->n_tensors; i++) {
             bmt_tensor_t* t = &g->tensors[i];
-            if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->n_dims == 2 && t->dims[1] % 32 == 0)
+            if (t->type == BMT_TENSOR_TYPE_WEIGHT && t->n_dims == 2 && t->dims[1] % 32 == 0
+                && t->weight_ptr != (void*)m->wcls)
                 t->quantized = m->quant_bits;
         }
     }
