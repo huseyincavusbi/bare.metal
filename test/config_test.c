@@ -315,6 +315,38 @@ static void test_missing_dims(void) {
     free_config_dir(dir);
 }
 
+static void test_real_llama_config(void) {
+    const char* dir = "models/Llama-3.2-1B";
+    char path[512];
+    snprintf(path, sizeof(path), "%s/config.json", dir);
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        printf("SKIP: %s not present\n", path);
+        return;
+    }
+    fclose(f);
+
+    bmt_config_t cfg;
+    check(bmt_config_load(dir, &cfg) == 0, "load real Llama config");
+    check(cfg.hidden_size == 2048 && cfg.num_hidden_layers == 16, "Llama dims");
+    check(cfg.num_attention_heads == 32 && cfg.num_key_value_heads == 8, "Llama heads");
+    check(cfg.vocab_size == 128256 && cfg.max_position_embeddings == 131072,
+          "Llama vocab/context");
+    check(cfg.has_rope_scaling == 1 && cfg.rope_scaling_type == 1,
+          "Llama rope type");
+    check(cfg.rope_factor == 32.0f && cfg.rope_low_freq_factor == 1.0f,
+          "Llama rope factors");
+    check(cfg.rope_high_freq_factor == 4.0f && cfg.rope_original_max == 8192.0f,
+          "Llama rope high/original");
+
+    const bmt_arch_spec_t* spec = bmt_arch_spec_for_config(&cfg);
+    check(spec->supported == 1, "Llama supported");
+    bm_arch_t arch;
+    check(bmt_config_to_arch(&cfg, spec, &arch) == 0, "Llama config -> arch");
+    check(arch.rope_scaling == BM_ROPE_LLAMA3, "Llama arch rope scaling");
+    check(bmt_arch_validate(&arch, cfg.has_rope_scaling) == 0, "Llama arch validates");
+}
+
 static void test_real_config(void) {
     const char* dir = "models/smollm2-135m";
     char path[512];
@@ -345,6 +377,7 @@ int main(void) {
     test_rope_scaling_unsupported();
     test_malformed();
     test_missing_dims();
+    test_real_llama_config();
     test_real_config();
 
     if (failures) {
