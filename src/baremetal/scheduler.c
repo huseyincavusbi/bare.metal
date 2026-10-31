@@ -37,8 +37,10 @@ struct bmt_scheduler_s {
     backend_kernel_t* q4_vec_kernel; /* matmul_forward_q4_vec (decode) */
     backend_kernel_t* q4_vec4_kernel; /* matmul_forward_q4_vec4 (decode) */
     backend_kernel_t* bf16_kernel; /* matmul_forward_bf16 */
+    backend_kernel_t* bf16_prefill_kernel; /* matmul_forward_bf16_tiled */
     backend_kernel_t* bf16_vec_kernel; /* matmul_forward_bf16_vec */
     backend_kernel_t* fp16_kernel; /* matmul_forward_fp16 */
+    backend_kernel_t* fp16_prefill_kernel; /* matmul_forward_fp16_tiled */
     backend_kernel_t* fp16_vec_kernel; /* matmul_forward_fp16_vec */
     backend_kernel_t* bf16_cls_kernel; /* rmsnorm_matmul_forward_bf16 */
     backend_kernel_t* bf16_cls_vec_kernel; /* rmsnorm_matmul_forward_bf16_vec */
@@ -256,8 +258,10 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->q4_vec_kernel = backend_kernel_create(backend, "matmul_forward_q4_vec");
     sched->q4_vec4_kernel = backend_kernel_create(backend, "matmul_forward_q4_vec4");
     sched->bf16_kernel = backend_kernel_create(backend, "matmul_forward_bf16");
+    sched->bf16_prefill_kernel = backend_kernel_create(backend, "matmul_forward_bf16_tiled");
     sched->bf16_vec_kernel = backend_kernel_create(backend, "matmul_forward_bf16_vec");
     sched->fp16_kernel = backend_kernel_create(backend, "matmul_forward_fp16");
+    sched->fp16_prefill_kernel = backend_kernel_create(backend, "matmul_forward_fp16_tiled");
     sched->fp16_vec_kernel = backend_kernel_create(backend, "matmul_forward_fp16_vec");
     sched->bf16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16");
     sched->bf16_cls_vec_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16_vec");
@@ -319,8 +323,10 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->q4_vec_kernel) backend_kernel_destroy(sched->q4_vec_kernel);
     if (sched->q4_vec4_kernel) backend_kernel_destroy(sched->q4_vec4_kernel);
     if (sched->bf16_kernel) backend_kernel_destroy(sched->bf16_kernel);
+    if (sched->bf16_prefill_kernel) backend_kernel_destroy(sched->bf16_prefill_kernel);
     if (sched->bf16_vec_kernel) backend_kernel_destroy(sched->bf16_vec_kernel);
     if (sched->fp16_kernel) backend_kernel_destroy(sched->fp16_kernel);
+    if (sched->fp16_prefill_kernel) backend_kernel_destroy(sched->fp16_prefill_kernel);
     if (sched->fp16_vec_kernel) backend_kernel_destroy(sched->fp16_vec_kernel);
     if (sched->bf16_cls_kernel) backend_kernel_destroy(sched->bf16_cls_kernel);
     if (sched->bf16_cls_vec_kernel) backend_kernel_destroy(sched->bf16_cls_vec_kernel);
@@ -776,6 +782,12 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 4 && sched->q4_kernel) {
             kn = sched->q4_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && sched->prefill_mode && p1 > 1
+                   && sched->precision == BM_PRECISION_BF16 && sched->bf16_prefill_kernel) {
+            kn = sched->bf16_prefill_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && sched->prefill_mode && p1 > 1
+                   && sched->precision == BM_PRECISION_FP16 && sched->fp16_prefill_kernel) {
+            kn = sched->fp16_prefill_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_BF16
                    && p1 == 1 && sched->bf16_vec_kernel) {
             kn = sched->bf16_vec_kernel;
@@ -904,7 +916,12 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         int ttx = 32, tty = 1, ttz = 1;
         
         if (node->op_type == BMK_OP_MATMUL) {
-            if (kn == sched->q4_vec4_kernel) {
+            if (kn == sched->bf16_prefill_kernel || kn == sched->fp16_prefill_kernel) {
+                int tg = 256, bm = 32, bn = 32;
+                gtx = ((p3 + bn - 1) / bn) * tg;
+                gty = (p1 + bm - 1) / bm;
+                ttx = tg;
+            } else if (kn == sched->q4_vec4_kernel) {
                 int tg = 128;
                 gtx = ((p3 + 3) >> 2) * tg;
                 gty = p1;
