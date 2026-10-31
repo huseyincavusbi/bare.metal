@@ -29,13 +29,18 @@ struct bmt_scheduler_s {
     backend_buffer_t* bkvc;
     backend_buffer_t* dummy_bias;
     backend_kernel_t* q8_kernel;   /* matmul_forward_q8, used for quantized weights */
+    backend_kernel_t* q8_vec_kernel; /* matmul_forward_q8_vec (decode) */
     backend_kernel_t* q4_kernel;   /* matmul_forward_q4 */
     backend_kernel_t* q4_vec_kernel; /* matmul_forward_q4_vec (decode) */
+    backend_kernel_t* q4_vec4_kernel; /* matmul_forward_q4_vec4 (decode) */
     backend_kernel_t* bf16_kernel; /* matmul_forward_bf16 */
     backend_kernel_t* bf16_vec_kernel; /* matmul_forward_bf16_vec */
     backend_kernel_t* fp16_kernel; /* matmul_forward_fp16 */
+    backend_kernel_t* fp16_vec_kernel; /* matmul_forward_fp16_vec */
     backend_kernel_t* bf16_cls_kernel; /* rmsnorm_matmul_forward_bf16 */
+    backend_kernel_t* bf16_cls_vec_kernel; /* rmsnorm_matmul_forward_bf16_vec */
     backend_kernel_t* fp16_cls_kernel; /* rmsnorm_matmul_forward_fp16 */
+    backend_kernel_t* fp16_cls_vec_kernel; /* rmsnorm_matmul_forward_fp16_vec */
 
     backend_buffer_t** grad_buffers;       /* per-tensor fp32 grad (zeroed at create) */
     backend_kernel_t* k_mm_bwd_inp;        /* matmul_backward_inp */
@@ -204,13 +209,18 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     backend_buffer_unmap(sched->dummy_bias);
     
     sched->q8_kernel = backend_kernel_create(backend, "matmul_forward_q8");
+    sched->q8_vec_kernel = backend_kernel_create(backend, "matmul_forward_q8_vec");
     sched->q4_kernel = backend_kernel_create(backend, "matmul_forward_q4");
     sched->q4_vec_kernel = backend_kernel_create(backend, "matmul_forward_q4_vec");
+    sched->q4_vec4_kernel = backend_kernel_create(backend, "matmul_forward_q4_vec4");
     sched->bf16_kernel = backend_kernel_create(backend, "matmul_forward_bf16");
     sched->bf16_vec_kernel = backend_kernel_create(backend, "matmul_forward_bf16_vec");
     sched->fp16_kernel = backend_kernel_create(backend, "matmul_forward_fp16");
+    sched->fp16_vec_kernel = backend_kernel_create(backend, "matmul_forward_fp16_vec");
     sched->bf16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16");
+    sched->bf16_cls_vec_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16_vec");
     sched->fp16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_fp16");
+    sched->fp16_cls_vec_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_fp16_vec");
     sched->k_mm_bwd_inp = backend_kernel_create(backend, "matmul_backward_inp");
     sched->k_mm_bwd_w   = backend_kernel_create(backend, "matmul_backward_w");
     sched->k_mm_bwd_inp_bf16 = backend_kernel_create(backend, "matmul_backward_inp_bf16");
@@ -262,13 +272,18 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     backend_buffer_free(sched->bkvc);
     backend_buffer_free(sched->dummy_bias);
     if (sched->q8_kernel) backend_kernel_destroy(sched->q8_kernel);
+    if (sched->q8_vec_kernel) backend_kernel_destroy(sched->q8_vec_kernel);
     if (sched->q4_kernel) backend_kernel_destroy(sched->q4_kernel);
     if (sched->q4_vec_kernel) backend_kernel_destroy(sched->q4_vec_kernel);
+    if (sched->q4_vec4_kernel) backend_kernel_destroy(sched->q4_vec4_kernel);
     if (sched->bf16_kernel) backend_kernel_destroy(sched->bf16_kernel);
     if (sched->bf16_vec_kernel) backend_kernel_destroy(sched->bf16_vec_kernel);
     if (sched->fp16_kernel) backend_kernel_destroy(sched->fp16_kernel);
+    if (sched->fp16_vec_kernel) backend_kernel_destroy(sched->fp16_vec_kernel);
     if (sched->bf16_cls_kernel) backend_kernel_destroy(sched->bf16_cls_kernel);
+    if (sched->bf16_cls_vec_kernel) backend_kernel_destroy(sched->bf16_cls_vec_kernel);
     if (sched->fp16_cls_kernel) backend_kernel_destroy(sched->fp16_cls_kernel);
+    if (sched->fp16_cls_vec_kernel) backend_kernel_destroy(sched->fp16_cls_vec_kernel);
     if (sched->k_mm_bwd_inp) backend_kernel_destroy(sched->k_mm_bwd_inp);
     if (sched->k_mm_bwd_w)   backend_kernel_destroy(sched->k_mm_bwd_w);
     if (sched->k_mm_bwd_inp_bf16) backend_kernel_destroy(sched->k_mm_bwd_inp_bf16);
@@ -378,8 +393,16 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
 
         backend_kernel_t* kn;
         if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
+            && sched->graph->tensors[node->inputs[1]].quantized == 8
+            && p1 == 1 && sched->q8_vec_kernel) {
+            kn = sched->q8_vec_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 8 && sched->q8_kernel) {
             kn = sched->q8_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
+            && sched->graph->tensors[node->inputs[1]].quantized == 4
+            && p1 == 1 && sched->q4_vec4_kernel) {
+            kn = sched->q4_vec4_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 4
             && p1 == 1 && p2 < 1024 && sched->q4_vec_kernel) {
@@ -392,8 +415,17 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             kn = sched->bf16_vec_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_BF16 && sched->bf16_kernel) {
             kn = sched->bf16_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16
+                   && p1 == 1 && sched->fp16_vec_kernel) {
+            kn = sched->fp16_vec_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16 && sched->fp16_kernel) {
             kn = sched->fp16_kernel;
+        } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_BF16
+                   && p2 <= 4096 && sched->bf16_cls_vec_kernel) {
+            kn = sched->bf16_cls_vec_kernel;
+        } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_FP16
+                   && p2 <= 4096 && sched->fp16_cls_vec_kernel) {
+            kn = sched->fp16_cls_vec_kernel;
         } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_BF16 && sched->bf16_cls_kernel) {
             kn = sched->bf16_cls_kernel;
         } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_FP16 && sched->fp16_cls_kernel) {
@@ -558,11 +590,13 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
         int ttx = 32, tty = 1, ttz = 1;
         
         if (node->op_type == BMK_OP_MATMUL) {
-            if (kn == sched->q4_vec_kernel) {
-                gtx = p3 * 128;
+            if (kn == sched->q4_vec4_kernel) {
+                int tg = 128;
+                gtx = ((p3 + 3) >> 2) * tg;
                 gty = p1;
-                ttx = 128;
-            } else if (kn == sched->bf16_vec_kernel) {
+                ttx = tg;
+            } else if (kn == sched->q4_vec_kernel || kn == sched->q8_vec_kernel ||
+                kn == sched->bf16_vec_kernel || kn == sched->fp16_vec_kernel) {
                 int tg = 128;
                 gtx = p3 * tg;
                 gty = p1;
@@ -572,6 +606,10 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
                 gty = p1;
                 ttx = 32;
             }
+        } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER &&
+                   (kn == sched->bf16_cls_vec_kernel || kn == sched->fp16_cls_vec_kernel)) {
+            gtx = ((p3 + 15) / 16) * 512;
+            ttx = 512;
         } else if (node->op_type == BMK_OP_NORM_RMS || node->op_type == BMK_OP_FUSED_RESIDUAL_NORM || node->op_type == BMK_OP_NORM_LAYER) {
             gtx = 256;
             ttx = 256;
@@ -668,8 +706,16 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             kn = sched->k_rope_fwd_seq;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
+            && sched->graph->tensors[node->inputs[1]].quantized == 8
+            && p1 == 1 && sched->q8_vec_kernel) {
+            kn = sched->q8_vec_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 8 && sched->q8_kernel) {
             kn = sched->q8_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
+            && sched->graph->tensors[node->inputs[1]].quantized == 4
+            && p1 == 1 && sched->q4_vec4_kernel) {
+            kn = sched->q4_vec4_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 4
             && p1 == 1 && p2 < 1024 && sched->q4_vec_kernel) {
@@ -682,6 +728,9 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             kn = sched->bf16_vec_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_BF16 && sched->bf16_kernel) {
             kn = sched->bf16_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16
+                   && p1 == 1 && sched->fp16_vec_kernel) {
+            kn = sched->fp16_vec_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_FP16 && sched->fp16_kernel) {
             kn = sched->fp16_kernel;
         } else if (node->op_type == BMK_OP_FUSED_RESIDUAL_NORM && sched->k_resnorm_fwd_train) {
@@ -802,7 +851,13 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         int ttx = 32, tty = 1, ttz = 1;
         
         if (node->op_type == BMK_OP_MATMUL) {
-            if (kn == sched->bf16_vec_kernel || kn == sched->q4_vec_kernel) {
+            if (kn == sched->q4_vec4_kernel) {
+                int tg = 128;
+                gtx = ((p3 + 3) >> 2) * tg;
+                gty = p1;
+                ttx = tg;
+            } else if (kn == sched->q4_vec_kernel || kn == sched->q8_vec_kernel ||
+                kn == sched->bf16_vec_kernel || kn == sched->fp16_vec_kernel) {
                 int tg = 128;
                 gtx = p3 * tg;
                 gty = p1;
