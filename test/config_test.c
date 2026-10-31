@@ -245,12 +245,53 @@ static void test_rope_scaling(void) {
     bmt_config_t cfg;
     check(bmt_config_load(dir, &cfg) == 0, "load active rope_scaling");
     check(cfg.has_rope_scaling == 1, "active rope_scaling detected");
+    check(cfg.rope_scaling_type == 1, "llama3 type detected");
+    check(cfg.rope_factor == 32.0f && cfg.rope_low_freq_factor == 1.0f,
+          "rope factors");
+    check(cfg.rope_high_freq_factor == 4.0f && cfg.rope_original_max == 8192.0f,
+          "rope high/original max");
 
     const bmt_arch_spec_t* spec = bmt_arch_spec_for_config(&cfg);
     bm_arch_t arch;
     check(bmt_config_to_arch(&cfg, spec, &arch) == 0, "arch conversion");
+    check(arch.rope_scaling == BM_ROPE_LLAMA3, "llama3 arch flag");
+    check(arch.rope_factor == 32.0f && arch.rope_original_max == 8192.0f,
+          "llama3 arch params");
+    check(bmt_arch_validate(&arch, cfg.has_rope_scaling) == 0,
+          "llama3 rope_scaling accepted");
+
+    free_config_dir(dir);
+}
+
+static void test_rope_scaling_unsupported(void) {
+    const char* json =
+        "{"
+        "  \"model_type\": \"llama\","
+        "  \"hidden_size\": 64,"
+        "  \"intermediate_size\": 128,"
+        "  \"num_hidden_layers\": 2,"
+        "  \"num_attention_heads\": 4,"
+        "  \"num_key_value_heads\": 2,"
+        "  \"vocab_size\": 100,"
+        "  \"rms_norm_eps\": 0.00001,"
+        "  \"hidden_act\": \"silu\","
+        "  \"rope_theta\": 10000.0,"
+        "  \"rope_scaling\": {\"rope_type\": \"linear\", \"factor\": 2.0}"
+        "}";
+    char* dir = make_config_dir(json);
+    if (!dir) { check(0, "create unsupported rope config"); return; }
+
+    bmt_config_t cfg;
+    check(bmt_config_load(dir, &cfg) == 0, "load unsupported rope_scaling");
+    check(cfg.has_rope_scaling == 1 && cfg.rope_scaling_type == -1,
+          "unsupported rope type detected");
+
+    const bmt_arch_spec_t* spec = bmt_arch_spec_for_config(&cfg);
+    bm_arch_t arch;
+    check(bmt_config_to_arch(&cfg, spec, &arch) == 0, "arch conversion");
+    check(arch.rope_scaling == BM_ROPE_NONE, "unsupported rope not enabled");
     check(bmt_arch_validate(&arch, cfg.has_rope_scaling) != 0,
-          "rope_scaling rejected by validation");
+          "unsupported rope_scaling rejected");
 
     free_config_dir(dir);
 }
@@ -301,6 +342,7 @@ int main(void) {
     test_gemma_nested();
     test_arch_fallback();
     test_rope_scaling();
+    test_rope_scaling_unsupported();
     test_malformed();
     test_missing_dims();
     test_real_config();
