@@ -18,6 +18,7 @@ struct bmt_scheduler_s {
     bm_precision_t precision;
 
     backend_buffer_t** buffers;
+    int*               shared;   /* 1 = buffer owned by another scheduler */
 
     backend_buffer_t** param_bufs;
     backend_buffer_t** eps_bufs;
@@ -42,6 +43,8 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_rms_bwd_w;         /* rmsnorm_backward_w */
 
     backend_kernel_t* k_attn_fwd_seq;
+    backend_kernel_t* k_attn_prefill;
+    int prefill_mode;
     backend_kernel_t* k_rope_fwd_seq;
     backend_kernel_t* k_attn_bwd;
     backend_kernel_t* k_rope_bwd_seq;
@@ -74,7 +77,7 @@ bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* re
     return bmt_scheduler_create_with_precision(backend, reg, graph, max_seq_len, kv_dim, n_layers, BM_PRECISION_FP32, 1);
 }
 
-bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads) {
+static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src) {
     bmt_scheduler_t* sched = calloc(1, sizeof(bmt_scheduler_t));
     sched->backend = backend;
     sched->reg = reg;
@@ -83,8 +86,21 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
     sched->need_grads = need_grads;
 
     sched->buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
+    sched->shared = calloc(graph->n_tensors, sizeof(int));
     for (int i = 0; i < graph->n_tensors; i++) {
         bmt_tensor_t* t = &graph->tensors[i];
+
+        if (weight_src && t->type == BMT_TENSOR_TYPE_WEIGHT && t->weight_ptr) {
+            int sid = bmt_graph_find_weight(weight_src->graph, t->weight_ptr);
+            if (sid < 0) {
+                fprintf(stderr, "shared weight not found in source graph\n");
+                bmt_scheduler_destroy(sched);
+                return NULL;
+            }
+            sched->buffers[i] = weight_src->buffers[sid];
+            sched->shared[i] = 1;
+            continue;
+        }
 
         size_t n_elems = 1;
         for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
@@ -194,6 +210,8 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
     sched->k_rms_bwd_w  = backend_kernel_create(backend, "rmsnorm_backward_w");
 
     sched->k_attn_fwd_seq = backend_kernel_create(backend, "attention_forward_seq");
+    sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
+    sched->prefill_mode = 0;
     sched->k_rope_fwd_seq = backend_kernel_create(backend, "rope_forward_seq");
     sched->k_attn_bwd = backend_kernel_create(backend, "attention_backward");
     sched->k_rope_bwd_seq = backend_kernel_create(backend, "rope_backward_seq");
@@ -213,10 +231,11 @@ bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk
 void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (!sched) return;
     for (int i = 0; i < sched->graph->n_tensors; i++) {
-        if (sched->buffers[i]) backend_buffer_free(sched->buffers[i]);
+        if (sched->buffers[i] && !sched->shared[i]) backend_buffer_free(sched->buffers[i]);
         if (sched->grad_buffers[i]) backend_buffer_free(sched->grad_buffers[i]);
     }
     free(sched->buffers);
+    free(sched->shared);
     free(sched->grad_buffers);
     for (int i = 0; i < sched->graph->n_nodes; i++) {
         backend_buffer_free(sched->param_bufs[i]);
@@ -243,6 +262,8 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rms_bwd_x)  backend_kernel_destroy(sched->k_rms_bwd_x);
     if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     if (sched->k_attn_fwd_seq) backend_kernel_destroy(sched->k_attn_fwd_seq);
+    if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
+    /* shared weight buffers are owned by the source scheduler */
     if (sched->k_rope_fwd_seq) backend_kernel_destroy(sched->k_rope_fwd_seq);
     if (sched->k_attn_bwd) backend_kernel_destroy(sched->k_attn_bwd);
     if (sched->k_rope_bwd_seq) backend_kernel_destroy(sched->k_rope_bwd_seq);
@@ -366,7 +387,7 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
         }
         if (!kn) continue;
-        
+
         int* p = backend_buffer_map(sched->param_bufs[i]);
         if (node->op_type == BMK_OP_MATMUL) {
             p[0] = node->params[0]; // BT
@@ -594,6 +615,19 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             p1 = 1; p2 = node->params[0]; p3 = node->params[0];
         }
         
+        if (node->op_type == BMK_OP_COPY_LAST) {
+            backend_encode_commit(enc);
+            backend_encode_wait(enc);
+            float* src = backend_buffer_map(sched->buffers[node->inputs[0]]);
+            float* dst = backend_buffer_map(sched->buffers[node->output]);
+            int D = node->params[0], S = node->params[1];
+            memcpy(dst, src + (size_t)(S - 1) * D, (size_t)D * sizeof(float));
+            backend_buffer_unmap(sched->buffers[node->inputs[0]]);
+            backend_buffer_unmap(sched->buffers[node->output]);
+            enc = backend_encode_begin(sched->backend);
+            continue;
+        }
+
         if (node->op_type == BMK_OP_ADD) {
             backend_encode_commit(enc);
             backend_encode_wait(enc);
@@ -611,7 +645,8 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
 
         backend_kernel_t* kn = NULL;
         if (node->op_type == BMK_OP_ATTENTION) {
-            kn = sched->k_attn_fwd_seq;
+            kn = (sched->prefill_mode && sched->k_attn_prefill)
+                 ? sched->k_attn_prefill : sched->k_attn_fwd_seq;
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             kn = sched->k_rope_fwd_seq;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
@@ -630,7 +665,7 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
         }
         if (!kn) continue;
-        
+
         int* p = backend_buffer_map(sched->param_bufs[i]);
         if (node->op_type == BMK_OP_MATMUL) {
             p[0] = node->params[0]; // BT
@@ -745,7 +780,10 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             gtx = (p3 + 31) & ~31;
             gty = p1;
             ttx = 32;
-        } else if (node->op_type == BMK_OP_NORM_RMS || node->op_type == BMK_OP_FUSED_RESIDUAL_NORM) {
+        } else if (node->op_type == BMK_OP_NORM_RMS || node->op_type == BMK_OP_NORM_LAYER) {
+            gtx = node->params[0] * 32;
+            ttx = 32;
+        } else if (node->op_type == BMK_OP_FUSED_RESIDUAL_NORM) {
             gtx = node->params[0];
             ttx = gtx < 256 ? gtx : 256;
             if (ttx == 0) ttx = 1;
@@ -1023,4 +1061,45 @@ backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id
 backend_buffer_t* bmt_scheduler_get_grad_buffer(bmt_scheduler_t* sched, int tensor_id) {
     if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors) return NULL;
     return sched->grad_buffers[tensor_id];
+}
+
+void bmt_scheduler_set_prefill(bmt_scheduler_t* sched, int enabled) {
+    sched->prefill_mode = enabled;
+}
+
+void bmt_scheduler_copy_prefill_kv(bmt_scheduler_t* dst, bmt_scheduler_t* src,
+                                   int S, const int* k_ids, const int* v_ids) {
+    int MS = dst->max_seq_len;
+    int KV = dst->kv_dim;
+    float* kvc = backend_buffer_map(dst->bkvc);
+    for (int l = 0; l < dst->n_layers; l++) {
+        backend_buffer_t* bk = src->buffers[k_ids[l]];
+        backend_buffer_t* bv = src->buffers[v_ids[l]];
+        float* ks = backend_buffer_map(bk);
+        float* vs = backend_buffer_map(bv);
+        for (int t = 0; t < S; t++) {
+            memcpy(kvc + ((size_t)l * 2 * MS + t) * KV,
+                   ks + (size_t)t * KV, (size_t)KV * sizeof(float));
+            memcpy(kvc + ((size_t)l * 2 * MS + MS + t) * KV,
+                   vs + (size_t)t * KV, (size_t)KV * sizeof(float));
+        }
+        backend_buffer_unmap(bk);
+        backend_buffer_unmap(bv);
+    }
+    backend_buffer_unmap(dst->bkvc);
+}
+
+
+bmt_scheduler_t* bmt_scheduler_create_with_precision(backend_ctx_t* backend, bmk_registry_t* reg,
+        bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers,
+        bm_precision_t precision, int need_grads) {
+    return scheduler_create(backend, reg, graph, max_seq_len, kv_dim, n_layers,
+                            precision, need_grads, NULL);
+}
+
+bmt_scheduler_t* bmt_scheduler_create_shared(backend_ctx_t* backend, bmk_registry_t* reg,
+        bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers,
+        bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src) {
+    return scheduler_create(backend, reg, graph, max_seq_len, kv_dim, n_layers,
+                            precision, need_grads, weight_src);
 }
