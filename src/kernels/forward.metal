@@ -44,6 +44,40 @@ kernel void matmul_forward_naive(
 // Reads bf16, casts to float for computation, outputs float.
 // ----------------------------------------------------------------
 #if __HAVE_BFLOAT__
+kernel void matmul_forward_bf16_vec(
+    device const float* inp [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    const device bfloat* wrow = weight + (size_t)oc * C;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    for (int i = tid; i < C; i += tptg)
+        sum += x[i] * (float)wrow[i];
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid3.x & 31, sg = tid3.x >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = (tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
+
 kernel void matmul_forward_bf16(
     device const float* inp [[buffer(0)]],
     device const bfloat* weight [[buffer(1)]],
@@ -192,6 +226,47 @@ typedef struct {
     float   scale;
     uchar   qs[16];
 } q4_block_metal;  // 20 bytes — must match C q4_block_t layout
+
+kernel void matmul_forward_q4_vec(
+    device const float* inp [[buffer(0)]],
+    device const q4_block_metal* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
+    uint3 tptg3 [[threads_per_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x, tptg = (int)tptg3.x;
+    int oc = (int)tgid.x, bt = (int)tgid.y;
+    if (bt >= BT || oc >= OC) return;
+    int nblocks = C / 32;
+    const device q4_block_metal* wrow = weight + (size_t)oc * nblocks;
+    const device float* x = inp + bt * C;
+
+    float sum = 0.0f;
+    for (int idx = (int)tid; idx < C; idx += (int)tptg) {
+        int b = idx >> 5, j = idx & 31;
+        float s = wrow[b].scale;
+        uchar byte = wrow[b].qs[j >> 1];
+        int q = (j & 1) ? ((int)(char)byte >> 4)
+                        : ((int)(char)(byte << 4) >> 4);
+        sum += x[idx] * ((float)q * s);
+    }
+
+    sum = simd_sum(sum);
+    threadgroup float red[32];
+    uint lane = tid & 31, sg = tid >> 5;
+    if (lane == 0) red[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        int nsg = ((int)tptg + 31) / 32;
+        for (int i = 0; i < nsg; i++) total += red[i];
+        out[bt * OC + oc] = total + (has_bias ? bias[oc] : 0.0f);
+    }
+}
 
 kernel void matmul_forward_q4(
     device const float* inp [[buffer(0)]],
