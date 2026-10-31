@@ -118,6 +118,29 @@ static const char* k_spm_bpe_no_prepend =
     "                     \"behavior\": \"MergedWithPrevious\", \"invert\": false}"
     "}";
 
+static const char* k_spm_bpe_array_merges =
+    "{\n"
+    " \"model\": {\n"
+    "  \"type\": \"BPE\",\n"
+    "  \"byte_fallback\": true,\n"
+    "  \"unk_id\": 0,\n"
+    "  \"vocab\": {\n"
+    "   \"<unk>\": 0, \"<s>\": 1, \"</s>\": 2,\n"
+    "   \"\xE2\x96\x81\": 5, \"O\": 6, \"n\": 7, \"c\": 8, \"e\": 9,\n"
+    "   \"\xE2\x96\x81O\": 10, \"\xE2\x96\x81On\": 11,\n"
+    "   \"\xE2\x96\x81Onc\": 12, \"\xE2\x96\x81Once\": 13\n"
+    "  },\n"
+    "  \"merges\": [\n"
+    "   [\"\xE2\x96\x81\", \"O\"],\n"
+    "   [\"\xE2\x96\x81O\", \"n\"],\n"
+    "   [\"\xE2\x96\x81On\", \"c\"],\n"
+    "   [\"\xE2\x96\x81Onc\", \"e\"]\n"
+    "  ]\n"
+    " },\n"
+    " \"normalizer\": {\"type\": \"Prepend\", \"prepend\": \"\xE2\x96\x81\"},\n"
+    " \"pre_tokenizer\": null\n"
+    "}";
+
 static const char* k_unigram =
     "{"
     " \"model\": {"
@@ -177,6 +200,22 @@ static void test_synthetic_no_prepend(void) {
     free_tokenizer_dir(dir);
 }
 
+static void test_synthetic_array_merges(void) {
+    char* dir = make_tokenizer_dir(k_spm_bpe_array_merges);
+    check(dir != NULL, "write array-merges SPM-BPE tokenizer");
+    if (!dir) return;
+
+    bm_tokenizer_t t;
+    bm_tokenizer_init(&t, dir, 14);
+    check(t.kind == BM_TOKENIZER_SPM_BPE, "array-merges SPM-BPE detected");
+
+    int want[] = {13};
+    expect_ids("array-merges Once", &t, "Once", want, 1);
+
+    bm_tokenizer_free(&t);
+    free_tokenizer_dir(dir);
+}
+
 static void test_synthetic_unigram(void) {
     char* dir = make_tokenizer_dir(k_unigram);
     check(dir != NULL, "write synthetic Unigram tokenizer");
@@ -213,6 +252,7 @@ static void test_real(const char* name, const char* dir, int vocab_size,
 
 int main(void) {
     test_synthetic_spm_bpe();
+    test_synthetic_array_merges();
     test_synthetic_no_prepend();
     test_synthetic_unigram();
 
