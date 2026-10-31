@@ -36,6 +36,11 @@ typedef enum {
 } bm_attn_t;
 
 typedef enum {
+    BM_ROPE_NONE = 0,
+    BM_ROPE_LLAMA3 = 1,
+} bm_rope_scaling_t;
+
+typedef enum {
     BM_PRECISION_FP32,
     BM_PRECISION_FP16,
     BM_PRECISION_BF16,
@@ -73,6 +78,12 @@ typedef struct {
     int weight_layout;
 
     float rope_theta;
+
+    bm_rope_scaling_t rope_scaling;
+    float rope_factor;
+    float rope_low_freq_factor;
+    float rope_high_freq_factor;
+    float rope_original_max;
 } bm_arch_t;
 
 /* ---- Training config ---- */
