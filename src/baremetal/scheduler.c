@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 struct bmt_scheduler_s {
     backend_ctx_t* backend;
@@ -85,6 +88,15 @@ struct bmt_scheduler_s {
 
 bmt_scheduler_t* bmt_scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers) {
     return bmt_scheduler_create_with_precision(backend, reg, graph, max_seq_len, kv_dim, n_layers, BM_PRECISION_FP32, 1);
+}
+
+static void drop_source_pages(const void* p, size_t bytes) {
+    if (!p || !bytes) return;
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    uintptr_t start = (uintptr_t)p & ~((uintptr_t)ps - 1);
+    uintptr_t end = ((uintptr_t)p + bytes + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
+    madvise((void*)start, (size_t)(end - start), MADV_DONTNEED);
 }
 
 static const void* tensor_weight_src(const bmt_tensor_t* t) {
@@ -193,6 +205,8 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
                 backend_buffer_unmap(sched->buffers[i]);
             }
         }
+        if (t->src_ptr)
+            drop_source_pages(t->src_ptr, n_elems * (t->src_is_bf16 ? sizeof(bm_bf16_t) : sizeof(float)));
     }
 
     /* Gradient buffers: one per tensor, always fp32-sized (grads are fp32 even
