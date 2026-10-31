@@ -175,7 +175,9 @@ int main(int argc, char** argv) {
 
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
     if (!m) { fprintf(stderr, "model alloc failed\n"); return 1; }
+    double t_w0 = bm_now_ms();
     bm_load_weights(m, model_dir);
+    double t_w1 = bm_now_ms();
     if (!m->weight_buffer) {
         fprintf(stderr, "failed to load weights from %s\n", model_dir);
         return 1;
@@ -192,9 +194,14 @@ int main(int argc, char** argv) {
     }
 
     bm_compile(m);
+    double t_c1 = bm_now_ms();
     bm_session_t* sess = bm_create_session(ctx, m);
     if (!sess) { fprintf(stderr, "session failed\n"); return 1; }
-    double load_ms = bm_now_ms() - t_load0;
+    double t_s1 = bm_now_ms();
+    double weights_ms = t_w1 - t_w0;
+    double compile_ms = t_c1 - t_w1;
+    double session_ms = t_s1 - t_c1;
+    double load_ms = t_s1 - t_load0;
     snap_rusage(&rs_load);
 
     int V = m->arch.vocab_size;
@@ -559,6 +566,8 @@ int main(int argc, char** argv) {
 
     fprintf(out, "  \"results\": {\n");
     fprintf(out, "    \"load_ms\": %.3f,\n", load_ms);
+    fprintf(out, "    \"load_breakdown\": { \"weights_ms\": %.3f, \"compile_ms\": %.3f, \"session_ms\": %.3f },\n",
+            weights_ms, compile_ms, session_ms);
     fprintf(out, "    \"prefill\": {\n      ");
     emit_stats(out, "tok_s", prefill_tps, reps);
     fprintf(out, ",\n      ");
