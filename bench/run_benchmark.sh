@@ -412,24 +412,29 @@ train_model() {
   local stem="$1"
   echo "== train $stem =="
   for prec in bf16 fp32; do
-    for B in 1 4; do
-      local cfg="${prec}_b${B}"
+    for cfgname in b1 b4 ga4; do
+      local B=1 GA=1
+      case "$cfgname" in
+        b4)  B=4;;
+        ga4) GA=4;;
+      esac
+      local cfg="${prec}_${cfgname}"
       local dir="$RUN_DIR/raw/$stem"
       local ref="$dir/ref/train_ref__${cfg}.json"
       local out="$dir/train__${cfg}.json"
       mkdir -p "$dir/ref"
       "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
-        --seq-len "$TRAIN_SEQ_LEN" --steps 3 --warmup 0 --batch-size "$B" \
+        --seq-len "$TRAIN_SEQ_LEN" --steps 3 --warmup 0 --batch-size "$B" --grad-accum "$GA" \
         --out "$ref" >/dev/null 2>&1 || { echo "  FAILED ref $stem $cfg"; continue; }
       if [ "$HAVE_ENERGY" -eq 1 ]; then
         energy_exec "$out" "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
-          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" \
-          --parity-steps 2 --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
+          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" --grad-accum "$GA" \
+          --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
           || echo "  FAILED parity $stem $cfg"
       else
         "$TRAIN_BENCH" --model "models/$stem" --precision "$prec" \
-          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" \
-          --parity-steps 2 --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
+          --seq-len "$TRAIN_SEQ_LEN" --steps "$TRAIN_STEPS" --warmup 0 --batch-size "$B" --grad-accum "$GA" \
+          --parity-steps 1 --ref "$ref" --check --out "$out" >/dev/null 2>&1 \
           || echo "  FAILED parity $stem $cfg"
       fi
       echo "  $cfg"
