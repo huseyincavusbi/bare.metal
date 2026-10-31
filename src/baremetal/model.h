@@ -23,6 +23,7 @@ struct bm_model_s {
     void*    weight_buffer;
 
     float*   token_embedding_table;
+    bm_bf16_t* token_embedding_bf16;
     float*   wpe;
     float*   ln1w;
     float*   ln1b;
