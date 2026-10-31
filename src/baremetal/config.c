@@ -190,7 +190,28 @@ int bmt_config_load(const char* dir_path, bmt_config_t* cfg) {
     }
 
     const bmt_json_t* scaling = bmt_json_get(section, "rope_scaling");
-    cfg->has_rope_scaling = bmt_json_type(scaling) == BMT_JSON_OBJECT;
+    if (bmt_json_type(scaling) == BMT_JSON_OBJECT) {
+        cfg->has_rope_scaling = 1;
+        const char* rtype = bmt_json_string(bmt_json_get(scaling, "rope_type"));
+        if (!rtype) rtype = bmt_json_string(bmt_json_get(scaling, "type"));
+        cfg->rope_scaling_type = (rtype && strcmp(rtype, "llama3") == 0) ? 1 : -1;
+
+        const bmt_json_t* v = bmt_json_get(scaling, "factor");
+        if (v) bmt_json_float(v, &cfg->rope_factor);
+        v = bmt_json_get(scaling, "low_freq_factor");
+        if (v) bmt_json_float(v, &cfg->rope_low_freq_factor);
+        v = bmt_json_get(scaling, "high_freq_factor");
+        if (v) bmt_json_float(v, &cfg->rope_high_freq_factor);
+        v = bmt_json_get(scaling, "original_max_position_embeddings");
+        if (v) bmt_json_float(v, &cfg->rope_original_max);
+    }
+
+    if (cfg->rope_factor <= 0.0f) cfg->rope_factor = 1.0f;
+    if (cfg->rope_low_freq_factor <= 0.0f) cfg->rope_low_freq_factor = 1.0f;
+    if (cfg->rope_high_freq_factor <= 0.0f) cfg->rope_high_freq_factor = 4.0f;
+    if (cfg->rope_original_max <= 0)
+        cfg->rope_original_max = cfg->max_position_embeddings > 0
+                                 ? cfg->max_position_embeddings : 8192;
 
     const char* act = bmt_json_string(bmt_json_get(section, "hidden_act"));
     if (!act) act = bmt_json_string(bmt_json_get(section, "hidden_activation"));
@@ -265,6 +286,12 @@ int bmt_config_to_arch(const bmt_config_t* cfg, const bmt_arch_spec_t* spec,
     arch->weight_tie = cfg->tie_word_embeddings;
     arch->gated_mlp = arch->activation == BM_ACT_SWIGLU;
     arch->rope_theta = cfg->has_rope_theta ? cfg->rope_theta : 10000.0f;
+    arch->rope_scaling = (cfg->has_rope_scaling && cfg->rope_scaling_type == 1)
+                         ? BM_ROPE_LLAMA3 : BM_ROPE_NONE;
+    arch->rope_factor = cfg->rope_factor;
+    arch->rope_low_freq_factor = cfg->rope_low_freq_factor;
+    arch->rope_high_freq_factor = cfg->rope_high_freq_factor;
+    arch->rope_original_max = cfg->rope_original_max;
     arch->precision = BM_PRECISION_FP32;
     return 0;
 }
