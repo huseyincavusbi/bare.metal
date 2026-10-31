@@ -46,6 +46,7 @@ static void usage(const char* prog) {
         "  --prompt-tokens N   prompt length in tokens        (default 128)\n"
         "  --raw-prompt        use the encoded prompt as-is, no tiling\n"
         "  --gen M             tokens to generate             (default 128)\n"
+        "  --max-seq N         cap the KV cache / context length\n"
         "  --warmup W          discarded warmup reps          (default 2)\n"
         "  --reps R            measured reps                  (default 5)\n"
         "  --temp T            sampling temperature (0=greedy)(default 0)\n"
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     uint64_t seed = 42;
     int   quant = 0;
     int   raw_prompt = 0;
+    int   max_seq_arg = 0;
     int   raw = 1;
     int   profile = 0;    double avg_w = 0.0;
     double peak_gbps = 0.0, peak_gflops = 0.0;
@@ -131,6 +133,7 @@ int main(int argc, char** argv) {
         if      (!strcmp(argv[i], "--model") && i+1 < argc)         model_dir = argv[++i];
         else if (!strcmp(argv[i], "--prompt-tokens") && i+1 < argc) prompt_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gen") && i+1 < argc)           gen_tokens = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-seq") && i+1 < argc)        max_seq_arg = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warmup") && i+1 < argc)        warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reps") && i+1 < argc)          reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--temp") && i+1 < argc)          temp = (float)atof(argv[++i]);
@@ -178,6 +181,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     m->quant_bits = quant;
+    if (max_seq_arg > 0) m->arch.max_seq_len = max_seq_arg;
 
     if (prec_arg) {
         if      (!strcmp(prec_arg, "bf16")) m->precision = BM_PRECISION_BF16;

@@ -81,8 +81,13 @@ typedef struct {
     int has_rms_norm_eps;
     int has_rope_theta;
     int has_rope_scaling;
+    int rope_scaling_type;   /* 1 = llama3, 0 = none, -1 = unsupported */
 
     float rope_theta;
+    float rope_factor;
+    float rope_low_freq_factor;
+    float rope_high_freq_factor;
+    float rope_original_max;
     char hidden_act[32];
 } bmt_config_t;
 

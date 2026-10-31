@@ -36,6 +36,7 @@ typedef struct bm_tokenizer_s {
     int               eos_id;
     int               prepend_space;
     int               split_words;
+    int               add_bos;
 } bm_tokenizer_t;
 
 void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size);

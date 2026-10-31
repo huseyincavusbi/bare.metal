@@ -388,7 +388,7 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             backend_buffer_unmap(sched->pos_bufs[i]);
             
             float* ef = backend_buffer_map(sched->eps_bufs[i]);
-            ef[0] = node->fparams[0];
+            for (int j = 0; j < node->n_fparams; j++) ef[j] = node->fparams[j];
             backend_buffer_unmap(sched->eps_bufs[i]);
             
             int* p_nkv = backend_buffer_map(sched->nkv_bufs[i]);
@@ -660,7 +660,7 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             backend_buffer_unmap(sched->eps_bufs[i]);
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             float* ef = backend_buffer_map(sched->eps_bufs[i]);
-            ef[0] = node->fparams[0]; // theta
+            for (int j = 0; j < node->n_fparams; j++) ef[j] = node->fparams[j];
             backend_buffer_unmap(sched->eps_bufs[i]);
         } else if (node->n_fparams > 0) {
             float* ef = backend_buffer_map(sched->eps_bufs[i]);
@@ -935,7 +935,7 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             backend_buffer_unmap(sched->param_bufs[i]);
             
             float* ef = backend_buffer_map(sched->eps_bufs[i]);
-            ef[0] = node->fparams[0]; // theta
+            for (int j = 0; j < node->n_fparams; j++) ef[j] = node->fparams[j];
             backend_buffer_unmap(sched->eps_bufs[i]);
             
             backend_buffer_t* b1[] = {

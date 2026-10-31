@@ -127,7 +127,7 @@ int* bm_encode(bm_tokenizer_t* tok, const char* text, int* n_tokens) {
     int* tokens = (int*)malloc((size_t)cap * sizeof(int));
     if (!tokens) return NULL;
     int n = 0;
-    if (bm_tokenizer_encode(tok, text, 0, 0, tokens, &n) != 0) {
+    if (bm_tokenizer_encode(tok, text, (int8_t)tok->add_bos, 0, tokens, &n) != 0) {
         free(tokens);
         return NULL;
     }

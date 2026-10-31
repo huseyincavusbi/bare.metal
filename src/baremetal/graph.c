@@ -88,6 +88,16 @@ int bmt_graph_add_weight(bmt_graph_t* graph, void* ptr, int n_dims, const int* d
     return id;
 }
 
+static int rope_params(const bm_model_t* m, float* p) {
+    p[0] = m->arch.rope_theta;
+    p[1] = m->arch.rope_factor;
+    p[2] = m->arch.rope_low_freq_factor;
+    p[3] = m->arch.rope_high_freq_factor;
+    p[4] = m->arch.rope_original_max;
+    p[5] = (m->arch.rope_scaling == BM_ROPE_LLAMA3) ? 1.0f : 0.0f;
+    return 6;
+}
+
 void bmt_graph_build(bm_model_t* m) {
     if (m->graph) bmt_graph_destroy(m->graph);
     bmt_graph_t* g = bmt_graph_create();
@@ -133,7 +143,9 @@ void bmt_graph_build(bm_model_t* m) {
 
         // RoPE
         if (m->arch.pos_enc == BM_POS_ROPE) {
-            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, m->n_kv_heads, NH}, 1, (float[]){m->arch.rope_theta});
+            float rp[6];
+            rope_params(m, rp);
+            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, m->n_kv_heads, NH}, 6, rp);
         }
 
         // Attention
@@ -259,7 +271,9 @@ void bmt_graph_build_train(bm_model_t* m, int S) {
         bmt_graph_add_node(g, BMK_OP_MATMUL, 2, (int[]){t_norm1, t_vw}, t_v, 3, (int[]){S, D, KV}, 0, NULL);
 
         if (m->arch.pos_enc == BM_POS_ROPE) {
-            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, NKV, NH}, 1, (float[]){m->arch.rope_theta});
+            float rp[6];
+            rope_params(m, rp);
+            bmt_graph_add_node(g, BMK_OP_POS_ENC_ROPE, 2, (int[]){t_q, t_k}, t_q, 3, (int[]){HD, NKV, NH}, 6, rp);
         }
 
         int t_attn_out = bmt_graph_add_tensor(g, BMT_TENSOR_TYPE_ACTIVATION, 2, (int[]){S, NH*HD});

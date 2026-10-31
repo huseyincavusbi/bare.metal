@@ -185,6 +185,27 @@ kernel void rmsnorm_backward_w(
 // buffers: [0]=gout_q [1]=gout_k [2]=gq [3]=gk
 //          [4]=head_size [5]=pos [6]=theta [7]=n_kv_heads
 // ----------------------------------------------------------------
+static inline float rope_inv_freq(constant float* r, int i, int head_size) {
+    float theta = r[0];
+    float inv = 1.0f / pow(theta, (float)(2 * i) / (float)head_size);
+    if (r[5] > 0.5f) {
+        const float pi = 3.14159265358979323846f;
+        float factor = r[1];
+        float low = r[2];
+        float high = r[3];
+        float orig = r[4];
+        float wavelen = 2.0f * pi / inv;
+        float low_w = orig / low;
+        float high_w = orig / high;
+        if (wavelen > low_w) inv /= factor;
+        if (wavelen >= high_w && wavelen <= low_w) {
+            float smooth = (orig / wavelen - low) / (high - low);
+            inv = (1.0f - smooth) * inv / factor + smooth * inv;
+        }
+    }
+    return inv;
+}
+
 kernel void rope_backward(
     device const float* gout_q [[buffer(0)]],
     device const float* gout_k [[buffer(1)]],
@@ -192,7 +213,7 @@ kernel void rope_backward(
     device float* gk           [[buffer(3)]],
     constant int& head_size    [[buffer(4)]],
     constant int& pos          [[buffer(5)]],
-    constant float& theta      [[buffer(6)]],
+    constant float* rope       [[buffer(6)]],
     constant int& n_kv_heads   [[buffer(7)]],
     uint gid [[thread_position_in_grid]])
 {
@@ -201,7 +222,7 @@ kernel void rope_backward(
     device const float* gqin = gout_q + h * head_size;
     device float* gqout = gq + h * head_size;
     for (int i = 0; i < hd2; i++) {
-        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float freq = rope_inv_freq(rope, i, head_size);
         float c = cos((float)pos * freq);
         float s = sin((float)pos * freq);
         float g0 = gqin[i], g1 = gqin[i + hd2];
@@ -212,7 +233,7 @@ kernel void rope_backward(
         device const float* gkin = gout_k + h * head_size;
         device float* gkout = gk + h * head_size;
         for (int i = 0; i < hd2; i++) {
-            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float freq = rope_inv_freq(rope, i, head_size);
             float c = cos((float)pos * freq);
             float s = sin((float)pos * freq);
             float g0 = gkin[i], g1 = gkin[i + hd2];
@@ -446,7 +467,7 @@ kernel void rope_backward_seq(
     device float* gq           [[buffer(2)]],
     device float* gk           [[buffer(3)]],
     constant int* p           [[buffer(4)]],
-    constant float& theta      [[buffer(5)]],
+    constant float* rope       [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     int head_size = p[0], n_kv_heads = p[1], S = p[2], NH = p[3];
@@ -457,7 +478,7 @@ kernel void rope_backward_seq(
     const device float* gqin = gout_q + (s * NH + h) * head_size;
     device float* gqout = gq + (s * NH + h) * head_size;
     for (int i = 0; i < hd2; i++) {
-        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float freq = rope_inv_freq(rope, i, head_size);
         float c = cos((float)s * freq);
         float s_ = sin((float)s * freq);
         float g0 = gqin[i], g1 = gqin[i + hd2];
@@ -468,7 +489,7 @@ kernel void rope_backward_seq(
         const device float* gkin = gout_k + (s * n_kv_heads + h) * head_size;
         device float* gkout = gk + (s * n_kv_heads + h) * head_size;
         for (int i = 0; i < hd2; i++) {
-            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float freq = rope_inv_freq(rope, i, head_size);
             float c = cos((float)s * freq);
             float s_ = sin((float)s * freq);
             float g0 = gkin[i], g1 = gkin[i + hd2];

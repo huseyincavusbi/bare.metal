@@ -289,6 +289,7 @@ static void bm_tokenizer_init_from_bin(bm_tokenizer_t* t, const char* path, int 
     t->eos_id = 2;
     t->prepend_space = 0;
     t->split_words = 0;
+    t->add_bos = 0;
     for (int i = 0; i < 256; i++) {
         t->byte_pieces[i * 2] = (unsigned char)i;
         t->byte_pieces[i * 2 + 1] = '\0';
@@ -337,6 +338,20 @@ static void bm_tokenizer_init_from_bin(bm_tokenizer_t* t, const char* path, int 
     }
 }
 
+static int added_token_id(const char* json, const char* content) {
+    const char* p = strstr(json, content);
+    if (!p) return -1;
+    const char* start = p > json + 512 ? p - 512 : json;
+    const char* idp = NULL;
+    for (const char* q = start; q + 4 < p; q++) {
+        if (strncmp(q, "\"id\"", 4) == 0) idp = q;
+    }
+    if (!idp) return -1;
+    idp = strchr(idp, ':');
+    if (!idp) return -1;
+    return (int)strtol(idp + 1, NULL, 10);
+}
+
 // --- JSON format loader (tokenizer.json, no preprocessing needed) ---
 
 static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path, int vocab_size) {
@@ -377,6 +392,7 @@ static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path
     t->eos_id = 2;
     t->prepend_space = 0;
     t->split_words = 0;
+    t->add_bos = 0;
 
     const char* model = strstr(json, "\"model\"");
     if (!model) model = json;
@@ -520,9 +536,11 @@ static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path
     }
     int sid = man_bsearch("<s>", t->sorted_vocab, t->vocab_size);
     if (sid < 0) sid = man_bsearch("<bos>", t->sorted_vocab, t->vocab_size);
+    if (sid < 0) sid = added_token_id(json, "<|begin_of_text|>");
     t->bos_id = sid >= 0 ? sid : -1;
     int eid = man_bsearch("</s>", t->sorted_vocab, t->vocab_size);
     if (eid < 0) eid = man_bsearch("<eos>", t->sorted_vocab, t->vocab_size);
+    if (eid < 0) eid = added_token_id(json, "<|end_of_text|>");
     t->eos_id = eid >= 0 ? eid : 2;
 
     p = strstr(json, "\"merges\"");
@@ -595,9 +613,36 @@ void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
     if (f) {
         fclose(f);
         bm_tokenizer_init_from_json(t, json_path, vocab_size);
-        return;
+    } else {
+        bm_tokenizer_init_from_bin(t, path, vocab_size);
     }
-    bm_tokenizer_init_from_bin(t, path, vocab_size);
+
+    t->add_bos = 0;
+    char cfg_path[512];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/tokenizer_config.json", path);
+    FILE* cfg = fopen(cfg_path, "rb");
+    if (cfg) {
+        fseek(cfg, 0, SEEK_END);
+        long len = ftell(cfg);
+        fseek(cfg, 0, SEEK_SET);
+        if (len > 0) {
+            char* text = malloc((size_t)len + 1);
+            if (text && fread(text, 1, (size_t)len, cfg) == (size_t)len) {
+                text[len] = '\0';
+                const char* p = strstr(text, "\"add_bos_token\"");
+                if (p) {
+                    p = strchr(p, ':');
+                    if (p) {
+                        p++;
+                        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+                        t->add_bos = strncmp(p, "true", 4) == 0;
+                    }
+                }
+            }
+            free(text);
+        }
+        fclose(cfg);
+    }
 }
 
 void bm_tokenizer_free(bm_tokenizer_t* t) {
@@ -653,6 +698,8 @@ static int bpe_merge(bm_tokenizer_t* t, int* tokens, int* n_tokens) {
         float best_score = -1e10f;
         int best_id = -1, best_idx = -1;
         for (int i = 0; i < *n_tokens - 1; i++) {
+            if (t->vocab[tokens[i]][0] == '\0' || t->vocab[tokens[i + 1]][0] == '\0')
+                continue;
             int n = snprintf(str_buffer, cap, "%s%s",
                              t->vocab[tokens[i]], t->vocab[tokens[i + 1]]);
             if (n < 0 || (size_t)n >= cap) continue;

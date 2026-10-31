@@ -621,6 +621,30 @@ kernel void softmax_causal_scale(
 }
 
 // ----------------------------------------------------------------
+// rope frequencies: [0]=theta [1]=factor [2]=low [3]=high [4]=orig [5]=llama3
+// ----------------------------------------------------------------
+static inline float rope_inv_freq(constant float* r, int i, int head_size) {
+    float theta = r[0];
+    float inv = 1.0f / pow(theta, (float)(2 * i) / (float)head_size);
+    if (r[5] > 0.5f) {
+        const float pi = 3.14159265358979323846f;
+        float factor = r[1];
+        float low = r[2];
+        float high = r[3];
+        float orig = r[4];
+        float wavelen = 2.0f * pi / inv;
+        float low_w = orig / low;
+        float high_w = orig / high;
+        if (wavelen > low_w) inv /= factor;
+        if (wavelen >= high_w && wavelen <= low_w) {
+            float smooth = (orig / wavelen - low) / (high - low);
+            inv = (1.0f - smooth) * inv / factor + smooth * inv;
+        }
+    }
+    return inv;
+}
+
+// ----------------------------------------------------------------
 // rope_forward
 // ----------------------------------------------------------------
 kernel void rope_forward(
@@ -628,7 +652,7 @@ kernel void rope_forward(
     device float* k [[buffer(1)]],
     constant int& head_size [[buffer(2)]],
     constant int& pos [[buffer(3)]],
-    constant float& theta [[buffer(4)]],
+    constant float* rope [[buffer(4)]],
     constant int& n_kv_heads [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
@@ -637,7 +661,7 @@ kernel void rope_forward(
     int hd2 = head_size / 2;
 
     for (int i = 0; i < hd2; i++) {
-        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float freq = rope_inv_freq(rope, i, head_size);
         float cosv = cos((float)pos * freq);
         float sinv = sin((float)pos * freq);
 
@@ -1042,7 +1066,7 @@ kernel void rope_forward_seq(
     device float* q            [[buffer(0)]],
     device float* k            [[buffer(1)]],
     constant int* p            [[buffer(2)]],
-    constant float& theta      [[buffer(3)]],
+    constant float* rope       [[buffer(3)]],
     uint gid [[thread_position_in_grid]])
 {
     int head_size = p[0], n_kv_heads = p[1], S = p[2], NH = p[3];
@@ -1052,7 +1076,7 @@ kernel void rope_forward_seq(
     int hd2 = head_size / 2;
     device float* qh = q + (s * NH + h) * head_size;
     for (int i = 0; i < hd2; i++) {
-        float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+        float freq = rope_inv_freq(rope, i, head_size);
         float c = cos((float)s * freq);
         float s_ = sin((float)s * freq);
         float q0 = qh[i], q1 = qh[i + hd2];
@@ -1062,7 +1086,7 @@ kernel void rope_forward_seq(
     if (h < n_kv_heads) {
         device float* kh = k + (s * n_kv_heads + h) * head_size;
         for (int i = 0; i < hd2; i++) {
-            float freq = 1.0f / pow(theta, (float)(2*i) / (float)head_size);
+            float freq = rope_inv_freq(rope, i, head_size);
             float c = cos((float)s * freq);
             float s_ = sin((float)s * freq);
             float k0 = kh[i], k1 = kh[i + hd2];
