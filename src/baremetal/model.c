@@ -19,7 +19,8 @@ int bmt_arch_validate(const bm_arch_t* arch, int has_rope_scaling) {
     if (arch->has_ffn_post_norm) names[n++] = "post_ffn_norm";
     if (arch->gemma_norm)        names[n++] = "gemma_norm";
     if (arch->embed_scale)       names[n++] = "embed_scale";
-    if (has_rope_scaling)        names[n++] = "rope_scaling";
+    if (has_rope_scaling && arch->rope_scaling != BM_ROPE_LLAMA3)
+        names[n++] = "rope_scaling";
 
     if (n == 0) return 0;
 
