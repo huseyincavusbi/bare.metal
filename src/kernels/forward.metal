@@ -131,7 +131,7 @@ kernel void matmul_forward_bf16_tiled(
     int oc = oc0 + col;
 
     threadgroup float As[MM_PRE_BM][MM_PRE_BK];
-    threadgroup float Bs[MM_PRE_BN][MM_PRE_BK];
+    threadgroup float Bs[MM_PRE_BN][MM_PRE_BK + 1];
     float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
 
     for (int kk = 0; kk < C; kk += MM_PRE_BK) {
@@ -254,7 +254,7 @@ kernel void matmul_forward_fp16_tiled(
     int oc = oc0 + col;
 
     threadgroup float As[MM_PRE_BM][MM_PRE_BK];
-    threadgroup float Bs[MM_PRE_BN][MM_PRE_BK];
+    threadgroup float Bs[MM_PRE_BN][MM_PRE_BK + 1];
     float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
 
     for (int kk = 0; kk < C; kk += MM_PRE_BK) {
