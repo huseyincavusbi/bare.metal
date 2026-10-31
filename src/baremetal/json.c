@@ -514,3 +514,20 @@ const bmt_json_t* bmt_json_array_get(const bmt_json_t* value, int index) {
     if (index < 0 || index >= value->as.array.count) return NULL;
     return value->as.array.items[index];
 }
+
+int bmt_json_object_count(const bmt_json_t* value) {
+    if (!value || value->type != BMT_JSON_OBJECT) return 0;
+    return value->as.object.count;
+}
+
+const char* bmt_json_object_key(const bmt_json_t* value, int index) {
+    if (!value || value->type != BMT_JSON_OBJECT) return NULL;
+    if (index < 0 || index >= value->as.object.count) return NULL;
+    return value->as.object.keys[index];
+}
+
+const bmt_json_t* bmt_json_object_value(const bmt_json_t* value, int index) {
+    if (!value || value->type != BMT_JSON_OBJECT) return NULL;
+    if (index < 0 || index >= value->as.object.count) return NULL;
+    return value->as.object.values[index];
+}
