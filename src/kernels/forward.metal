@@ -290,6 +290,64 @@ kernel void matmul_forward_fp16_tiled(
 }
 
 // ----------------------------------------------------------------
+// matmul_forward_fp32_tiled
+// Vectorized fp32 tiled GEMM used by training and fp32 prefill.
+// 256 threads, 32x32 output tile, 4 rows per thread.
+// ----------------------------------------------------------------
+kernel void matmul_forward_fp32_tiled(
+    device const float* inp [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x;
+    int oc0 = (int)tgid.x * MM_PRE_BN;
+    int bt0 = (int)tgid.y * MM_PRE_BM;
+    int col = tid & 31;
+    int rowg = tid >> 5;
+    int oc = oc0 + col;
+
+    threadgroup float As[MM_PRE_BM][MM_PRE_BK];
+    threadgroup float Bs[MM_PRE_BN][MM_PRE_BK + 1];
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+
+    for (int kk = 0; kk < C; kk += MM_PRE_BK) {
+        int kb = min(MM_PRE_BK, C - kk);
+        for (int idx = tid; idx < MM_PRE_BM * MM_PRE_BK; idx += MM_PRE_TG) {
+            int r = idx >> 5, k = idx & 31;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? inp[(size_t)br * C + kk + k] : 0.0f;
+        }
+        for (int idx = tid; idx < MM_PRE_BN * MM_PRE_BK; idx += MM_PRE_TG) {
+            int n = idx >> 5, k = idx & 31;
+            int woc = oc0 + n;
+            Bs[n][k] = (woc < OC && k < kb) ? weight[(size_t)woc * C + kk + k] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float b = Bs[col][k];
+            a0 += As[rowg +  0][k] * b;
+            a1 += As[rowg +  8][k] * b;
+            a2 += As[rowg + 16][k] * b;
+            a3 += As[rowg + 24][k] * b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (oc >= OC) return;
+    float bv = has_bias ? bias[oc] : 0.0f;
+    int r0 = bt0 + rowg;
+    if (r0 +  0 < BT) out[(size_t)(r0 +  0) * OC + oc] = a0 + bv;
+    if (r0 +  8 < BT) out[(size_t)(r0 +  8) * OC + oc] = a1 + bv;
+    if (r0 + 16 < BT) out[(size_t)(r0 + 16) * OC + oc] = a2 + bv;
+    if (r0 + 24 < BT) out[(size_t)(r0 + 24) * OC + oc] = a3 + bv;
+}
+
+// ----------------------------------------------------------------
 // matmul_forward_tiled
 // Tiled GEMM with threadgroup shared memory for input reuse.
 // One threadgroup computes BN output elements, reusing one shared
