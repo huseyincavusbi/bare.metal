@@ -189,6 +189,8 @@ void bmt_model_free_buffers(bm_model_t* model) {
     else
         free(model->weight_buffer);
     free(model->weight_srcs);
+    free(model->lora);
+    free(model->lora_ab);
     free(model->token_embedding_bf16);
     memset(model, 0, sizeof(bm_model_t));
 }

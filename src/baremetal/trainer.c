@@ -8,6 +8,7 @@
 #include "baremetal/graph.h"
 #include "baremetal/compiler.h"
 #include "baremetal/model.h"
+#include "baremetal/lora.h"
 #include "baremetal/types.h"
 #include "kernels/registry.h"
 #include "backend/backend.h"
@@ -35,11 +36,36 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     t->step = 0;
     t->S = S;
 
+    if (cfg->lora_rank > 0) {
+        bmt_lora_config_t lc = {
+            .rank = cfg->lora_rank,
+            .alpha = cfg->lora_alpha > 0.0f ? cfg->lora_alpha : (float)cfg->lora_rank,
+            .targets = cfg->lora_targets,
+            .seed = cfg->lora_seed,
+        };
+        if (bmt_lora_init(model, &lc) != 0) {
+            free(t);
+            return NULL;
+        }
+    } else {
+        bmt_lora_free(model);
+    }
+
     /* build the training graph (separate residuals, S-sized) */
     bmt_graph_build_train(model, S);
     /* TODO: training fusion requires graph restructure (in-place residuals) */
     /* bmt_compiler_run(model->graph); */
     bmt_graph_t* g = (bmt_graph_t*)model->graph;
+    if (model->n_lora > 0) {
+        for (int i = 0; i < g->n_tensors; i++) {
+            if (g->tensors[i].type == BMT_TENSOR_TYPE_WEIGHT) g->tensors[i].trainable = 0;
+        }
+        for (int i = 0; i < model->n_lora; i++) {
+            bmt_lora_adapter_t* a = &model->lora[i];
+            if (a->t_a >= 0) g->tensors[a->t_a].trainable = 1;
+            if (a->t_b >= 0) g->tensors[a->t_b].trainable = 1;
+        }
+    }
     t->t_x_id = 0;
     t->t_logits_id = g->n_tensors - 1;
 
@@ -59,7 +85,7 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     t->opt_states = calloc(cap, sizeof(bmt_adamw_state_t));
     for (int i = 0; i < g->n_tensors; i++) {
         bmt_tensor_t* wt = &g->tensors[i];
-        if (wt->type != BMT_TENSOR_TYPE_WEIGHT || !wt->weight_ptr) continue;
+        if (wt->type != BMT_TENSOR_TYPE_WEIGHT || !wt->weight_ptr || !wt->trainable) continue;
         size_t n = 1;
         for (int d = 0; d < wt->n_dims; d++) n *= wt->dims[d];
         if (n == 0) continue;
@@ -257,7 +283,13 @@ static void embed_lookup(bm_trainer_t* t, const int* tokens, int S) {
             break;
         }
     }
-    if (!src) src = bmt_scheduler_get_buffer(t->sched, wte_id);
+    if (!src) {
+        const float* wte = (const float*)t->model->token_embedding_table;
+        for (int s = 0; s < S; s++)
+            memcpy(t->x_in + s*D, wte + (size_t)tokens[s]*D, D*sizeof(float));
+        bmt_scheduler_set_input(t->sched, t->t_x_id, t->x_in, (size_t)S*D*sizeof(float));
+        return;
+    }
     const float* wte = (const float*)backend_buffer_map(src);
     for (int s = 0; s < S; s++)
         memcpy(t->x_in + s*D, wte + (size_t)tokens[s]*D, D*sizeof(float));
@@ -274,6 +306,7 @@ static void embed_backward(bm_trainer_t* t, const int* tokens, int S) {
 
     /* grad_x lives in grad_buffers[t_x_id]; scatter-add into grad_wte. */
     int wte_id = find_wt_id(g, t->model->token_embedding_table);
+    if (!bmt_scheduler_get_grad_buffer(t->sched, wte_id)) return;
     int* p = backend_buffer_map(t->k_embed_param);
     p[0] = D;
     backend_buffer_unmap(t->k_embed_param);
@@ -406,8 +439,10 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
             size_t n = 1;
             for (int d = 0; d < g->tensors[i].n_dims; d++) n *= g->tensors[i].dims[d];
             if (n == 0) n = 1024;
-            memset(backend_buffer_map(bmt_scheduler_get_grad_buffer(t->sched, i)), 0, n * sizeof(float));
-            backend_buffer_unmap(bmt_scheduler_get_grad_buffer(t->sched, i));
+            backend_buffer_t* gb = bmt_scheduler_get_grad_buffer(t->sched, i);
+            if (!gb) continue;
+            memset(backend_buffer_map(gb), 0, n * sizeof(float));
+            backend_buffer_unmap(gb);
         }
     }
 

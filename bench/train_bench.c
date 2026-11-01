@@ -6,6 +6,7 @@
  * them alongside inference results.
  */
 #include "baremetal.h"
+#include "baremetal/lora.h"
 #include "baremetal/context.h"
 #include "baremetal/model.h"
 #include "baremetal/tokenizer.h"
@@ -44,6 +45,10 @@ static void usage(const char* prog) {
         "  --avg-w W          average watts (from powermetrics)\n"
         "  --ref FILE         prior JSON for loss parity\n"
         "  --profile          measure forward/loss/backward/optimizer phases\n"
+        "  --lora-rank N      LoRA rank (0 = full fine-tune, default 0)\n"
+        "  --lora-alpha F     LoRA alpha (default 16)\n"
+        "  --lora-targets L   q,k,v,o,gate,up,down | attn | mlp | all\n"
+        "  --lora-seed N      LoRA init seed (default 1)\n"
         "  --parity-steps N   losses compared to ref      (default 1)\n"
         "  --tol F            parity relative tolerance    (default 1e-6)\n"
         "  --check            exit non-zero if parity fails\n"
@@ -117,6 +122,8 @@ int main(int argc, char** argv) {
     int seq_len = 64, steps = 20, warmup = 2, batch_size = 1, grad_accum = 1;
     const char* state_out = NULL;
     int raw = 1, check = 0, parity_steps = 1, profile = 0;
+    int lora_rank = 0, lora_seed = 1, lora_targets = BMT_LORA_ALL;
+    float lora_alpha = 16.0f;
     float lr = 1e-4f, tol = 1e-6f;
     double avg_w = 0.0;
 
@@ -134,6 +141,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)      avg_w = atof(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i+1 < argc)        ref_path = argv[++i];
         else if (!strcmp(argv[i], "--profile"))                    profile = 1;
+        else if (!strcmp(argv[i], "--lora-rank") && i+1 < argc)     lora_rank = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lora-alpha") && i+1 < argc)    lora_alpha = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lora-targets") && i+1 < argc)  lora_targets = bmt_lora_parse_targets(argv[++i]);
+        else if (!strcmp(argv[i], "--lora-seed") && i+1 < argc)     lora_seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--parity-steps") && i+1 < argc) parity_steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && i+1 < argc)         tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--check"))                     check = 1;
@@ -187,6 +198,10 @@ int main(int argc, char** argv) {
     cfg.max_steps = steps;
     cfg.grad_accum_steps = grad_accum;
     cfg.seq_len = seq_len;
+    cfg.lora_rank = lora_rank;
+    cfg.lora_alpha = lora_alpha;
+    cfg.lora_targets = lora_targets;
+    cfg.lora_seed = lora_seed;
 
     bm_trainer_t* trainer = bm_create_trainer(ctx, m, &cfg);
     if (!trainer) { fprintf(stderr, "trainer creation failed\n"); return 1; }
@@ -397,6 +412,9 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"seq_len\": %d,\n", seq_len);
     fprintf(out, "    \"batch_size\": %d,\n", batch_size);
     fprintf(out, "    \"grad_accum_steps\": %d,\n", grad_accum);
+    fprintf(out, "    \"lora_rank\": %d,\n", lora_rank);
+    fprintf(out, "    \"lora_alpha\": %.1f,\n", (double)lora_alpha);
+    fprintf(out, "    \"lora_targets\": %d,\n", lora_targets);
     fprintf(out, "    \"steps\": %d,\n", steps);
     fprintf(out, "    \"warmup\": %d,\n", warmup);
     fprintf(out, "    \"learning_rate\": %.9g,\n", (double)lr);
