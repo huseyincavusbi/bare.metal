@@ -31,6 +31,7 @@ C_SRCS    := src/utils/log.c \
              src/baremetal/tokenizer.c \
              src/baremetal/graph.c \
              src/baremetal/lora.c \
+             src/baremetal/adapter.c \
              src/baremetal/compiler.c \
              src/baremetal/scheduler.c \
              src/baremetal/session.c \
