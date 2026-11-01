@@ -290,6 +290,8 @@ static void bm_tokenizer_init_from_bin(bm_tokenizer_t* t, const char* path, int 
     t->prepend_space = 0;
     t->split_words = 0;
     t->add_bos = 0;
+    t->n_added = 0;
+    t->added_ids = NULL;
     for (int i = 0; i < 256; i++) {
         t->byte_pieces[i * 2] = (unsigned char)i;
         t->byte_pieces[i * 2 + 1] = '\0';
@@ -352,6 +354,93 @@ static int added_token_id(const char* json, const char* content) {
     return (int)strtol(idp + 1, NULL, 10);
 }
 
+
+static void json_skip_value(const char** p) {
+    json_skip_ws(p);
+    if (**p == '"') {
+        char tmp[1024];
+        json_parse_string(p, tmp, sizeof(tmp));
+        return;
+    }
+    if (**p == '{' || **p == '[') {
+        char open = **p;
+        char close = (open == '{') ? '}' : ']';
+        int depth = 0;
+        while (**p) {
+            if (**p == open) depth++;
+            else if (**p == close) {
+                depth--;
+                (*p)++;
+                if (depth == 0) return;
+                continue;
+            }
+            (*p)++;
+        }
+        return;
+    }
+    while (**p && **p != ',' && **p != '}' && **p != ']') (*p)++;
+}
+
+static void parse_added_tokens(bm_tokenizer_t* t, const char* json) {
+    const char* p = strstr(json, "\"added_tokens\"");
+    if (!p) return;
+    p = strchr(p, ':');
+    if (!p) return;
+    p++;
+    json_skip_ws(&p);
+    if (*p != '[') return;
+    p++;
+
+    int cap = 8;
+    t->added_ids = (int*)malloc((size_t)cap * sizeof(int));
+    t->n_added = 0;
+
+    while (*p) {
+        json_skip_ws(&p);
+        if (*p == ']') { p++; break; }
+        if (*p == ',') { p++; continue; }
+        if (*p != '{') break;
+        p++;
+
+        int id = -1;
+        char content[512];
+        content[0] = '\0';
+
+        while (*p && *p != '}') {
+            json_skip_ws(&p);
+            if (*p == ',') { p++; continue; }
+            char key[64];
+            if (json_parse_string(&p, key, sizeof(key)) < 0) break;
+            json_skip_ws(&p);
+            if (*p == ':') p++;
+            json_skip_ws(&p);
+            if (strcmp(key, "id") == 0) {
+                id = json_parse_int(&p);
+            } else if (strcmp(key, "content") == 0) {
+                json_parse_string(&p, content, sizeof(content));
+            } else {
+                json_skip_value(&p);
+            }
+            json_skip_ws(&p);
+            if (*p == ',') p++;
+        }
+        if (*p == '}') p++;
+
+        if (id >= 0 && id < t->vocab_size && content[0]) {
+            size_t len = strlen(content);
+            free(t->vocab[id]);
+            t->vocab[id] = (char*)malloc(len + 1);
+            memcpy(t->vocab[id], content, len + 1);
+            if (len > t->max_token_length) t->max_token_length = len;
+            if (t->n_added == cap) {
+                cap *= 2;
+                t->added_ids = (int*)realloc(t->added_ids, (size_t)cap * sizeof(int));
+            }
+            t->added_ids[t->n_added++] = id;
+        }
+    }
+}
+
 // --- JSON format loader (tokenizer.json, no preprocessing needed) ---
 
 static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path, int vocab_size) {
@@ -393,6 +482,8 @@ static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path
     t->prepend_space = 0;
     t->split_words = 0;
     t->add_bos = 0;
+    t->n_added = 0;
+    t->added_ids = NULL;
 
     const char* model = strstr(json, "\"model\"");
     if (!model) model = json;
@@ -510,6 +601,8 @@ static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path
         }
     }
 
+    parse_added_tokens(t, json);
+
     for (int i = 0; i < vocab_size; i++) {
         if (!t->vocab[i]) {
             t->vocab[i] = (char*)malloc(1);
@@ -604,6 +697,13 @@ static void bm_tokenizer_init_from_json(bm_tokenizer_t* t, const char* json_path
                               ? decode_token_b2u(t, t->vocab[i])
                               : decode_token_spm(t->vocab[i]);
     }
+    for (int i = 0; i < t->n_added; i++) {
+        int id = t->added_ids[i];
+        size_t len = strlen(t->vocab[id]);
+        free(t->decoded_vocab[id]);
+        t->decoded_vocab[id] = (char*)malloc(len + 1);
+        memcpy(t->decoded_vocab[id], t->vocab[id], len + 1);
+    }
 }
 
 void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
@@ -646,6 +746,7 @@ void bm_tokenizer_init(bm_tokenizer_t* t, const char* path, int vocab_size) {
 }
 
 void bm_tokenizer_free(bm_tokenizer_t* t) {
+    free(t->added_ids);
     for (int i = 0; i < t->vocab_size; i++) free(t->vocab[i]);
     free(t->vocab);
     free(t->vocab_scores);
@@ -861,6 +962,54 @@ static int encode_unigram(bm_tokenizer_t* t, const char* text,
     return 0;
 }
 
+static int encode_plain(bm_tokenizer_t* t, const char* text, int* tokens, int* n_tokens) {
+    if (t->kind == BM_TOKENIZER_UNIGRAM)
+        return encode_unigram(t, text, tokens, n_tokens);
+    if (t->kind == BM_TOKENIZER_SPM_BPE)
+        return encode_spm_bpe(t, text, tokens, n_tokens);
+    return encode_byte_bpe(t, text, tokens, n_tokens);
+}
+
+static int encode_with_added(bm_tokenizer_t* t, const char* text,
+                             int* tokens, int* n_tokens) {
+    const char* cursor = text;
+    while (*cursor) {
+        const char* best = NULL;
+        int best_id = -1;
+        size_t best_len = 0;
+
+        for (int k = 0; k < t->n_added; k++) {
+            int id = t->added_ids[k];
+            const char* content = t->vocab[id];
+            size_t len = strlen(content);
+            if (len == 0) continue;
+            const char* hit = strstr(cursor, content);
+            if (!hit) continue;
+            if (!best || hit < best || (hit == best && len > best_len)) {
+                best = hit;
+                best_id = id;
+                best_len = len;
+            }
+        }
+
+        if (!best) return encode_plain(t, cursor, tokens, n_tokens);
+
+        if (best > cursor) {
+            size_t seg_len = (size_t)(best - cursor);
+            char* seg = (char*)malloc(seg_len + 1);
+            if (!seg) return -1;
+            memcpy(seg, cursor, seg_len);
+            seg[seg_len] = '\0';
+            int rc = encode_plain(t, seg, tokens, n_tokens);
+            free(seg);
+            if (rc != 0) return rc;
+        }
+        tokens[(*n_tokens)++] = best_id;
+        cursor = best + best_len;
+    }
+    return 0;
+}
+
 int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
                         int8_t eos, int* tokens, int* n_tokens) {
     if (!text || !t->sorted_vocab) return -1;
@@ -868,13 +1017,9 @@ int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
     *n_tokens = 0;
     if (bos && t->bos_id >= 0) tokens[(*n_tokens)++] = t->bos_id;
 
-    int rc;
-    if (t->kind == BM_TOKENIZER_UNIGRAM)
-        rc = encode_unigram(t, text, tokens, n_tokens);
-    else if (t->kind == BM_TOKENIZER_SPM_BPE)
-        rc = encode_spm_bpe(t, text, tokens, n_tokens);
-    else
-        rc = encode_byte_bpe(t, text, tokens, n_tokens);
+    int rc = (t->n_added > 0)
+           ? encode_with_added(t, text, tokens, n_tokens)
+           : encode_plain(t, text, tokens, n_tokens);
 
     if (rc != 0) return rc;
     if (eos && t->eos_id >= 0) tokens[(*n_tokens)++] = t->eos_id;
