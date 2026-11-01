@@ -43,6 +43,7 @@ static void usage(const char* prog) {
         "  --precision P      fp32|fp16|bf16 (default device)\n"
         "  --avg-w W          average watts (from powermetrics)\n"
         "  --ref FILE         prior JSON for loss parity\n"
+        "  --profile          measure forward/loss/backward/optimizer phases\n"
         "  --parity-steps N   losses compared to ref      (default 1)\n"
         "  --tol F            parity relative tolerance    (default 1e-6)\n"
         "  --check            exit non-zero if parity fails\n"
@@ -115,7 +116,7 @@ int main(int argc, char** argv) {
     const char* prec_arg = NULL;
     int seq_len = 64, steps = 20, warmup = 2, batch_size = 1, grad_accum = 1;
     const char* state_out = NULL;
-    int raw = 1, check = 0, parity_steps = 1;
+    int raw = 1, check = 0, parity_steps = 1, profile = 0;
     float lr = 1e-4f, tol = 1e-6f;
     double avg_w = 0.0;
 
@@ -132,6 +133,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--precision") && i+1 < argc)  prec_arg = argv[++i];
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)      avg_w = atof(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i+1 < argc)        ref_path = argv[++i];
+        else if (!strcmp(argv[i], "--profile"))                    profile = 1;
         else if (!strcmp(argv[i], "--parity-steps") && i+1 < argc) parity_steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && i+1 < argc)         tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--check"))                     check = 1;
@@ -238,8 +240,12 @@ int main(int argc, char** argv) {
     int pos = 0;
     int total_tokens = 0;
     time_t active_start_unix = 0, active_end_unix = 0;
+    double prof_fwd = 0.0, prof_loss = 0.0, prof_bwd = 0.0, prof_opt = 0.0;
     for (int step = -warmup; step < steps; step++) {
-        if (step == 0) active_start_unix = time(NULL);
+        if (step == 0) {
+            active_start_unix = time(NULL);
+            if (profile) bm_train_profile_begin(trainer);
+        }
         for (int b = 0; b < batch_size; b++) {
             for (int i = 0; i < seq_len; i++) {
                 inputs[b * seq_len + i] = tokens[pos % n_tok];
@@ -258,6 +264,7 @@ int main(int argc, char** argv) {
         }
     }
     active_end_unix = time(NULL);
+    if (profile) bm_train_profile_end(trainer, &prof_fwd, &prof_loss, &prof_bwd, &prof_opt);
     bm_train_flush(trainer);
     if (state_out) bm_save_state(trainer, state_out);
 
@@ -452,6 +459,11 @@ int main(int argc, char** argv) {
     if (ref_path)
         printf("parity: n=%d max_rel_err=%.9g %s\n", parity_n, parity_max_rel,
                parity_pass ? "PASS" : "FAIL");
+    if (profile && steps > 0) {
+        double tot = prof_fwd + prof_loss + prof_bwd + prof_opt;
+        printf("phases/step: fwd %.1f  loss %.1f  bwd %.1f  opt %.1f  total %.1f ms\n",
+               prof_fwd / steps, prof_loss / steps, prof_bwd / steps, prof_opt / steps, tot / steps);
+    }
 
     int rc = (check && ref_path && !parity_pass) ? 1 : 0;
     free(ref_losses);
