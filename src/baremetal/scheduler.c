@@ -64,6 +64,8 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_attn_prefill;
     backend_kernel_t* k_kv_store;
     backend_kernel_t* k_add_fwd;
+    backend_kernel_t* k_add_scale_fwd;
+    backend_kernel_t* k_add_scale_bwd;
     int prefill_mode;
     backend_kernel_t* k_rope_fwd_seq;
     backend_kernel_t* k_attn_bwd;
@@ -224,6 +226,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     if (need_grads) {
     for (int i = 0; i < graph->n_tensors; i++) {
         bmt_tensor_t* t = &graph->tensors[i];
+        if (t->type == BMT_TENSOR_TYPE_WEIGHT && !t->trainable) continue;
         size_t n_elems = 1;
         for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
         if (n_elems == 0) n_elems = 1024;
@@ -289,6 +292,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
     sched->k_kv_store = backend_kernel_create(backend, "kv_store");
     sched->k_add_fwd = backend_kernel_create(backend, "add_forward");
+    sched->k_add_scale_fwd = backend_kernel_create(backend, "add_scale_forward");
     sched->prefill_mode = 0;
     sched->k_rope_fwd_seq = backend_kernel_create(backend, "rope_forward_seq");
     sched->k_attn_bwd = backend_kernel_create(backend, "attention_backward");
@@ -297,6 +301,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
     sched->k_xent = backend_kernel_create(backend, "xent_backward");
     sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
+    sched->k_add_scale_bwd = backend_kernel_create(backend, "add_scale_backward");
     sched->k_resnorm_bwd = backend_kernel_create(backend, "residual_rmsnorm_backward");
     sched->k_resnorm_bwd_w = backend_kernel_create(backend, "residual_rmsnorm_backward_w");
     sched->k_resnorm_fwd_train = backend_kernel_create(backend, "residual_rmsnorm_forward_train");
@@ -358,6 +363,8 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
     if (sched->k_kv_store) backend_kernel_destroy(sched->k_kv_store);
     if (sched->k_add_fwd) backend_kernel_destroy(sched->k_add_fwd);
+    if (sched->k_add_scale_fwd) backend_kernel_destroy(sched->k_add_scale_fwd);
+    if (sched->k_add_scale_bwd) backend_kernel_destroy(sched->k_add_scale_bwd);
     /* shared weight buffers are owned by the source scheduler */
     if (sched->k_rope_fwd_seq) backend_kernel_destroy(sched->k_rope_fwd_seq);
     if (sched->k_attn_bwd) backend_kernel_destroy(sched->k_attn_bwd);
@@ -773,6 +780,24 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             continue;
         }
 
+        if (node->op_type == BMK_OP_ADD_SCALE) {
+            int N = node->params[0];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0] = N;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            float* sc = backend_buffer_map(sched->eps_bufs[i]);
+            sc[0] = node->fparams[0];
+            backend_buffer_unmap(sched->eps_bufs[i]);
+            backend_buffer_t* abufs[] = { sched->buffers[node->inputs[0]],
+                                          sched->buffers[node->inputs[1]],
+                                          sched->buffers[node->output],
+                                          sched->param_bufs[i],
+                                          sched->eps_bufs[i] };
+            backend_encode_dispatch(enc, sched->k_add_scale_fwd, abufs, NULL, 5,
+                                    N, 1, 1, N < 256 ? N : 256, 1, 1);
+            continue;
+        }
+
         backend_kernel_t* kn = NULL;
         if (node->op_type == BMK_OP_ATTENTION) {
             kn = (sched->prefill_mode && sched->k_attn_prefill)
@@ -1037,6 +1062,26 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             continue;
         }
 
+        if (node->op_type == BMK_OP_ADD_SCALE) {
+            int N = node->params[0];
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0] = N;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            float* sc = backend_buffer_map(sched->eps_bufs[i]);
+            sc[0] = node->fparams[0];
+            backend_buffer_unmap(sched->eps_bufs[i]);
+            backend_buffer_t* bufs[] = {
+                sched->grad_buffers[node->output],
+                sched->grad_buffers[node->inputs[0]],
+                sched->grad_buffers[node->inputs[1]],
+                sched->param_bufs[i],
+                sched->eps_bufs[i]
+            };
+            int ttx = N < 256 ? N : 256;
+            backend_encode_dispatch(enc, sched->k_add_scale_bwd, bufs, NULL, 5, N,1,1, ttx,1,1);
+            continue;
+        }
+
         if (node->op_type == BMK_OP_MATMUL) {
             int BT = node->params[0], C = node->params[1], OC = node->params[2];
             int* p = backend_buffer_map(sched->param_bufs[i]);
@@ -1066,16 +1111,18 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
                 backend_encode_dispatch(enc, bwd_inp_kn, b1, NULL, 4, C,BT,1, 32,1,1);
             }
             /* grad_w = matmul_backward_w(gout, inp) ; grid (C,OC) */
-            backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
-                                      sched->grad_buffers[node->inputs[1]], sched->param_bufs[i]};
-            backend_kernel_t* bwd_w_kn = (BT > 1 && sched->k_mm_bwd_w_tiled)
-                                       ? sched->k_mm_bwd_w_tiled : sched->k_mm_bwd_w;
-            if (bwd_w_kn == sched->k_mm_bwd_w_tiled) {
-                int tg = 256, bm = 32, bn = 32;
-                backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4,
-                                        ((C + bn - 1) / bn) * tg, (OC + bm - 1) / bm, 1, tg, 1, 1);
-            } else {
-                backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4, C,OC,1, 32,1,1);
+            if (sched->grad_buffers[node->inputs[1]]) {
+                backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
+                                          sched->grad_buffers[node->inputs[1]], sched->param_bufs[i]};
+                backend_kernel_t* bwd_w_kn = (BT > 1 && sched->k_mm_bwd_w_tiled)
+                                           ? sched->k_mm_bwd_w_tiled : sched->k_mm_bwd_w;
+                if (bwd_w_kn == sched->k_mm_bwd_w_tiled) {
+                    int tg = 256, bm = 32, bn = 32;
+                    backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4,
+                                            ((C + bn - 1) / bn) * tg, (OC + bm - 1) / bm, 1, tg, 1, 1);
+                } else {
+                    backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4, C,OC,1, 32,1,1);
+                }
             }
             continue;
         }
@@ -1095,10 +1142,12 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
                                       sched->param_bufs[i], sched->eps_bufs[i]};
             backend_encode_dispatch(enc, sched->k_rms_bwd_x, b1, NULL, 6, N,1,1, tn,1,1);
             /* grad_w = rmsnorm_backward_w(gout, x) ; grid (C) */
-            backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
-                                      sched->grad_buffers[node->inputs[1]], sched->param_bufs[i], sched->eps_bufs[i]};
-            int tc = C < 256 ? C : 256;
-            backend_encode_dispatch(enc, sched->k_rms_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
+            if (sched->grad_buffers[node->inputs[1]]) {
+                backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
+                                          sched->grad_buffers[node->inputs[1]], sched->param_bufs[i], sched->eps_bufs[i]};
+                int tc = C < 256 ? C : 256;
+                backend_encode_dispatch(enc, sched->k_rms_bwd_w, b2, NULL, 5, C,1,1, tc,1,1);
+            }
             continue;
         }
 
@@ -1124,16 +1173,18 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             };
             backend_encode_dispatch(enc, sched->k_resnorm_bwd_train, b1, NULL, 8, N,1,1, tn,1,1);
             /* grad_w (training-safe, recomputes y from x + residual) */
-            backend_buffer_t* b2[] = {
-                sched->grad_buffers[node->output],
-                sched->buffers[node->inputs[0]],
-                sched->buffers[node->inputs[1]],
-                sched->grad_buffers[node->inputs[2]],
-                sched->param_bufs[i],
-                sched->eps_bufs[i]
-            };
-            int tc = C < 256 ? C : 256;
-            backend_encode_dispatch(enc, sched->k_resnorm_bwd_w_train, b2, NULL, 6, C,1,1, tc,1,1);
+            if (sched->grad_buffers[node->inputs[2]]) {
+                backend_buffer_t* b2[] = {
+                    sched->grad_buffers[node->output],
+                    sched->buffers[node->inputs[0]],
+                    sched->buffers[node->inputs[1]],
+                    sched->grad_buffers[node->inputs[2]],
+                    sched->param_bufs[i],
+                    sched->eps_bufs[i]
+                };
+                int tc = C < 256 ? C : 256;
+                backend_encode_dispatch(enc, sched->k_resnorm_bwd_w_train, b2, NULL, 6, C,1,1, tc,1,1);
+            }
             continue;
         }
 
