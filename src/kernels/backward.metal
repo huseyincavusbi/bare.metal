@@ -531,6 +531,21 @@ kernel void add_backward(
     atomic_fetch_add_explicit(gy + gid, g, memory_order_relaxed);
 }
 
+kernel void add_scale_backward(
+    device const float* gout [[buffer(0)]],
+    device float* gbase      [[buffer(1)]],
+    device float* gx         [[buffer(2)]],
+    constant int* p          [[buffer(3)]],
+    constant float& scale    [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int n = p[0];
+    if ((int)gid >= n) return;
+    float g = gout[gid];
+    gbase[gid] += g;
+    gx[gid] += scale * g;
+}
+
 // ----------------------------------------------------------------
 // xent_backward (cross-entropy loss backward, the seed of the backward pass)
 // Forward: loss = -mean_n log(softmax(logits[n])[target[n]])
