@@ -417,6 +417,7 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "  --lora-alpha <float> LoRA alpha (default: 16)\n");
         fprintf(stderr, "  --lora-targets <list> q,k,v,o,gate,up,down|attn|mlp|all\n");
         fprintf(stderr, "  --lora-seed <int>   LoRA init seed (default: 1)\n");
+        fprintf(stderr, "  --save-adapter FILE Save the trained LoRA adapter\n");
         return 1;
     }
     const char* model_dir = argv[2];
@@ -433,6 +434,7 @@ static int cmd_train(int argc, char** argv) {
     const char* prec_str = NULL;
     int lora_rank = 0, lora_seed = 1, lora_targets = BMT_LORA_ALL;
     float lora_alpha = 16.0f;
+    const char* save_adapter = NULL;
 
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
@@ -447,6 +449,7 @@ static int cmd_train(int argc, char** argv) {
         else if (strcmp(argv[i], "--lora-alpha") == 0 && i+1 < argc) lora_alpha = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--lora-targets") == 0 && i+1 < argc) lora_targets = bmt_lora_parse_targets(argv[++i]);
         else if (strcmp(argv[i], "--lora-seed") == 0 && i+1 < argc) lora_seed = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--save-adapter") == 0 && i+1 < argc) save_adapter = argv[++i];
     }
 
     if (batch_size < 1) {
@@ -554,6 +557,12 @@ static int cmd_train(int argc, char** argv) {
     }
 
     bm_train_flush(trainer);
+    if (save_adapter) {
+        if (bm_save_adapter(trainer, save_adapter) == 0)
+            fprintf(stderr, "[train] saved adapter to %s\n", save_adapter);
+        else
+            fprintf(stderr, "[train] failed to save adapter to %s\n", save_adapter);
+    }
     printf("Avg step time: %.1fms\n", total_step_time / max_steps);
 
     free(inputs);
@@ -606,6 +615,7 @@ int main(int argc, char** argv) {
         uint64_t seed = 0;
         int quant = 0;   /* 0 = off, 8 = Q8, 4 = Q4 */
         const char* prec_str = NULL;
+        const char* adapter_path = NULL;
 
         for (int i = 3; i < argc; i++) {
             if (argv[i][0] == '-' && argv[i][1] == '-') {
@@ -616,6 +626,7 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = (uint64_t)atoll(argv[++i]);
                 else if (strcmp(argv[i], "--quant") == 0 && i+1 < argc) { const char* q = argv[++i]; quant = (strcmp(q, "q4") == 0) ? 4 : (strcmp(q, "q8") == 0 ? 8 : 0); }
                 else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
+                else if (strcmp(argv[i], "--adapter") == 0 && i+1 < argc) adapter_path = argv[++i];
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -641,6 +652,12 @@ int main(int argc, char** argv) {
             else model->precision = BM_PRECISION_FP32;
         } else {
             model->precision = bm_get_supported_precision(ctx);
+        }
+        if (adapter_path && bm_load_adapter(model, adapter_path) != 0) {
+            fprintf(stderr, "Failed to load adapter: %s\n", adapter_path);
+            bm_destroy_model(model);
+            bm_destroy(ctx);
+            return 1;
         }
         bm_print_model_info(model);
 
