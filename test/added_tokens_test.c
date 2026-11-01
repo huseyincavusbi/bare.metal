@@ -14,7 +14,7 @@ static void check(int ok, const char* what) {
 }
 
 static char* make_tokenizer_dir(const char* json) {
-    char tmpl[] = "/private/var/folders/7h/8wbt2s1d5qq96yls3xsppktr0000gn/T/opencode/bm_tok_XXXXXX";
+    char tmpl[] = "/tmp/bm_tok_XXXXXX";
     char* dir = mkdtemp(tmpl);
     if (!dir) return NULL;
     char* out = malloc(strlen(dir) + 1);
@@ -113,7 +113,7 @@ int main(void) {
 
     const char* smol_text = "<|im_start|>user\nhello<|im_end|>";
     int smol_ids[] = {1, 4093, 198, 28120, 2};
-    test_real("models/smollm2-135m", 49152, "smollm2 chatml",
+    test_real("data/smollm2-135m", 49152, "smollm2 chatml",
               smol_text, smol_ids, 5, "<|im_start|>", 1);
 
     const char* llama_text =
