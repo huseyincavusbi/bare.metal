@@ -42,6 +42,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* fp16_kernel; /* matmul_forward_fp16 */
     backend_kernel_t* fp16_prefill_kernel; /* matmul_forward_fp16_tiled */
     backend_kernel_t* fp16_vec_kernel; /* matmul_forward_fp16_vec */
+    backend_kernel_t* fp32_tiled_kernel; /* matmul_forward_fp32_tiled */
     backend_kernel_t* bf16_cls_kernel; /* rmsnorm_matmul_forward_bf16 */
     backend_kernel_t* bf16_cls_vec_kernel; /* rmsnorm_matmul_forward_bf16_vec */
     backend_kernel_t* fp16_cls_kernel; /* rmsnorm_matmul_forward_fp16 */
@@ -52,6 +53,10 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_mm_bwd_w;          /* matmul_backward_w   */
     backend_kernel_t* k_mm_bwd_inp_bf16;   /* matmul_backward_inp_bf16 */
     backend_kernel_t* k_mm_bwd_inp_fp16;   /* matmul_backward_inp_fp16 */
+    backend_kernel_t* k_mm_bwd_inp_fp32_tiled; /* matmul_backward_inp_fp32_tiled */
+    backend_kernel_t* k_mm_bwd_inp_bf16_tiled; /* matmul_backward_inp_bf16_tiled */
+    backend_kernel_t* k_mm_bwd_inp_fp16_tiled; /* matmul_backward_inp_fp16_tiled */
+    backend_kernel_t* k_mm_bwd_w_tiled;    /* matmul_backward_w_tiled */
     backend_kernel_t* k_rms_bwd_x;         /* rmsnorm_backward_x */
     backend_kernel_t* k_rms_bwd_w;         /* rmsnorm_backward_w */
 
@@ -264,6 +269,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->fp16_kernel = backend_kernel_create(backend, "matmul_forward_fp16");
     sched->fp16_prefill_kernel = backend_kernel_create(backend, "matmul_forward_fp16_tiled");
     sched->fp16_vec_kernel = backend_kernel_create(backend, "matmul_forward_fp16_vec");
+    sched->fp32_tiled_kernel = backend_kernel_create(backend, "matmul_forward_fp32_tiled");
     sched->bf16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16");
     sched->bf16_cls_vec_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_bf16_vec");
     sched->fp16_cls_kernel = backend_kernel_create(backend, "rmsnorm_matmul_forward_fp16");
@@ -272,6 +278,10 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_mm_bwd_w   = backend_kernel_create(backend, "matmul_backward_w");
     sched->k_mm_bwd_inp_bf16 = backend_kernel_create(backend, "matmul_backward_inp_bf16");
     sched->k_mm_bwd_inp_fp16 = backend_kernel_create(backend, "matmul_backward_inp_fp16");
+    sched->k_mm_bwd_inp_fp32_tiled = backend_kernel_create(backend, "matmul_backward_inp_fp32_tiled");
+    sched->k_mm_bwd_inp_bf16_tiled = backend_kernel_create(backend, "matmul_backward_inp_bf16_tiled");
+    sched->k_mm_bwd_inp_fp16_tiled = backend_kernel_create(backend, "matmul_backward_inp_fp16_tiled");
+    sched->k_mm_bwd_w_tiled = backend_kernel_create(backend, "matmul_backward_w_tiled");
     sched->k_rms_bwd_x  = backend_kernel_create(backend, "rmsnorm_backward_x");
     sched->k_rms_bwd_w  = backend_kernel_create(backend, "rmsnorm_backward_w");
 
@@ -329,6 +339,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->fp16_kernel) backend_kernel_destroy(sched->fp16_kernel);
     if (sched->fp16_prefill_kernel) backend_kernel_destroy(sched->fp16_prefill_kernel);
     if (sched->fp16_vec_kernel) backend_kernel_destroy(sched->fp16_vec_kernel);
+    if (sched->fp32_tiled_kernel) backend_kernel_destroy(sched->fp32_tiled_kernel);
     if (sched->bf16_cls_kernel) backend_kernel_destroy(sched->bf16_cls_kernel);
     if (sched->bf16_cls_vec_kernel) backend_kernel_destroy(sched->bf16_cls_vec_kernel);
     if (sched->fp16_cls_kernel) backend_kernel_destroy(sched->fp16_cls_kernel);
@@ -337,6 +348,10 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_mm_bwd_w)   backend_kernel_destroy(sched->k_mm_bwd_w);
     if (sched->k_mm_bwd_inp_bf16) backend_kernel_destroy(sched->k_mm_bwd_inp_bf16);
     if (sched->k_mm_bwd_inp_fp16) backend_kernel_destroy(sched->k_mm_bwd_inp_fp16);
+    if (sched->k_mm_bwd_inp_fp32_tiled) backend_kernel_destroy(sched->k_mm_bwd_inp_fp32_tiled);
+    if (sched->k_mm_bwd_inp_bf16_tiled) backend_kernel_destroy(sched->k_mm_bwd_inp_bf16_tiled);
+    if (sched->k_mm_bwd_inp_fp16_tiled) backend_kernel_destroy(sched->k_mm_bwd_inp_fp16_tiled);
+    if (sched->k_mm_bwd_w_tiled) backend_kernel_destroy(sched->k_mm_bwd_w_tiled);
     if (sched->k_rms_bwd_x)  backend_kernel_destroy(sched->k_rms_bwd_x);
     if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     if (sched->k_attn_fwd_seq) backend_kernel_destroy(sched->k_attn_fwd_seq);
@@ -745,17 +760,16 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         }
 
         if (node->op_type == BMK_OP_ADD) {
-            backend_encode_commit(enc);
-            backend_encode_wait(enc);
-            float* x = backend_buffer_map(sched->buffers[node->inputs[0]]);
-            float* y = backend_buffer_map(sched->buffers[node->inputs[1]]);
-            float* z = backend_buffer_map(sched->buffers[node->output]);
             int D = node->params[0];
-            for(int d=0; d<D; d++) z[d] = x[d] + y[d];
-            backend_buffer_unmap(sched->buffers[node->inputs[0]]);
-            backend_buffer_unmap(sched->buffers[node->inputs[1]]);
-            backend_buffer_unmap(sched->buffers[node->output]);
-            enc = backend_encode_begin(sched->backend);
+            int* p = backend_buffer_map(sched->param_bufs[i]);
+            p[0] = D;
+            backend_buffer_unmap(sched->param_bufs[i]);
+            backend_buffer_t* abufs[] = { sched->buffers[node->inputs[0]],
+                                          sched->buffers[node->inputs[1]],
+                                          sched->buffers[node->output],
+                                          sched->param_bufs[i] };
+            backend_encode_dispatch(enc, sched->k_add_fwd, abufs, NULL, 4,
+                                    D, 1, 1, D < 256 ? D : 256, 1, 1);
             continue;
         }
 
@@ -783,10 +797,13 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
             && sched->graph->tensors[node->inputs[1]].quantized == 4 && sched->q4_kernel) {
             kn = sched->q4_kernel;
-        } else if (node->op_type == BMK_OP_MATMUL && sched->prefill_mode && p1 > 1
+        } else if (node->op_type == BMK_OP_MATMUL && p1 > 1
+                   && sched->precision == BM_PRECISION_FP32 && sched->fp32_tiled_kernel) {
+            kn = sched->fp32_tiled_kernel;
+        } else if (node->op_type == BMK_OP_MATMUL && p1 > 1
                    && sched->precision == BM_PRECISION_BF16 && sched->bf16_prefill_kernel) {
             kn = sched->bf16_prefill_kernel;
-        } else if (node->op_type == BMK_OP_MATMUL && sched->prefill_mode && p1 > 1
+        } else if (node->op_type == BMK_OP_MATMUL && p1 > 1
                    && sched->precision == BM_PRECISION_FP16 && sched->fp16_prefill_kernel) {
             kn = sched->fp16_prefill_kernel;
         } else if (node->op_type == BMK_OP_MATMUL && sched->precision == BM_PRECISION_BF16
@@ -917,7 +934,8 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         int ttx = 32, tty = 1, ttz = 1;
         
         if (node->op_type == BMK_OP_MATMUL) {
-            if (kn == sched->bf16_prefill_kernel || kn == sched->fp16_prefill_kernel) {
+            if (kn == sched->bf16_prefill_kernel || kn == sched->fp16_prefill_kernel
+                || kn == sched->fp32_tiled_kernel) {
                 int tg = 256, bm = 32, bn = 32;
                 gtx = ((p3 + bn - 1) / bn) * tg;
                 gty = (p1 + bm - 1) / bm;
@@ -1024,18 +1042,41 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             int* p = backend_buffer_map(sched->param_bufs[i]);
             p[0]=BT; p[1]=C; p[2]=OC;
             backend_buffer_unmap(sched->param_bufs[i]);
-            /* grad_inp = matmul_backward_inp(gout, w) ; grid (C,BT) tgroup 32 */
             backend_buffer_t* b1[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[1]],
                                       sched->grad_buffers[node->inputs[0]], sched->param_bufs[i]};
             backend_kernel_t* bwd_inp_kn = sched->k_mm_bwd_inp;
-            if (sched->precision == BM_PRECISION_BF16 && sched->k_mm_bwd_inp_bf16) bwd_inp_kn = sched->k_mm_bwd_inp_bf16;
-            else if (sched->precision == BM_PRECISION_FP16 && sched->k_mm_bwd_inp_fp16) bwd_inp_kn = sched->k_mm_bwd_inp_fp16;
-            backend_encode_dispatch(enc, bwd_inp_kn, b1, NULL, 4, C,BT,1, 32,1,1);
-            /* grad_w = matmul_backward_w(gout, inp) ; grid (C,OC) tgroup 32 */
-            /* Note: grad_w reads fp32 activations and writes fp32 grad — no bf16 variant needed */
+            if (BT > 1) {
+                if (sched->precision == BM_PRECISION_BF16 && sched->k_mm_bwd_inp_bf16_tiled)
+                    bwd_inp_kn = sched->k_mm_bwd_inp_bf16_tiled;
+                else if (sched->precision == BM_PRECISION_FP16 && sched->k_mm_bwd_inp_fp16_tiled)
+                    bwd_inp_kn = sched->k_mm_bwd_inp_fp16_tiled;
+                else if (sched->precision == BM_PRECISION_FP32 && sched->k_mm_bwd_inp_fp32_tiled)
+                    bwd_inp_kn = sched->k_mm_bwd_inp_fp32_tiled;
+            } else {
+                if (sched->precision == BM_PRECISION_BF16 && sched->k_mm_bwd_inp_bf16) bwd_inp_kn = sched->k_mm_bwd_inp_bf16;
+                else if (sched->precision == BM_PRECISION_FP16 && sched->k_mm_bwd_inp_fp16) bwd_inp_kn = sched->k_mm_bwd_inp_fp16;
+            }
+            if (bwd_inp_kn == sched->k_mm_bwd_inp_bf16_tiled ||
+                bwd_inp_kn == sched->k_mm_bwd_inp_fp16_tiled ||
+                bwd_inp_kn == sched->k_mm_bwd_inp_fp32_tiled) {
+                int tg = 256, bm = 32, bn = 32;
+                backend_encode_dispatch(enc, bwd_inp_kn, b1, NULL, 4,
+                                        ((C + bn - 1) / bn) * tg, (BT + bm - 1) / bm, 1, tg, 1, 1);
+            } else {
+                backend_encode_dispatch(enc, bwd_inp_kn, b1, NULL, 4, C,BT,1, 32,1,1);
+            }
+            /* grad_w = matmul_backward_w(gout, inp) ; grid (C,OC) */
             backend_buffer_t* b2[] = {sched->grad_buffers[node->output], sched->buffers[node->inputs[0]],
                                       sched->grad_buffers[node->inputs[1]], sched->param_bufs[i]};
-            backend_encode_dispatch(enc, sched->k_mm_bwd_w, b2, NULL, 4, C,OC,1, 32,1,1);
+            backend_kernel_t* bwd_w_kn = (BT > 1 && sched->k_mm_bwd_w_tiled)
+                                       ? sched->k_mm_bwd_w_tiled : sched->k_mm_bwd_w;
+            if (bwd_w_kn == sched->k_mm_bwd_w_tiled) {
+                int tg = 256, bm = 32, bn = 32;
+                backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4,
+                                        ((C + bn - 1) / bn) * tg, (OC + bm - 1) / bm, 1, tg, 1, 1);
+            } else {
+                backend_encode_dispatch(enc, bwd_w_kn, b2, NULL, 4, C,OC,1, 32,1,1);
+            }
             continue;
         }
 

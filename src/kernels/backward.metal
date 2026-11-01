@@ -99,6 +99,225 @@ kernel void matmul_backward_w(
     gw[oc * C + i] = acc;
 }
 
+
+// ----------------------------------------------------------------
+// Tiled backward GEMMs (training)
+// dX and dW use the same 32x32x32 threadgroup tiling as the prefill
+// forward GEMM: 256 threads, 4 output rows per thread.
+// ----------------------------------------------------------------
+#define MM_BWD_BM 32
+#define MM_BWD_BN 32
+#define MM_BWD_BK 32
+#define MM_BWD_TG 256
+
+kernel void matmul_backward_inp_fp32_tiled(
+    device const float* gout [[buffer(0)]],
+    device const float* w    [[buffer(1)]],
+    device float* ginp       [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int tid = (int)tid3.x;
+    int i0 = (int)tgid.x * MM_BWD_BN;
+    int bt0 = (int)tgid.y * MM_BWD_BM;
+    int col = tid & 31;
+    int rowg = tid >> 5;
+    int i = i0 + col;
+
+    threadgroup float As[MM_BWD_BM][MM_BWD_BK];
+    threadgroup float Bs[MM_BWD_BN][MM_BWD_BK + 1];
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+
+    for (int kk = 0; kk < OC; kk += MM_BWD_BK) {
+        int kb = min(MM_BWD_BK, OC - kk);
+        for (int idx = tid; idx < MM_BWD_BM * MM_BWD_BK; idx += MM_BWD_TG) {
+            int r = idx >> 5, k = idx & 31;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? gout[(size_t)br * OC + kk + k] : 0.0f;
+        }
+        for (int idx = tid; idx < MM_BWD_BN * MM_BWD_BK; idx += MM_BWD_TG) {
+            int n = idx >> 5, k = idx & 31;
+            int ii = i0 + n;
+            Bs[n][k] = (ii < C && k < kb) ? w[(size_t)(kk + k) * C + ii] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float b = Bs[col][k];
+            a0 += As[rowg +  0][k] * b;
+            a1 += As[rowg +  8][k] * b;
+            a2 += As[rowg + 16][k] * b;
+            a3 += As[rowg + 24][k] * b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (i >= C) return;
+    int r0 = bt0 + rowg;
+    if (r0 +  0 < BT) ginp[(size_t)(r0 +  0) * C + i] += a0;
+    if (r0 +  8 < BT) ginp[(size_t)(r0 +  8) * C + i] += a1;
+    if (r0 + 16 < BT) ginp[(size_t)(r0 + 16) * C + i] += a2;
+    if (r0 + 24 < BT) ginp[(size_t)(r0 + 24) * C + i] += a3;
+}
+
+#if __HAVE_BFLOAT__
+kernel void matmul_backward_inp_bf16_tiled(
+    device const float* gout [[buffer(0)]],
+    device const bfloat* w   [[buffer(1)]],
+    device float* ginp       [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int tid = (int)tid3.x;
+    int i0 = (int)tgid.x * MM_BWD_BN;
+    int bt0 = (int)tgid.y * MM_BWD_BM;
+    int col = tid & 31;
+    int rowg = tid >> 5;
+    int i = i0 + col;
+
+    threadgroup float As[MM_BWD_BM][MM_BWD_BK];
+    threadgroup float Bs[MM_BWD_BN][MM_BWD_BK + 1];
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+
+    for (int kk = 0; kk < OC; kk += MM_BWD_BK) {
+        int kb = min(MM_BWD_BK, OC - kk);
+        for (int idx = tid; idx < MM_BWD_BM * MM_BWD_BK; idx += MM_BWD_TG) {
+            int r = idx >> 5, k = idx & 31;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? gout[(size_t)br * OC + kk + k] : 0.0f;
+        }
+        for (int idx = tid; idx < MM_BWD_BN * MM_BWD_BK; idx += MM_BWD_TG) {
+            int n = idx >> 5, k = idx & 31;
+            int ii = i0 + n;
+            Bs[n][k] = (ii < C && k < kb) ? (float)w[(size_t)(kk + k) * C + ii] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float b = Bs[col][k];
+            a0 += As[rowg +  0][k] * b;
+            a1 += As[rowg +  8][k] * b;
+            a2 += As[rowg + 16][k] * b;
+            a3 += As[rowg + 24][k] * b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (i >= C) return;
+    int r0 = bt0 + rowg;
+    if (r0 +  0 < BT) ginp[(size_t)(r0 +  0) * C + i] += a0;
+    if (r0 +  8 < BT) ginp[(size_t)(r0 +  8) * C + i] += a1;
+    if (r0 + 16 < BT) ginp[(size_t)(r0 + 16) * C + i] += a2;
+    if (r0 + 24 < BT) ginp[(size_t)(r0 + 24) * C + i] += a3;
+}
+#endif
+
+kernel void matmul_backward_inp_fp16_tiled(
+    device const float* gout [[buffer(0)]],
+    device const half* w     [[buffer(1)]],
+    device float* ginp       [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int tid = (int)tid3.x;
+    int i0 = (int)tgid.x * MM_BWD_BN;
+    int bt0 = (int)tgid.y * MM_BWD_BM;
+    int col = tid & 31;
+    int rowg = tid >> 5;
+    int i = i0 + col;
+
+    threadgroup float As[MM_BWD_BM][MM_BWD_BK];
+    threadgroup float Bs[MM_BWD_BN][MM_BWD_BK + 1];
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+
+    for (int kk = 0; kk < OC; kk += MM_BWD_BK) {
+        int kb = min(MM_BWD_BK, OC - kk);
+        for (int idx = tid; idx < MM_BWD_BM * MM_BWD_BK; idx += MM_BWD_TG) {
+            int r = idx >> 5, k = idx & 31;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? gout[(size_t)br * OC + kk + k] : 0.0f;
+        }
+        for (int idx = tid; idx < MM_BWD_BN * MM_BWD_BK; idx += MM_BWD_TG) {
+            int n = idx >> 5, k = idx & 31;
+            int ii = i0 + n;
+            Bs[n][k] = (ii < C && k < kb) ? (float)w[(size_t)(kk + k) * C + ii] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float b = Bs[col][k];
+            a0 += As[rowg +  0][k] * b;
+            a1 += As[rowg +  8][k] * b;
+            a2 += As[rowg + 16][k] * b;
+            a3 += As[rowg + 24][k] * b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (i >= C) return;
+    int r0 = bt0 + rowg;
+    if (r0 +  0 < BT) ginp[(size_t)(r0 +  0) * C + i] += a0;
+    if (r0 +  8 < BT) ginp[(size_t)(r0 +  8) * C + i] += a1;
+    if (r0 + 16 < BT) ginp[(size_t)(r0 + 16) * C + i] += a2;
+    if (r0 + 24 < BT) ginp[(size_t)(r0 + 24) * C + i] += a3;
+}
+
+kernel void matmul_backward_w_tiled(
+    device const float* gout [[buffer(0)]],
+    device const float* inp  [[buffer(1)]],
+    device float* gw         [[buffer(2)]],
+    constant int* params     [[buffer(3)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2];
+    int tid = (int)tid3.x;
+    int i0 = (int)tgid.x * MM_BWD_BN;
+    int oc0 = (int)tgid.y * MM_BWD_BM;
+    int col = tid & 31;
+    int rowg = tid >> 5;
+    int i = i0 + col;
+
+    threadgroup float As[MM_BWD_BM][MM_BWD_BK];
+    threadgroup float Bs[MM_BWD_BN][MM_BWD_BK + 1];
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+
+    for (int kk = 0; kk < BT; kk += MM_BWD_BK) {
+        int kb = min(MM_BWD_BK, BT - kk);
+        for (int idx = tid; idx < MM_BWD_BM * MM_BWD_BK; idx += MM_BWD_TG) {
+            int r = idx >> 5, k = idx & 31;
+            int oc = oc0 + r;
+            int bt = kk + k;
+            As[r][k] = (oc < OC && bt < BT) ? gout[(size_t)bt * OC + oc] : 0.0f;
+        }
+        for (int idx = tid; idx < MM_BWD_BN * MM_BWD_BK; idx += MM_BWD_TG) {
+            int n = idx >> 5, k = idx & 31;
+            int ii = i0 + n;
+            int bt = kk + k;
+            Bs[n][k] = (ii < C && bt < BT) ? inp[(size_t)bt * C + ii] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float b = Bs[col][k];
+            a0 += As[rowg +  0][k] * b;
+            a1 += As[rowg +  8][k] * b;
+            a2 += As[rowg + 16][k] * b;
+            a3 += As[rowg + 24][k] * b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (i >= C) return;
+    int r0 = oc0 + rowg;
+    if (r0 +  0 < OC) gw[(size_t)(r0 +  0) * C + i] = a0;
+    if (r0 +  8 < OC) gw[(size_t)(r0 +  8) * C + i] = a1;
+    if (r0 + 16 < OC) gw[(size_t)(r0 + 16) * C + i] = a2;
+    if (r0 + 24 < OC) gw[(size_t)(r0 + 24) * C + i] = a3;
+}
+
 // ----------------------------------------------------------------
 // rmsnorm_backward_x
 // Forward: ss = sum(x^2)/C ; inv_rms = 1/sqrt(ss+eps) ; n[j]=x[j]*inv_rms

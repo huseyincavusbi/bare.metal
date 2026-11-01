@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 #ifdef BAREMETAL_TRAIN
 
@@ -360,6 +361,31 @@ static void adamw_apply(bm_trainer_t* t) {
     }
 }
 
+static double trainer_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+void bm_train_profile_begin(bm_trainer_t* t) {
+    if (!t) return;
+    t->profile = 1;
+    t->prof_forward_ms = 0.0;
+    t->prof_loss_ms = 0.0;
+    t->prof_backward_ms = 0.0;
+    t->prof_opt_ms = 0.0;
+}
+
+void bm_train_profile_end(bm_trainer_t* t, double* forward_ms, double* loss_ms,
+                          double* backward_ms, double* optimizer_ms) {
+    if (!t) return;
+    if (forward_ms) *forward_ms = t->prof_forward_ms;
+    if (loss_ms) *loss_ms = t->prof_loss_ms;
+    if (backward_ms) *backward_ms = t->prof_backward_ms;
+    if (optimizer_ms) *optimizer_ms = t->prof_opt_ms;
+    t->profile = 0;
+}
+
 float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
     int S = T;
     if (S != t->S) {
@@ -388,25 +414,45 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         const int* seq_inputs = inputs + b * S;
         const int* seq_targets = targets + b * S;
 
+        double t0 = t->profile ? trainer_now_ms() : 0.0;
+        double t1 = 0.0;
+
         /* 1. embedding lookup + forward */
         embed_lookup(t, seq_inputs, S);
         bmt_scheduler_forward_train(t->sched, S);
+        if (t->profile) {
+            t1 = trainer_now_ms();
+            t->prof_forward_ms += t1 - t0;
+            t0 = t1;
+        }
 
         /* 2. loss seed (xent_backward fills grad_logits) */
         float loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, seq_targets, S, t->model->arch.vocab_size);
         total_loss += loss;
+        if (t->profile) {
+            t1 = trainer_now_ms();
+            t->prof_loss_ms += t1 - t0;
+            t0 = t1;
+        }
 
         /* 3. backward walk (gradients accumulate via atomic adds) */
         bmt_scheduler_backward(t->sched);
 
         /* 4. embedding backward (scatter grad_x into grad_wte + tied sum) */
         embed_backward(t, seq_inputs, S);
+        if (t->profile) {
+            t1 = trainer_now_ms();
+            t->prof_backward_ms += t1 - t0;
+            t0 = t1;
+        }
     }
 
     /* 5. AdamW step once the accumulation window is full. */
     t->accum_count++;
     if (t->accum_count >= accum) {
+        double to = t->profile ? trainer_now_ms() : 0.0;
         adamw_apply(t);
+        if (t->profile) t->prof_opt_ms += trainer_now_ms() - to;
         t->accum_count = 0;
     }
 
