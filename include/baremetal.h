@@ -100,6 +100,10 @@ typedef struct {
     int   max_steps;
     int   use_master_weights;
     int   seq_len;
+    int   lora_rank;
+    float lora_alpha;
+    int   lora_targets;
+    int   lora_seed;
 } bm_train_config_t;
 
 /* ---- Opaque types ---- */
