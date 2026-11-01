@@ -85,7 +85,7 @@ bm_trainer_t* bmt_trainer_create(bm_context_t* ctx, bm_model_t* model,
     }
 
     t->k_adamw = backend_kernel_create(ctx->backend_ctx, "adamw_step");
-    t->k_adamw_hp = backend_buffer_alloc(ctx->backend_ctx, 7 * sizeof(float));
+    t->k_adamw_hp = backend_buffer_alloc(ctx->backend_ctx, 8 * sizeof(float));
     t->k_embed_bwd = backend_kernel_create(ctx->backend_ctx, "embedding_backward");
     t->k_embed_param = backend_buffer_alloc(ctx->backend_ctx, 16 * sizeof(int));
 
@@ -318,7 +318,9 @@ static void adamw_apply(bm_trainer_t* t) {
     float b1 = t->cfg.beta1, b2 = t->cfg.beta2;
     float bias1 = 1.0f - powf(b1, (float)t->step);
     float bias2 = 1.0f - powf(b2, (float)t->step);
-    float hp[7] = { t->cfg.learning_rate, b1, b2, t->cfg.epsilon, t->cfg.weight_decay, bias1, bias2 };
+    int n_micro = t->window_microsteps > 0 ? t->window_microsteps : 1;
+    float hp[8] = { t->cfg.learning_rate, b1, b2, t->cfg.epsilon, t->cfg.weight_decay,
+                    bias1, bias2, 1.0f / (float)n_micro };
     memcpy(backend_buffer_map(t->k_adamw_hp), hp, sizeof(hp));
     backend_buffer_unmap(t->k_adamw_hp);
 
@@ -359,6 +361,7 @@ static void adamw_apply(bm_trainer_t* t) {
             backend_buffer_unmap(st->master_w);
         }
     }
+    t->window_microsteps = 0;
 }
 
 static double trainer_now_ms(void) {
@@ -448,6 +451,7 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
     }
 
     /* 5. AdamW step once the accumulation window is full. */
+    t->window_microsteps += B;
     t->accum_count++;
     if (t->accum_count >= accum) {
         double to = t->profile ? trainer_now_ms() : 0.0;
