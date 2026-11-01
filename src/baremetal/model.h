@@ -51,6 +51,10 @@ struct bm_model_s {
 
     void*    graph;
 
+    struct bmt_lora_adapter_s* lora;
+    int      n_lora;
+    float*   lora_ab;
+
     int      quant_bits;  /* 0 = fp, 8 = Q8, 4 = Q4 */
 
     int      weight_is_mmap;
