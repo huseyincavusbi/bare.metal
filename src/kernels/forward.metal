@@ -1187,6 +1187,18 @@ kernel void add_forward(
     if ((int)gid < n) out[gid] = a[gid] + b[gid];
 }
 
+kernel void add_scale_forward(
+    device const float* base [[buffer(0)]],
+    device const float* x    [[buffer(1)]],
+    device float* out        [[buffer(2)]],
+    constant int* p          [[buffer(3)]],
+    constant float& scale    [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int n = p[0];
+    if ((int)gid < n) out[gid] = base[gid] + scale * x[gid];
+}
+
 // ----------------------------------------------------------------
 // attention_forward
 // One threadgroup per query head. Within each threadgroup:
