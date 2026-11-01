@@ -178,6 +178,10 @@ bm_trainer_t*  bm_create_trainer(bm_context_t* ctx, bm_model_t* model,
                                  const bm_train_config_t* cfg);
 float          bm_train_step(bm_trainer_t* trainer, const int* inputs,
                              const int* targets, int B, int T);
+float          bm_train_step_masked(bm_trainer_t* trainer, const int* inputs,
+                                    const int* targets,
+                                    const uint8_t* attn_mask,
+                                    const uint8_t* loss_mask, int B, int T);
 void           bm_load_state(bm_trainer_t* trainer, const char* path);
 void           bm_save_state(bm_trainer_t* trainer, const char* path);
 void           bm_train_flush(bm_trainer_t* trainer);
