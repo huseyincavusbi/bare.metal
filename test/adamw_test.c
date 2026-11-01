@@ -40,13 +40,13 @@ int main(void) {
 
     backend_buffer_t *b_w=backend_buffer_alloc(be,N*4), *b_g=backend_buffer_alloc(be,N*4),
                      *b_m=backend_buffer_alloc(be,N*4), *b_v=backend_buffer_alloc(be,N*4),
-                     *b_n=backend_buffer_alloc(be,4), *b_hp=backend_buffer_alloc(be,28);
+                     *b_n=backend_buffer_alloc(be,4), *b_hp=backend_buffer_alloc(be,32);
     upload(b_w,w0,N*4); upload(b_g,g,N*4);
     memset(backend_buffer_map(b_m),0,N*4); backend_buffer_unmap(b_m);  /* m0=v0=0 */
     memset(backend_buffer_map(b_v),0,N*4); backend_buffer_unmap(b_v);
     upload(b_n,&N,sizeof(int));
     /* lr=0.01 b1=0.9 b2=0.999 eps=1e-8 wd=0.1 bias1=0.1 bias2=0.001 */
-    float hp[7] = {0.001f, 0.9f, 0.999f, 1e-8f, 0.0f, 0.1f, 0.001f};
+    float hp[8] = {0.001f, 0.9f, 0.999f, 1e-8f, 0.0f, 0.1f, 0.001f, 1.0f};
     upload(b_hp,hp,sizeof(hp));
 
     backend_kernel_t* k = backend_kernel_create(be, "adamw_step");

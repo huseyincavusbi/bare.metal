@@ -21,6 +21,7 @@ using namespace metal;
 //          constant float& bias2 = bias2  [buffer(5)]  -- note: bias1 lives in params[5]
 // For simplicity we pass a 7-float array: [0]=lr [1]=b1 [2]=b2 [3]=eps [4]=wd [5]=bias1 [6]=bias2
 // [4]=N (int) in buffer(4)
+// [7]=gradient scale (1 / micro-steps in the accumulation window)
 // ----------------------------------------------------------------
 kernel void adamw_step(
     device float* w          [[buffer(0)]],
@@ -34,7 +35,7 @@ kernel void adamw_step(
     if ((int)gid >= N) return;
     float lr = hp[0], b1 = hp[1], b2 = hp[2], eps = hp[3], wd = hp[4];
     float bias1 = hp[5], bias2 = hp[6];
-    float gi = g[gid];
+    float gi = g[gid] * hp[7];
     float m_new = b1 * m[gid] + (1.0f - b1) * gi;
     float v_new = b2 * v[gid] + (1.0f - b2) * gi * gi;
     m[gid] = m_new;

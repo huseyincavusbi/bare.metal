@@ -37,6 +37,7 @@ struct bm_trainer_s {
 
     int                 step;         /* optimizer step count (for bias correction) */
     int                 accum_count;  /* micro-steps in the current accumulation window */
+    int                 window_microsteps; /* sequences accumulated in the window */
     int                 profile;
     double              prof_forward_ms;
     double              prof_loss_ms;
