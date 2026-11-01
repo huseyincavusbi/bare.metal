@@ -177,6 +177,10 @@ float          bm_train_step(bm_trainer_t* trainer, const int* inputs,
 void           bm_load_state(bm_trainer_t* trainer, const char* path);
 void           bm_save_state(bm_trainer_t* trainer, const char* path);
 void           bm_train_flush(bm_trainer_t* trainer);
+void           bm_train_profile_begin(bm_trainer_t* trainer);
+void           bm_train_profile_end(bm_trainer_t* trainer, double* forward_ms,
+                                    double* loss_ms, double* backward_ms,
+                                    double* optimizer_ms);
 void           bm_destroy_trainer(bm_trainer_t* trainer);
 
 #endif /* BAREMETAL_TRAIN */
