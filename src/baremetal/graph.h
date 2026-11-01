@@ -30,6 +30,7 @@ typedef struct {
     const void* src_ptr;  /* mmap-backed source for streaming loads */
     int   src_is_bf16;
     int   quantized;   /* 0 = fp, 8 = upload Q8, 4 = upload Q4 */
+    int   trainable;   /* 0 = frozen (no grad buffer, no optimizer state) */
 } bmt_tensor_t;
 
 typedef struct {
