@@ -34,6 +34,9 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched);
  * forward logits + targets. Returns the cross-entropy loss (for logging).
  * The trainer calls this between forward_train and backward. */
 float bmt_scheduler_xent_backward(bmt_scheduler_t* sched, int logits_id, const int* targets, int S, int V);
+float bmt_scheduler_xent_backward_masked(bmt_scheduler_t* sched, int logits_id, const int* targets,
+                                         const uint8_t* mask, int S, int V);
+void bmt_scheduler_set_attention_mask(bmt_scheduler_t* sched, const uint8_t* mask, int S);
 
 void bmt_scheduler_set_input(bmt_scheduler_t* sched, int tensor_id, const void* data, size_t size);
 void bmt_scheduler_get_output(bmt_scheduler_t* sched, int tensor_id, void* data, size_t size);

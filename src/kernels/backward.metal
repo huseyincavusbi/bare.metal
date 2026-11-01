@@ -580,6 +580,41 @@ kernel void xent_backward(
     }
 }
 
+// xent_backward_masked (completion-only loss)
+// Same as xent_backward, but mask[n]==0 rows contribute no loss and no grad.
+// The gradient is normalized by the number of mask==1 rows (params[2]).
+// buffers: [0]=logits[N,V] [1]=targets[N] [2]=glogits [3]=mask[N]
+//          params[4]=[N,V,count]
+kernel void xent_backward_masked(
+    device const float* logits [[buffer(0)]],
+    device const int*   targets[[buffer(1)]],
+    device float* glogits       [[buffer(2)]],
+    device const uchar* mask    [[buffer(3)]],
+    constant int* p             [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int N = p[0], V = p[1], count = p[2];
+    int n = (int)gid;
+    if (n >= N) return;
+    device float* gr = glogits + n * V;
+    if (!mask[n]) {
+        for (int j = 0; j < V; j++) gr[j] = 0.0f;
+        return;
+    }
+    const device float* lr = logits + n * V;
+    float mx = -INFINITY;
+    for (int j = 0; j < V; j++) if (lr[j] > mx) mx = lr[j];
+    float sum = 0.0f;
+    for (int j = 0; j < V; j++) { float e = exp(lr[j] - mx); gr[j] = e; sum += e; }
+    float inv = 1.0f / sum;
+    int tgt = targets[n];
+    float invN = 1.0f / (float)count;
+    for (int j = 0; j < V; j++) {
+        float p_j = gr[j] * inv;
+        gr[j] = (p_j - (j == tgt ? 1.0f : 0.0f)) * invN;
+    }
+}
+
 // ----------------------------------------------------------------
 // embedding_backward
 // Forward: out[t] = wte[token[t]]   (row lookup, [V,D] table)
@@ -680,6 +715,85 @@ kernel void attention_backward(
     // grad_K[kh,j,d] += scale*gscore[j]*qi[d] ; grad_V[kh,j,d] += p[j]*gi[d]  (atomic, i>=j)
     // scale on grad_K only (scores carry scale); grad_V has no scale (V is linear in out).
     for (int j = 0; j < n; j++) {
+        for (int d = 0; d < HD; d++) {
+            atomic_fetch_add_explicit(gK + (j * NKV + kh) * HD + d, scale * gs[j] * qi[d], memory_order_relaxed);
+            atomic_fetch_add_explicit(gV + (j * NKV + kh) * HD + d, pr[j] * gi[d], memory_order_relaxed);
+        }
+    }
+}
+
+// attention_backward_masked (causal + GQA + key/query mask)
+// Same math as attention_backward; mask[j]==0 excludes key j and query j.
+// buffers: [0]=gout [1]=Q [2]=K [3]=V [4]=gQ [5]=gK [6]=gV
+//          [7]=params [8]=scale [9]=mask[S]
+kernel void attention_backward_masked(
+    device const float* gout  [[buffer(0)]],
+    device const float* Q     [[buffer(1)]],
+    device const float* K     [[buffer(2)]],
+    device const float* V     [[buffer(3)]],
+    device float* gQ          [[buffer(4)]],
+    device atomic_float* gK   [[buffer(5)]],
+    device atomic_float* gV   [[buffer(6)]],
+    constant int* p           [[buffer(7)]],
+    constant float& scale     [[buffer(8)]],
+    device const uchar* mask  [[buffer(9)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
+    int h = (int)gid / S;
+    int i = (int)gid - h * S;
+    if (h >= NH || i >= S) return;
+
+    device float* gqi = gQ + (i * NH + h) * HD;
+    if (!mask[i]) {
+        for (int d = 0; d < HD; d++) gqi[d] = 0.0f;
+        return;
+    }
+
+    int kh = h / kv_mul;
+    const device float* qi = Q    + (i * NH + h) * HD;
+    const device float* gi = gout + (i * NH + h) * HD;
+
+    thread float scores[ATTN_MAXS], pr[ATTN_MAXS], gp[ATTN_MAXS], gs[ATTN_MAXS];
+    int n = i + 1;
+
+    float mx = -INFINITY;
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) { scores[j] = -INFINITY; continue; }
+        const device float* kj = K + (j * NKV + kh) * HD;
+        float s = 0.0f;
+        for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
+        scores[j] = s * scale;
+        if (scores[j] > mx) mx = scores[j];
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) { pr[j] = 0.0f; continue; }
+        pr[j] = exp(scores[j] - mx);
+        sum += pr[j];
+    }
+    float inv = 1.0f / sum;
+    for (int j = 0; j < n; j++) pr[j] *= inv;
+
+    float gp_dot_p = 0.0f;
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) { gp[j] = 0.0f; continue; }
+        const device float* vj = V + (j * NKV + kh) * HD;
+        float dp = 0.0f;
+        for (int d = 0; d < HD; d++) dp += gi[d] * vj[d];
+        gp[j] = dp;
+        gp_dot_p += pr[j] * dp;
+    }
+    for (int j = 0; j < n; j++) gs[j] = pr[j] * (gp[j] - gp_dot_p);
+
+    for (int d = 0; d < HD; d++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; j++) acc += gs[j] * K[(j * NKV + kh) * HD + d];
+        gqi[d] = acc * scale;
+    }
+
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) continue;
         for (int d = 0; d < HD; d++) {
             atomic_fetch_add_explicit(gK + (j * NKV + kh) * HD + d, scale * gs[j] * qi[d], memory_order_relaxed);
             atomic_fetch_add_explicit(gV + (j * NKV + kh) * HD + d, pr[j] * gi[d], memory_order_relaxed);

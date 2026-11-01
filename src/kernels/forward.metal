@@ -1681,6 +1681,60 @@ kernel void attention_forward_seq(
     }
 }
 
+// attention_forward_seq_masked (training forward with a key/query mask)
+// Same as attention_forward_seq; mask[j]==0 excludes key j and query j.
+// buffers: [0]=Q [1]=K [2]=V [3]=out [4]=params [5]=scale [6]=mask[S]
+kernel void attention_forward_seq_masked(
+    device const float* Q   [[buffer(0)]],
+    device const float* K   [[buffer(1)]],
+    device const float* V   [[buffer(2)]],
+    device float* out       [[buffer(3)]],
+    constant int* p         [[buffer(4)]],
+    constant float& scale   [[buffer(5)]],
+    device const uchar* mask [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
+    int h = (int)gid / S;
+    int i = (int)gid - h * S;
+    if (h >= NH || i >= S) return;
+
+    device float* oi = out + (i * NH + h) * HD;
+    if (!mask[i]) {
+        for (int d = 0; d < HD; d++) oi[d] = 0.0f;
+        return;
+    }
+
+    int kh = h / kv_mul;
+    const device float* qi = Q + (i * NH + h) * HD;
+
+    thread float sc[ATTN_MAXS_FWD], pr[ATTN_MAXS_FWD];
+    int n = i + 1;
+    float mx = -INFINITY;
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) { sc[j] = -INFINITY; continue; }
+        const device float* kj = K + (j * NKV + kh) * HD;
+        float s = 0.0f;
+        for (int d = 0; d < HD; d++) s += qi[d] * kj[d];
+        sc[j] = s * scale;
+        if (sc[j] > mx) mx = sc[j];
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) {
+        if (!mask[j]) { pr[j] = 0.0f; continue; }
+        pr[j] = exp(sc[j] - mx);
+        sum += pr[j];
+    }
+    float inv = 1.0f / sum;
+    for (int j = 0; j < n; j++) pr[j] *= inv;
+
+    for (int d = 0; d < HD; d++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; j++) acc += pr[j] * V[(j * NKV + kh) * HD + d];
+        oi[d] = acc;
+    }
+}
+
 // attention_forward_prefill (inference prefill: full sequence, causal, GQA)
 // Online softmax: no sequence-length cap, one pass over the prompt's K/V.
 // buffers: [0]=Q[S,NH,HD] [1]=K[S,NKV,HD] [2]=V [3]=out
