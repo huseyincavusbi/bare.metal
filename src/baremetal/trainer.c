@@ -422,7 +422,8 @@ void bm_train_profile_end(bm_trainer_t* t, double* forward_ms, double* loss_ms,
     t->profile = 0;
 }
 
-float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
+float bm_train_step_masked(bm_trainer_t* t, const int* inputs, const int* targets,
+                           const uint8_t* attn_mask, const uint8_t* loss_mask, int B, int T) {
     int S = T;
     if (S != t->S) {
         BMT_LOG_ERROR("bm_train_step: S=%d != trainer S=%d (rebuild trainer for new S)", S, t->S);
@@ -456,6 +457,7 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         double t1 = 0.0;
 
         /* 1. embedding lookup + forward */
+        bmt_scheduler_set_attention_mask(t->sched, attn_mask ? attn_mask + b * S : NULL, S);
         embed_lookup(t, seq_inputs, S);
         bmt_scheduler_forward_train(t->sched, S);
         if (t->profile) {
@@ -465,7 +467,13 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
         }
 
         /* 2. loss seed (xent_backward fills grad_logits) */
-        float loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, seq_targets, S, t->model->arch.vocab_size);
+        float loss;
+        if (loss_mask) {
+            loss = bmt_scheduler_xent_backward_masked(t->sched, t->t_logits_id, seq_targets,
+                                                      loss_mask + b * S, S, t->model->arch.vocab_size);
+        } else {
+            loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, seq_targets, S, t->model->arch.vocab_size);
+        }
         total_loss += loss;
         if (t->profile) {
             t1 = trainer_now_ms();
@@ -496,6 +504,10 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
     }
 
     return total_loss / (float)B;
+}
+
+float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int B, int T) {
+    return bm_train_step_masked(t, inputs, targets, NULL, NULL, B, T);
 }
 
 void bm_train_flush(bm_trainer_t* t) {
