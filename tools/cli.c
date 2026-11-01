@@ -4,6 +4,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "baremetal.h"
+#include "baremetal/lora.h"
 #include "baremetal/model.h"
 #include "baremetal/tokenizer.h"
 #include "baremetal/context.h"
@@ -412,6 +413,10 @@ static int cmd_train(int argc, char** argv) {
         fprintf(stderr, "  --save-every <int>  Save checkpoint every N steps (default: 0 = no save)\n");
         fprintf(stderr, "  --resume <path>     Resume from checkpoint\n");
         fprintf(stderr, "  --precision <bf16|fp16|fp32>  Weight precision (default: bf16)\n");
+        fprintf(stderr, "  --lora-rank <int>   LoRA rank (0 = full fine-tune, default: 0)\n");
+        fprintf(stderr, "  --lora-alpha <float> LoRA alpha (default: 16)\n");
+        fprintf(stderr, "  --lora-targets <list> q,k,v,o,gate,up,down|attn|mlp|all\n");
+        fprintf(stderr, "  --lora-seed <int>   LoRA init seed (default: 1)\n");
         return 1;
     }
     const char* model_dir = argv[2];
@@ -426,6 +431,8 @@ static int cmd_train(int argc, char** argv) {
     int save_every = 0;
     const char* resume_path = NULL;
     const char* prec_str = NULL;
+    int lora_rank = 0, lora_seed = 1, lora_targets = BMT_LORA_ALL;
+    float lora_alpha = 16.0f;
 
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
@@ -436,6 +443,10 @@ static int cmd_train(int argc, char** argv) {
         else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
         else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
+        else if (strcmp(argv[i], "--lora-rank") == 0 && i+1 < argc) lora_rank = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--lora-alpha") == 0 && i+1 < argc) lora_alpha = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--lora-targets") == 0 && i+1 < argc) lora_targets = bmt_lora_parse_targets(argv[++i]);
+        else if (strcmp(argv[i], "--lora-seed") == 0 && i+1 < argc) lora_seed = atoi(argv[++i]);
     }
 
     if (batch_size < 1) {
@@ -485,6 +496,10 @@ static int cmd_train(int argc, char** argv) {
     cfg.warmup_steps = 10;
     cfg.max_steps = max_steps;
     cfg.seq_len = seq_len;
+    cfg.lora_rank = lora_rank;
+    cfg.lora_alpha = lora_alpha;
+    cfg.lora_targets = lora_targets;
+    cfg.lora_seed = lora_seed;
 
     if (prec_str) {
         if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;
