@@ -16,12 +16,13 @@ static void check(int ok, const char* what) {
     if (!ok) failures++;
 }
 
-static bm_trainer_t* make_trainer(bm_context_t* ctx, bm_model_t** out_model,
-                                  int S, int rank, float lr, int targets) {
+static bm_trainer_t* make_trainer_prec(bm_context_t* ctx, bm_model_t** out_model,
+                                       int S, int rank, float lr, int targets,
+                                       bm_precision_t precision) {
     bm_model_t* m = calloc(1, sizeof(bm_model_t));
     if (!m) return NULL;
     bm_load_weights(m, "data/smollm2-135m");
-    m->precision = bm_get_supported_precision(ctx);
+    m->precision = precision;
 
     bm_train_config_t cfg = {0};
     cfg.learning_rate = lr;
@@ -44,6 +45,12 @@ static bm_trainer_t* make_trainer(bm_context_t* ctx, bm_model_t** out_model,
     }
     *out_model = m;
     return t;
+}
+
+static bm_trainer_t* make_trainer(bm_context_t* ctx, bm_model_t** out_model,
+                                  int S, int rank, float lr, int targets) {
+    return make_trainer_prec(ctx, out_model, S, rank, lr, targets,
+                             bm_get_supported_precision(ctx));
 }
 
 int main(void) {
@@ -130,6 +137,35 @@ int main(void) {
     free(base_before);
     bm_destroy_trainer(t);
     bm_destroy_model(m);
+
+    {
+        bm_model_t* mg = NULL;
+        bm_trainer_t* tg = make_trainer_prec(ctx, &mg, S, 8, 0.0f, BMT_LORA_Q, BM_PRECISION_FP32);
+        if (!tg) {
+            check(0, "finite-difference trainer");
+        } else {
+            float loss0 = bm_train_step(tg, seq, seq + 1, 1, S);
+            int tb = mg->lora[0].t_b;
+            backend_buffer_t* bgb = bmt_scheduler_get_grad_buffer(tg->sched, tb);
+            backend_buffer_t* bwb = bmt_scheduler_get_buffer(tg->sched, tb);
+            float* gb = backend_buffer_map(bgb);
+            float* wb = backend_buffer_map(bwb);
+            int k = 0;
+            for (int i = 0; i < mg->lora[0].oc * mg->lora[0].r; i++)
+                if (fabsf(gb[i]) > fabsf(gb[k])) k = i;
+            float analytic = gb[k];
+            wb[k] += 1e-2f;
+            backend_buffer_unmap(bgb);
+            backend_buffer_unmap(bwb);
+            float loss1 = bm_train_step(tg, seq, seq + 1, 1, S);
+            float numeric = (loss1 - loss0) / 1e-2f;
+            printf("adapter B grad: analytic %.6g numeric %.6g\n", analytic, numeric);
+            check(fabsf(numeric - analytic) <= 0.05f * fabsf(analytic) + 1e-5f,
+                  "adapter B finite-difference gradient");
+            bm_destroy_trainer(tg);
+            bm_destroy_model(mg);
+        }
+    }
 
     {
         bm_model_t* m2 = NULL;
