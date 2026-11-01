@@ -96,7 +96,7 @@ kernel void matmul_backward_w(
     for (int bt = 0; bt < BT; bt++) {
         acc += gout[bt * OC + oc] * inp[bt * C + i];
     }
-    gw[oc * C + i] = acc;
+    gw[oc * C + i] += acc;
 }
 
 
@@ -312,10 +312,10 @@ kernel void matmul_backward_w_tiled(
 
     if (i >= C) return;
     int r0 = oc0 + rowg;
-    if (r0 +  0 < OC) gw[(size_t)(r0 +  0) * C + i] = a0;
-    if (r0 +  8 < OC) gw[(size_t)(r0 +  8) * C + i] = a1;
-    if (r0 + 16 < OC) gw[(size_t)(r0 + 16) * C + i] = a2;
-    if (r0 + 24 < OC) gw[(size_t)(r0 + 24) * C + i] = a3;
+    if (r0 +  0 < OC) gw[(size_t)(r0 +  0) * C + i] += a0;
+    if (r0 +  8 < OC) gw[(size_t)(r0 +  8) * C + i] += a1;
+    if (r0 + 16 < OC) gw[(size_t)(r0 + 16) * C + i] += a2;
+    if (r0 + 24 < OC) gw[(size_t)(r0 + 24) * C + i] += a3;
 }
 
 // ----------------------------------------------------------------
