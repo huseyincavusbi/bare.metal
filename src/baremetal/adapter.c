@@ -172,6 +172,7 @@ int bm_load_adapter(bm_model_t* model, const char* path) {
         return -1;
     }
 
+    bmt_model_materialize_weights(model);
     float scale = h.alpha / (float)h.rank;
     for (int i = 0; i < h.n_adapters; i++) {
         bmlora_entry_t e;
@@ -207,5 +208,6 @@ int bm_load_adapter(bm_model_t* model, const char* path) {
         free(a); free(b);
     }
     fclose(f);
+    model->weights_modified = 1;
     return 0;
 }
