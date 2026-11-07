@@ -61,6 +61,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_rms_bwd_w;         /* rmsnorm_backward_w */
 
     backend_kernel_t* k_attn_fwd_seq;
+    backend_kernel_t* k_attn_fwd_masked;
     backend_kernel_t* k_attn_prefill;
     backend_kernel_t* k_kv_store;
     backend_kernel_t* k_add_fwd;
@@ -69,10 +70,12 @@ struct bmt_scheduler_s {
     int prefill_mode;
     backend_kernel_t* k_rope_fwd_seq;
     backend_kernel_t* k_attn_bwd;
+    backend_kernel_t* k_attn_bwd_masked;
     backend_kernel_t* k_rope_bwd_seq;
     backend_kernel_t* k_gelu_bwd;
     backend_kernel_t* k_swiglu_bwd;
     backend_kernel_t* k_xent;        /* xent_backward (loss seed) */
+    backend_kernel_t* k_xent_masked; /* xent_backward_masked */
     backend_kernel_t* k_add_bwd;     /* add_backward (GPU, replaces CPU sync) */
     backend_kernel_t* k_resnorm_bwd; /* residual_rmsnorm_backward (fused) */
     backend_kernel_t* k_resnorm_bwd_w; /* residual_rmsnorm_backward_w (fused weight grad) */
@@ -85,6 +88,8 @@ struct bmt_scheduler_s {
     int n_layers;
     int seq_len;
     int need_grads;
+    backend_buffer_t* b_attn_mask;
+    int attn_mask_active;
 
     /* phase profiling: GPU time of the command buffers the engine flushes at
      * the residual ADDs (even add -> attention block, odd -> mlp block). */
@@ -251,6 +256,8 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     }
     
     sched->max_seq_len = max_seq_len;
+    sched->b_attn_mask = backend_buffer_alloc(backend, (size_t)max_seq_len);
+    sched->attn_mask_active = 0;
     sched->kv_dim = kv_dim;
     sched->n_layers = n_layers;
     sched->bkvc = weight_src ? NULL
@@ -289,6 +296,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_rms_bwd_w  = backend_kernel_create(backend, "rmsnorm_backward_w");
 
     sched->k_attn_fwd_seq = backend_kernel_create(backend, "attention_forward_seq");
+    sched->k_attn_fwd_masked = backend_kernel_create(backend, "attention_forward_seq_masked");
     sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
     sched->k_kv_store = backend_kernel_create(backend, "kv_store");
     sched->k_add_fwd = backend_kernel_create(backend, "add_forward");
@@ -296,10 +304,12 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->prefill_mode = 0;
     sched->k_rope_fwd_seq = backend_kernel_create(backend, "rope_forward_seq");
     sched->k_attn_bwd = backend_kernel_create(backend, "attention_backward");
+    sched->k_attn_bwd_masked = backend_kernel_create(backend, "attention_backward_masked");
     sched->k_rope_bwd_seq = backend_kernel_create(backend, "rope_backward_seq");
     sched->k_gelu_bwd = backend_kernel_create(backend, "gelu_backward");
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
     sched->k_xent = backend_kernel_create(backend, "xent_backward");
+    sched->k_xent_masked = backend_kernel_create(backend, "xent_backward_masked");
     sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
     sched->k_add_scale_bwd = backend_kernel_create(backend, "add_scale_backward");
     sched->k_resnorm_bwd = backend_kernel_create(backend, "residual_rmsnorm_backward");
@@ -360,6 +370,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rms_bwd_x)  backend_kernel_destroy(sched->k_rms_bwd_x);
     if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     if (sched->k_attn_fwd_seq) backend_kernel_destroy(sched->k_attn_fwd_seq);
+    if (sched->k_attn_fwd_masked) backend_kernel_destroy(sched->k_attn_fwd_masked);
     if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
     if (sched->k_kv_store) backend_kernel_destroy(sched->k_kv_store);
     if (sched->k_add_fwd) backend_kernel_destroy(sched->k_add_fwd);
@@ -368,10 +379,12 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     /* shared weight buffers are owned by the source scheduler */
     if (sched->k_rope_fwd_seq) backend_kernel_destroy(sched->k_rope_fwd_seq);
     if (sched->k_attn_bwd) backend_kernel_destroy(sched->k_attn_bwd);
+    if (sched->k_attn_bwd_masked) backend_kernel_destroy(sched->k_attn_bwd_masked);
     if (sched->k_rope_bwd_seq) backend_kernel_destroy(sched->k_rope_bwd_seq);
     if (sched->k_gelu_bwd) backend_kernel_destroy(sched->k_gelu_bwd);
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
     if (sched->k_xent) backend_kernel_destroy(sched->k_xent);
+    if (sched->k_xent_masked) backend_kernel_destroy(sched->k_xent_masked);
     if (sched->k_add_bwd) backend_kernel_destroy(sched->k_add_bwd);
     if (sched->k_resnorm_bwd) backend_kernel_destroy(sched->k_resnorm_bwd);
     if (sched->k_resnorm_bwd_w) backend_kernel_destroy(sched->k_resnorm_bwd_w);
@@ -668,6 +681,9 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
                 break;
         }
         
+        if (node->op_type == BMK_OP_ATTENTION && sched->attn_mask_active)
+            bufs[n_bufs++] = sched->b_attn_mask;
+
         int gtx = 1, gty = 1, gtz = 1;
         int ttx = 32, tty = 1, ttz = 1;
         
@@ -800,8 +816,11 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
 
         backend_kernel_t* kn = NULL;
         if (node->op_type == BMK_OP_ATTENTION) {
-            kn = (sched->prefill_mode && sched->k_attn_prefill)
-                 ? sched->k_attn_prefill : sched->k_attn_fwd_seq;
+            if (sched->attn_mask_active && sched->k_attn_fwd_masked)
+                kn = sched->k_attn_fwd_masked;
+            else
+                kn = (sched->prefill_mode && sched->k_attn_prefill)
+                     ? sched->k_attn_prefill : sched->k_attn_fwd_seq;
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             kn = sched->k_rope_fwd_seq;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
@@ -955,6 +974,9 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
                 break;
         }
         
+        if (node->op_type == BMK_OP_ATTENTION && sched->attn_mask_active)
+            bufs[n_bufs++] = sched->b_attn_mask;
+
         int gtx = 1, gty = 1, gtz = 1;
         int ttx = 32, tty = 1, ttz = 1;
         
@@ -1255,10 +1277,13 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
                 sched->grad_buffers[node->output], 
                 sched->buffers[node->inputs[0]], sched->buffers[node->inputs[1]], sched->buffers[node->inputs[2]],
                 sched->grad_buffers[node->inputs[0]], sched->grad_buffers[node->inputs[1]], sched->grad_buffers[node->inputs[2]],
-                sched->param_bufs[i], sched->eps_bufs[i]
+                sched->param_bufs[i], sched->eps_bufs[i], sched->b_attn_mask
             };
+            backend_kernel_t* attn_bwd = (sched->attn_mask_active && sched->k_attn_bwd_masked)
+                                       ? sched->k_attn_bwd_masked : sched->k_attn_bwd;
+            int nb = attn_bwd == sched->k_attn_bwd_masked ? 10 : 9;
             int gtx = S * node->params[0]; // S * NH
-            backend_encode_dispatch(enc, sched->k_attn_bwd, b1, NULL, 9, gtx,1,1, 32,1,1);
+            backend_encode_dispatch(enc, attn_bwd, b1, NULL, nb, gtx,1,1, 32,1,1);
             continue;
         }
     }
@@ -1302,6 +1327,76 @@ float bmt_scheduler_xent_backward(bmt_scheduler_t* sched, int logits_id, const i
     return loss;
 }
 
+
+float bmt_scheduler_xent_backward_masked(bmt_scheduler_t* sched, int logits_id, const int* targets,
+                                         const uint8_t* mask, int S, int V) {
+    if (!mask) return bmt_scheduler_xent_backward(sched, logits_id, targets, S, V);
+    if (!sched || !sched->k_xent_masked || logits_id < 0 || logits_id >= sched->graph->n_tensors)
+        return -1.0f;
+
+    int count = 0;
+    for (int s = 0; s < S; s++) count += mask[s] ? 1 : 0;
+
+    float* logits = backend_buffer_map(sched->buffers[logits_id]);
+    float loss = 0.0f;
+    if (count > 0) {
+        for (int s = 0; s < S; s++) {
+            if (!mask[s]) continue;
+            const float* lr = logits + (size_t)s * V;
+            float mx = lr[0];
+            for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
+            float sum = 0.0f;
+            for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
+            loss += -(lr[targets[s]] - mx - logf(sum));
+        }
+        loss /= (float)count;
+    }
+    backend_buffer_unmap(sched->buffers[logits_id]);
+
+    if (count == 0) {
+        float* g = backend_buffer_map(sched->grad_buffers[logits_id]);
+        memset(g, 0, (size_t)S * V * sizeof(float));
+        backend_buffer_unmap(sched->grad_buffers[logits_id]);
+        return 0.0f;
+    }
+
+    backend_buffer_t* b_tgt = backend_buffer_alloc(sched->backend, (size_t)S * sizeof(int));
+    backend_buffer_t* b_mask = backend_buffer_alloc(sched->backend, (size_t)S);
+    backend_buffer_t* b_par = backend_buffer_alloc(sched->backend, 16 * sizeof(int));
+    memcpy(backend_buffer_map(b_tgt), targets, (size_t)S * sizeof(int));
+    backend_buffer_unmap(b_tgt);
+    memcpy(backend_buffer_map(b_mask), mask, (size_t)S);
+    backend_buffer_unmap(b_mask);
+    int par[3] = {S, V, count};
+    memcpy(backend_buffer_map(b_par), par, sizeof(par));
+    backend_buffer_unmap(b_par);
+
+    backend_encoder_t* enc = backend_encode_begin(sched->backend);
+    backend_buffer_t* bufs[] = {sched->buffers[logits_id], b_tgt,
+                                sched->grad_buffers[logits_id], b_mask, b_par};
+    int tg = S < 256 ? S : 256;
+    backend_encode_dispatch(enc, sched->k_xent_masked, bufs, NULL, 5, S, 1, 1, tg, 1, 1);
+    backend_encode_commit(enc);
+    backend_encode_wait(enc);
+
+    backend_buffer_free(b_tgt);
+    backend_buffer_free(b_mask);
+    backend_buffer_free(b_par);
+    return loss;
+}
+
+void bmt_scheduler_set_attention_mask(bmt_scheduler_t* sched, const uint8_t* mask, int S) {
+    if (!sched) return;
+    if (!mask) {
+        sched->attn_mask_active = 0;
+        return;
+    }
+    if (S > sched->max_seq_len) return;
+    memcpy(backend_buffer_map(sched->b_attn_mask), mask, (size_t)S);
+    backend_buffer_unmap(sched->b_attn_mask);
+    sched->attn_mask_active = 1;
+    sched->seq_len = S;
+}
 
 backend_buffer_t* bmt_scheduler_get_buffer(bmt_scheduler_t* sched, int tensor_id) {
     if (!sched || tensor_id < 0 || tensor_id >= sched->graph->n_tensors) return NULL;
