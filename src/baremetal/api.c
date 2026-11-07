@@ -64,7 +64,7 @@ void bm_destroy_model(bm_model_t* model) {
 void bm_compile(bm_model_t* model) {
     if (!model) return;
     if (!model->graph) bmt_graph_build(model);
-    bmt_checkpoint_bind_sources(model);
+    if (!model->weights_modified) bmt_checkpoint_bind_sources(model);
     bmt_compiler_run(model->graph);
 }
 
