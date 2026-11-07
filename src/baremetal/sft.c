@@ -224,6 +224,23 @@ void bmt_sft_free_dataset(bmt_sft_dataset_t* d) {
     memset(d, 0, sizeof(*d));
 }
 
+int bmt_sft_render_chat(bmt_sft_template_t tmpl, const char* system,
+                         const char* user, bm_tokenizer_t* tok,
+                         char** out_prompt, int* out_stop_id) {
+    if (!user || !tok || !out_prompt || !out_stop_id) return -1;
+    sb_t b = {0};
+    if (tmpl == BMT_SFT_LLAMA3) sb_append(&b, "<|begin_of_text|>");
+    if (system && system[0]) append_message(&b, tmpl, "system", system);
+    append_message(&b, tmpl, "user", user);
+    append_assistant_header(&b, tmpl);
+    const char* stop = tmpl == BMT_SFT_LLAMA3 ? "<|eot_id|>" : "<|im_end|>";
+    int stop_id = bm_tokenizer_token_id(tok, stop);
+    if (stop_id < 0) { free(b.s); return -1; }
+    *out_prompt = sb_take(&b);
+    *out_stop_id = stop_id;
+    return (*out_prompt) ? 0 : -1;
+}
+
 static int encode_text(bm_tokenizer_t* tok, const char* text, int** out, int* n_out) {
     size_t cap = strlen(text) * 4 + 256;
     int* ids = (int*)malloc(cap * sizeof(int));
