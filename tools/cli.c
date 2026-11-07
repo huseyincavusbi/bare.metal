@@ -5,6 +5,7 @@
 
 #include "baremetal.h"
 #include "baremetal/lora.h"
+#include "baremetal/sft.h"
 #include "baremetal/model.h"
 #include "baremetal/tokenizer.h"
 #include "baremetal/context.h"
@@ -67,6 +68,7 @@ static void print_usage(const char* prog) {
     printf("  info <checkpoint>           Print model information\n");
 #ifdef BAREMETAL_TRAIN
     printf("  train <model_dir> <data_file> <output_dir>  Train model on text data\n");
+    printf("  train-sft <model_dir> <data.jsonl> <output_dir>  Fine-tune on chat data\n");
     printf("    Options:\n");
     printf("      --steps <int>       Max training steps (default: 100)\n");
     printf("      --seq-len <int>     Sequence length S (default: 64)\n");
@@ -402,6 +404,222 @@ static int cmd_tok_test(int argc, char** argv) {
 }
 
 #ifdef BAREMETAL_TRAIN
+static int cmd_train_sft(int argc, char** argv) {
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s train-sft <model_dir> <data.jsonl> <output_dir> [options]\n", argv[0]);
+        fprintf(stderr, "  --steps <int>       Max optimizer steps (default: 100)\n");
+        fprintf(stderr, "  --seq-len <int>     Sequence length S (default: 128)\n");
+        fprintf(stderr, "  --batch-size <int>  Sequences per step (default: 1)\n");
+        fprintf(stderr, "  --grad-accum <int>  Micro-steps per optimizer step (default: 1)\n");
+        fprintf(stderr, "  --lr <float>        Learning rate (default: 1e-4)\n");
+        fprintf(stderr, "  --template <name>   chatml|llama3|auto (default: auto)\n");
+        fprintf(stderr, "  --val-split <int>   Hold out every Nth example (0 = off)\n");
+        fprintf(stderr, "  --max-examples <n>  Cap loaded examples (0 = all)\n");
+        fprintf(stderr, "  --seed <int>        Shuffle and LoRA seed (default: 1)\n");
+        fprintf(stderr, "  --save-every <int>  Save trainer state every N steps\n");
+        fprintf(stderr, "  --save-adapter FILE Save the trained LoRA adapter\n");
+        fprintf(stderr, "  --resume <path>     Resume trainer state\n");
+        fprintf(stderr, "  --precision <p>     bf16|fp16|fp32\n");
+        fprintf(stderr, "  --lora-rank <int>   LoRA rank (default: 8; 0 = full FT)\n");
+        fprintf(stderr, "  --lora-alpha <f>    LoRA alpha (default: 16)\n");
+        fprintf(stderr, "  --lora-targets <l>  q,k,v,o,gate,up,down|attn|mlp|all\n");
+        fprintf(stderr, "  --lora-seed <int>   LoRA init seed (default: 1)\n");
+        return 1;
+    }
+    const char* model_dir = argv[2];
+    const char* data_path = argv[3];
+    const char* output_dir = argv[4];
+
+    int max_steps = 100, seq_len = 128, batch_size = 1, grad_accum = 1;
+    int save_every = 0, max_examples = 0, val_every = 0, seed = 1;
+    float lr = 1e-4f;
+    const char* prec_str = NULL;
+    const char* resume_path = NULL;
+    const char* save_adapter = NULL;
+    const char* template_name = "auto";
+    int lora_rank = 8, lora_seed = 1, lora_targets = BMT_LORA_ALL;
+    float lora_alpha = 16.0f;
+
+    for (int i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) max_steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--seq-len") == 0 && i+1 < argc) seq_len = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--batch-size") == 0 && i+1 < argc) batch_size = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--grad-accum") == 0 && i+1 < argc) grad_accum = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--template") == 0 && i+1 < argc) template_name = argv[++i];
+        else if (strcmp(argv[i], "--val-split") == 0 && i+1 < argc) val_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--max-examples") == 0 && i+1 < argc) max_examples = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--save-adapter") == 0 && i+1 < argc) save_adapter = argv[++i];
+        else if (strcmp(argv[i], "--resume") == 0 && i+1 < argc) resume_path = argv[++i];
+        else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
+        else if (strcmp(argv[i], "--lora-rank") == 0 && i+1 < argc) lora_rank = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--lora-alpha") == 0 && i+1 < argc) lora_alpha = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--lora-targets") == 0 && i+1 < argc) lora_targets = bmt_lora_parse_targets(argv[++i]);
+        else if (strcmp(argv[i], "--lora-seed") == 0 && i+1 < argc) lora_seed = atoi(argv[++i]);
+        else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
+    }
+    if (seq_len < 8) seq_len = 8;
+    if (batch_size < 1) batch_size = 1;
+    if (grad_accum < 1) grad_accum = 1;
+    if (max_steps < 1) max_steps = 1;
+
+    int tmpl;
+    if (strcmp(template_name, "auto") == 0) tmpl = bmt_sft_detect_template(model_dir);
+    else tmpl = bmt_sft_parse_template(template_name);
+    if (tmpl < 0) { fprintf(stderr, "Unknown template: %s\n", template_name); return 1; }
+
+    bmt_sft_dataset_t ds;
+    int skipped = 0;
+    if (bmt_sft_load_jsonl(data_path, (bmt_sft_template_t)tmpl, max_examples, &ds, &skipped) != 0) {
+        fprintf(stderr, "No usable SFT examples in %s (skipped %d)\n", data_path, skipped);
+        return 1;
+    }
+    fprintf(stderr, "[sft] template=%s examples=%d skipped=%d\n",
+            tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml", ds.n, skipped);
+
+    int* train_idx = malloc((size_t)ds.n * sizeof(int));
+    int* val_idx = malloc((size_t)ds.n * sizeof(int));
+    int n_train = 0, n_val = 0;
+    for (int i = 0; i < ds.n; i++) {
+        if (val_every > 0 && (i % val_every) == 0) val_idx[n_val++] = i;
+        else train_idx[n_train++] = i;
+    }
+    if (n_train == 0) {
+        fprintf(stderr, "No training examples after validation split\n");
+        free(train_idx); free(val_idx); bmt_sft_free_dataset(&ds);
+        return 1;
+    }
+    unsigned int rng = (unsigned int)seed;
+    for (int i = n_train - 1; i > 0; i--) {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        int j = (int)(rng % (unsigned int)(i + 1));
+        int tmp = train_idx[i]; train_idx[i] = train_idx[j]; train_idx[j] = tmp;
+    }
+
+    bm_context_t* ctx = bm_create(BM_DEVICE_METAL);
+    bm_model_t* model = calloc(1, sizeof(*model));
+    if (load_model_or_fail(model, model_dir) != 0) {
+        bm_destroy_model(model); bm_destroy(ctx);
+        free(train_idx); free(val_idx); bmt_sft_free_dataset(&ds);
+        return 1;
+    }
+    if (prec_str) {
+        if (strcmp(prec_str, "bf16") == 0) model->precision = BM_PRECISION_BF16;
+        else if (strcmp(prec_str, "fp16") == 0) model->precision = BM_PRECISION_FP16;
+        else model->precision = BM_PRECISION_FP32;
+    } else {
+        model->precision = bm_get_supported_precision(ctx);
+    }
+    bm_tokenizer_t tok;
+    bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
+
+    bm_train_config_t cfg = {0};
+    cfg.learning_rate = lr;
+    cfg.beta1 = 0.9f;
+    cfg.beta2 = 0.95f;
+    cfg.epsilon = 1e-8f;
+    cfg.weight_decay = 0.0f;
+    cfg.grad_accum_steps = grad_accum;
+    cfg.warmup_steps = 0;
+    cfg.max_steps = max_steps;
+    cfg.use_master_weights = 1;
+    cfg.seq_len = seq_len;
+    cfg.lora_rank = lora_rank;
+    cfg.lora_alpha = lora_alpha;
+    cfg.lora_targets = lora_targets;
+    cfg.lora_seed = lora_seed;
+
+    bm_trainer_t* trainer = bm_create_trainer(ctx, model, &cfg);
+    if (!trainer) {
+        fprintf(stderr, "Failed to create trainer\n");
+        bm_tokenizer_free(&tok); bm_destroy_model(model); bm_destroy(ctx);
+        free(train_idx); free(val_idx); bmt_sft_free_dataset(&ds);
+        return 1;
+    }
+    if (resume_path) {
+        bm_load_state(trainer, resume_path);
+        fprintf(stderr, "[sft] resumed from %s\n", resume_path);
+    }
+
+    int bt = batch_size * seq_len;
+    int* inputs = malloc((size_t)bt * sizeof(int));
+    int* targets = malloc((size_t)bt * sizeof(int));
+    uint8_t* attn = malloc((size_t)bt);
+    uint8_t* loss = malloc((size_t)bt);
+    double total_ms = 0.0;
+    long total_tokens = 0;
+    int pos = 0;
+
+    for (int step = 0; step < max_steps; step++) {
+        int built = 1;
+        for (int b = 0; b < batch_size; b++) {
+            int ei = train_idx[(pos + b) % n_train];
+            if (bmt_sft_build_example(&tok, &ds.items[ei], seq_len,
+                                      inputs + b * seq_len, targets + b * seq_len,
+                                      attn + b * seq_len, loss + b * seq_len) != 0) {
+                built = 0;
+                break;
+            }
+        }
+        if (!built) {
+            pos += batch_size;
+            continue;
+        }
+        double t0 = get_time_ms();
+        float l = bm_train_step_masked(trainer, inputs, targets, attn, loss, batch_size, seq_len);
+        double ms = get_time_ms() - t0;
+        total_ms += ms;
+        total_tokens += (long)batch_size * seq_len;
+        printf("step %d/%d loss=%.4f step_ms=%.0f tok/s=%.1f rss=%zuMB\n",
+               step + 1, max_steps, l, ms,
+               (double)(batch_size * seq_len) * 1000.0 / (ms > 0 ? ms : 1),
+               get_rss_mb());
+        if (save_every > 0 && (step + 1) % save_every == 0) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/checkpoint_%d.bin", output_dir, step + 1);
+            bm_save_state(trainer, path);
+        }
+        pos += batch_size;
+    }
+    bm_train_flush(trainer);
+
+    if (save_adapter) {
+        if (bm_save_adapter(trainer, save_adapter) == 0)
+            fprintf(stderr, "[sft] saved adapter to %s\n", save_adapter);
+        else
+            fprintf(stderr, "[sft] failed to save adapter to %s\n", save_adapter);
+    }
+
+    if (n_val > 0) {
+        double vloss = 0.0;
+        int vn = 0;
+        for (int i = 0; i < n_val; i++) {
+            const bmt_sft_pair_t* p = &ds.items[val_idx[i]];
+            if (bmt_sft_build_example(&tok, p, seq_len, inputs, targets, attn, loss) != 0)
+                continue;
+            vloss += bm_train_eval_masked(trainer, inputs, targets, attn, loss, 1, seq_len);
+            vn++;
+        }
+        if (vn > 0) printf("val loss: %.4f (%d examples)\n", vloss / vn, vn);
+    }
+
+    printf("avg step: %.1fms, %.1f tok/s, %ld tokens\n",
+           total_ms / max_steps,
+           (double)total_tokens * 1000.0 / (total_ms > 0 ? total_ms : 1),
+           total_tokens);
+
+    free(inputs); free(targets); free(attn); free(loss);
+    free(train_idx); free(val_idx);
+    bmt_sft_free_dataset(&ds);
+    bm_tokenizer_free(&tok);
+    bm_destroy_trainer(trainer);
+    bm_destroy_model(model);
+    bm_destroy(ctx);
+    return 0;
+}
+
 static int cmd_train(int argc, char** argv) {
     if (argc < 5) {
         fprintf(stderr, "Usage: %s train <model_dir> <data_file> <output_dir> [options]\n", argv[0]);
@@ -587,6 +805,7 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "tok-test") == 0) return cmd_tok_test(argc, argv);
 #ifdef BAREMETAL_TRAIN
     if (strcmp(cmd, "train") == 0) return cmd_train(argc, argv);
+    if (strcmp(cmd, "train-sft") == 0) return cmd_train_sft(argc, argv);
 #endif
 
     if (strcmp(cmd, "info") == 0) {
