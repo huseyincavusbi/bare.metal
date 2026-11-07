@@ -422,6 +422,28 @@ void bm_train_profile_end(bm_trainer_t* t, double* forward_ms, double* loss_ms,
     t->profile = 0;
 }
 
+float bm_train_eval_masked(bm_trainer_t* t, const int* inputs, const int* targets,
+                           const uint8_t* attn_mask, const uint8_t* loss_mask, int B, int T) {
+    int S = T;
+    if (S != t->S) return -1.0f;
+    float total_loss = 0.0f;
+    for (int b = 0; b < B; b++) {
+        const int* seq_inputs = inputs + b * S;
+        const int* seq_targets = targets + b * S;
+        bmt_scheduler_set_attention_mask(t->sched, attn_mask ? attn_mask + b * S : NULL, S);
+        embed_lookup(t, seq_inputs, S);
+        bmt_scheduler_forward_train(t->sched, S);
+        if (loss_mask)
+            total_loss += bmt_scheduler_xent_backward_masked(t->sched, t->t_logits_id,
+                                                             seq_targets, loss_mask + b * S,
+                                                             S, t->model->arch.vocab_size);
+        else
+            total_loss += bmt_scheduler_xent_backward(t->sched, t->t_logits_id,
+                                                      seq_targets, S, t->model->arch.vocab_size);
+    }
+    return total_loss / (float)B;
+}
+
 float bm_train_step_masked(bm_trainer_t* t, const int* inputs, const int* targets,
                            const uint8_t* attn_mask, const uint8_t* loss_mask, int B, int T) {
     int S = T;
