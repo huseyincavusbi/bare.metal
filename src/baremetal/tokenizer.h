@@ -47,5 +47,6 @@ char* bm_tokenizer_decode(bm_tokenizer_t* t, int prev_token, int token);
 void bm_tokenizer_safe_print(char* piece);
 int bm_tokenizer_encode(bm_tokenizer_t* t, const char* text, int8_t bos,
                         int8_t eos, int* tokens, int* n_tokens);
+int bm_tokenizer_token_id(bm_tokenizer_t* t, const char* text);
 
 #endif
