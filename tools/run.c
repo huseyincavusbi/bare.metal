@@ -170,7 +170,7 @@ int bm_run_tokens(bm_context_t* ctx, bm_model_t* m,
         // 5. Sample next token
         if (pos >= n_prompt - 1) {
             next_token = sample_topk_topp(logits, V, temperature, top_k, top_p, rng_state++);
-            if (callback) callback(next_token, user_data);
+            if (callback && callback(next_token, user_data)) break;
             if (pos < n_prompt + 5) {
                 fprintf(stderr, " [gen token %d at pos %d]", next_token, pos);
             }
