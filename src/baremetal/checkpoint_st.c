@@ -511,6 +511,7 @@ int bmt_checkpoint_load_safetensors(bm_model_t* model, const char* dir_path) {
             } else { \
                 bmt_weight_src_t* src = &model->weight_srcs[model->n_weight_srcs++]; \
                 src->offset = (size_t)((char*)(dstp) - (char*)model->weight_buffer); \
+                src->n_elems = (size_t)(count); \
                 src->ptr = raw; \
                 src->is_bf16 = bf16; \
                 if ((void*)(dstp) == (void*)model->token_embedding_table) { \
