@@ -1,0 +1,8 @@
+{"messages":[{"role":"user","content":"What is 2+2?"},{"role":"assistant","content":"2+2 is 4."}]}
+{"messages":[{"role":"user","content":"Name a primary color."},{"role":"assistant","content":"Red is a primary color."}]}
+{"messages":[{"role":"user","content":"Say hello."},{"role":"assistant","content":"Hello!"}]}
+{"prompt":"What is the capital of France?","completion":"Paris is the capital of France."}
+{"messages":[{"role":"user","content":"Write a short greeting."},{"role":"assistant","content":"Good morning!"}]}
+{"messages":[{"role":"user","content":"What is 3+3?"},{"role":"assistant","content":"3+3 is 6."}]}
+{"messages":[{"role":"user","content":"Name a planet."},{"role":"assistant","content":"Mars is a planet."}]}
+{"messages":[{"role":"user","content":"Say goodbye."},{"role":"assistant","content":"Goodbye!"}]}
