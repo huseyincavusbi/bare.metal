@@ -849,6 +849,7 @@ int main(int argc, char** argv) {
         const char* template_name = NULL;
         const char* system_prompt = NULL;
         int chat = 0;
+        int max_seq = 8192;
 
         for (int i = 3; i < argc; i++) {
             if (argv[i][0] == '-' && argv[i][1] == '-') {
@@ -863,6 +864,7 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--chat") == 0) chat = 1;
                 else if (strcmp(argv[i], "--template") == 0 && i+1 < argc) template_name = argv[++i];
                 else if (strcmp(argv[i], "--system") == 0 && i+1 < argc) system_prompt = argv[++i];
+                else if (strcmp(argv[i], "--max-seq") == 0 && i+1 < argc) max_seq = atoi(argv[++i]);
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -889,6 +891,8 @@ int main(int argc, char** argv) {
         } else {
             model->precision = bm_get_supported_precision(ctx);
         }
+        if (max_seq > 0 && model->arch.max_seq_len > max_seq)
+            model->arch.max_seq_len = max_seq;
         if (adapter_path && bm_load_adapter(model, adapter_path) != 0) {
             fprintf(stderr, "Failed to load adapter: %s\n", adapter_path);
             bm_destroy_model(model);
