@@ -835,6 +835,7 @@ int main(int argc, char** argv) {
         int quant = 0;   /* 0 = off, 8 = Q8, 4 = Q4 */
         const char* prec_str = NULL;
         const char* adapter_path = NULL;
+        int max_seq = 8192;
 
         for (int i = 3; i < argc; i++) {
             if (argv[i][0] == '-' && argv[i][1] == '-') {
@@ -846,6 +847,7 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--quant") == 0 && i+1 < argc) { const char* q = argv[++i]; quant = (strcmp(q, "q4") == 0) ? 4 : (strcmp(q, "q8") == 0 ? 8 : 0); }
                 else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
                 else if (strcmp(argv[i], "--adapter") == 0 && i+1 < argc) adapter_path = argv[++i];
+                else if (strcmp(argv[i], "--max-seq") == 0 && i+1 < argc) max_seq = atoi(argv[++i]);
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
                 prompt = argv[i];
@@ -872,6 +874,8 @@ int main(int argc, char** argv) {
         } else {
             model->precision = bm_get_supported_precision(ctx);
         }
+        if (max_seq > 0 && model->arch.max_seq_len > max_seq)
+            model->arch.max_seq_len = max_seq;
         if (adapter_path && bm_load_adapter(model, adapter_path) != 0) {
             fprintf(stderr, "Failed to load adapter: %s\n", adapter_path);
             bm_destroy_model(model);
