@@ -195,6 +195,18 @@ void bmt_model_free_buffers(bm_model_t* model) {
     memset(model, 0, sizeof(bm_model_t));
 }
 
+void bmt_model_materialize_weights(bm_model_t* model) {
+    if (!model || !model->weight_buffer || !model->weight_srcs) return;
+    for (int i = 0; i < model->n_weight_srcs; i++) {
+        bmt_weight_src_t* src = &model->weight_srcs[i];
+        float* dst = (float*)((char*)model->weight_buffer + src->offset);
+        if (src->is_bf16)
+            bm_bf16_to_f32_array((const bm_bf16_t*)src->ptr, dst, src->n_elems);
+        else
+            memcpy(dst, src->ptr, src->n_elems * sizeof(float));
+    }
+}
+
 void bmt_model_release_host_weights(bm_model_t* model) {
     if (!model || !model->weight_buffer) return;
     size_t vocab_size = model->arch.padded_vocab_size > 0

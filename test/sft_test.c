@@ -56,6 +56,15 @@ int main(void) {
 
     bm_tokenizer_t tok;
     bm_tokenizer_init(&tok, "data/smollm2-135m", 49152);
+    check(bm_tokenizer_token_id(&tok, "<|im_start|>") == 1, "tokenizer special lookup");
+    char* chat_prompt = NULL;
+    int stop_id = -1;
+    check(bmt_sft_render_chat(BMT_SFT_CHATML, NULL, "hi", &tok, &chat_prompt, &stop_id) == 0,
+          "render ChatML chat prompt");
+    check(strcmp(chat_prompt, "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n") == 0,
+          "ChatML chat prompt text");
+    check(stop_id == 2, "ChatML stop token");
+    free(chat_prompt);
     const int S = 64;
     int inputs[64], targets[64];
     uint8_t attn[64], loss[64];

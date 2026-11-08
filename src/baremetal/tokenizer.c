@@ -790,6 +790,11 @@ static int man_bsearch(char* key, bm_token_index_t* arr, int n) {
     return -1;
 }
 
+int bm_tokenizer_token_id(bm_tokenizer_t* t, const char* text) {
+    if (!t || !text || !t->sorted_vocab) return -1;
+    return man_bsearch((char*)text, t->sorted_vocab, t->vocab_size);
+}
+
 static int bpe_merge(bm_tokenizer_t* t, int* tokens, int* n_tokens) {
     size_t cap = (size_t)t->max_token_length * 2 + 3;
     char* str_buffer = malloc(cap);

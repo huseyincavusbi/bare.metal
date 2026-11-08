@@ -56,6 +56,7 @@ struct bm_model_s {
     float*   lora_ab;
 
     int      quant_bits;  /* 0 = fp, 8 = Q8, 4 = Q4 */
+    int      weights_modified; /* adapter merged: upload host weights, not mmap sources */
 
     int      weight_is_mmap;
     size_t   weight_map_size;
@@ -67,6 +68,7 @@ struct bm_model_s {
 
 typedef struct bmt_weight_src_s {
     size_t     offset;
+    size_t     n_elems;
     const void* ptr;
     int        is_bf16;
 } bmt_weight_src_t;
@@ -75,6 +77,7 @@ int  bmt_model_alloc_buffers(bm_model_t* model, const bm_arch_t* arch);
 int  bmt_model_alloc_buffers_ex(bm_model_t* model, const bm_arch_t* arch, int use_mmap);
 void bmt_model_free_buffers(bm_model_t* model);
 void bmt_model_release_host_weights(bm_model_t* model);
+void bmt_model_materialize_weights(bm_model_t* model);
 int  bmt_model_load_weights(bm_model_t* model, const char* path);
 int  bmt_arch_validate(const bm_arch_t* arch, int has_rope_scaling);
 

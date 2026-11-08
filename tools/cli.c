@@ -272,6 +272,17 @@ static int collect_token(int token_id, void* user_data) {
     return 0;
 }
 
+typedef struct {
+    token_collector_t c;
+    int stop_id;
+} chat_collector_t;
+
+static int collect_chat_token(int token_id, void* user_data) {
+    chat_collector_t* cc = (chat_collector_t*)user_data;
+    if (token_id == cc->stop_id) return 1;
+    return collect_token(token_id, &cc->c);
+}
+
 static int read_token_ids(const char* path, int** out_ids) {
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
@@ -835,6 +846,9 @@ int main(int argc, char** argv) {
         int quant = 0;   /* 0 = off, 8 = Q8, 4 = Q4 */
         const char* prec_str = NULL;
         const char* adapter_path = NULL;
+        const char* template_name = NULL;
+        const char* system_prompt = NULL;
+        int chat = 0;
         int max_seq = 8192;
 
         for (int i = 3; i < argc; i++) {
@@ -847,6 +861,9 @@ int main(int argc, char** argv) {
                 else if (strcmp(argv[i], "--quant") == 0 && i+1 < argc) { const char* q = argv[++i]; quant = (strcmp(q, "q4") == 0) ? 4 : (strcmp(q, "q8") == 0 ? 8 : 0); }
                 else if (strcmp(argv[i], "--precision") == 0 && i+1 < argc) prec_str = argv[++i];
                 else if (strcmp(argv[i], "--adapter") == 0 && i+1 < argc) adapter_path = argv[++i];
+                else if (strcmp(argv[i], "--chat") == 0) chat = 1;
+                else if (strcmp(argv[i], "--template") == 0 && i+1 < argc) template_name = argv[++i];
+                else if (strcmp(argv[i], "--system") == 0 && i+1 < argc) system_prompt = argv[++i];
                 else if (strcmp(argv[i], "--max-seq") == 0 && i+1 < argc) max_seq = atoi(argv[++i]);
                 else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
             } else if (prompt[0] == '\0') {
@@ -887,30 +904,49 @@ int main(int argc, char** argv) {
         bm_tokenizer_t tok;
         bm_tokenizer_init(&tok, model_dir, model->arch.vocab_size);
 
-        int ptok[1024];
+        char* chat_prompt = NULL;
+        int stop_id = -1;
+        const char* encode_prompt = prompt;
+        if (chat) {
+            int tmpl = template_name ? bmt_sft_parse_template(template_name)
+                                     : bmt_sft_detect_template(model_dir);
+            if (tmpl < 0 || bmt_sft_render_chat((bmt_sft_template_t)tmpl, system_prompt, prompt,
+                                                &tok, &chat_prompt, &stop_id) != 0) {
+                fprintf(stderr, "Failed to render chat prompt\n");
+                bm_tokenizer_free(&tok); bm_destroy_model(model); bm_destroy(ctx);
+                return 1;
+            }
+            encode_prompt = chat_prompt;
+        }
+
+        int ptok[4096];
         int nt = 0;
-        bm_tokenizer_encode(&tok, prompt, 0, 0, ptok, &nt);
-        fprintf(stderr, "[run] prompt: %d tokens\n", nt);
+        bm_tokenizer_encode(&tok, encode_prompt, 0, 0, ptok, &nt);
+        fprintf(stderr, "[run] prompt: %d tokens%s\n", nt, chat ? " (chat)" : "");
 
         printf("%s", prompt);
         fflush(stdout);
 
         token_collector_t collector = {NULL, 0, 0};
+        chat_collector_t chat_collector = {{NULL, 0, 0}, stop_id};
         int rc = bm_run_tokens(ctx, model, ptok, nt,
                                steps, temp, top_k, top_p, seed,
-                               collect_token, &collector);
+                               chat ? collect_chat_token : collect_token,
+                               chat ? (void*)&chat_collector : (void*)&collector);
 
+        token_collector_t* out = chat ? &chat_collector.c : &collector;
         if (rc == 0) {
-            for (int i = 0; i < collector.count; i++) {
-                int prev = i > 0 ? collector.ids[i-1] : 1;
-                char* piece = bm_tokenizer_decode(&tok, prev, collector.ids[i]);
+            for (int i = 0; i < out->count; i++) {
+                int prev = i > 0 ? out->ids[i-1] : 1;
+                char* piece = bm_tokenizer_decode(&tok, prev, out->ids[i]);
                 bm_tokenizer_safe_print(piece);
             }
             printf("\n");
             fflush(stdout);
         }
 
-        free(collector.ids);
+        free(out->ids);
+        free(chat_prompt);
         bm_tokenizer_free(&tok);
         bm_destroy_model(model);
         bm_destroy(ctx);
