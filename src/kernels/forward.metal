@@ -1232,70 +1232,84 @@ kernel void attention_forward(
     const device float* v_cache = kv_cache + kv_off + MS * KV;
     const device float* qh = q + h * HD;
 
-    threadgroup float scores[1024];
-
-    for (int t = tid; t < S; t += tptg) {
-        float score = 0.0f;
-        for (int i = 0; i < HD; i++) {
-            score += qh[i] * k_cache[t * KV + kh * HD + i];
-        }
-        scores[t] = score * scale;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
+    threadgroup float scores[2048];
     threadgroup float reduce_buf[32];
 
-    float local_max = -INFINITY;
-    for (int t = tid; t < S; t += tptg) {
-        if (scores[t] > local_max) local_max = scores[t];
-    }
-    for (int off = 16; off > 0; off >>= 1) {
-        float other = simd_shuffle_down(local_max, (ushort)off);
-        if (other > local_max) local_max = other;
-    }
-    if (tid % 32 == 0) reduce_buf[tid / 32] = local_max;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid < 32) {
-        float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : -INFINITY;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float acc = 0.0f;
+
+    for (int base = 0; base < S; base += 2048) {
+        int n = S - base;
+        if (n > 2048) n = 2048;
+
+        for (int t = tid; t < n; t += tptg) {
+            float score = 0.0f;
+            for (int i = 0; i < HD; i++) {
+                score += qh[i] * k_cache[(base + t) * KV + kh * HD + i];
+            }
+            scores[t] = score * scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float local_max = -INFINITY;
+        for (int t = tid; t < n; t += tptg) {
+            if (scores[t] > local_max) local_max = scores[t];
+        }
         for (int off = 16; off > 0; off >>= 1) {
-            float other = simd_shuffle_down(v, (ushort)off);
-            if (other > v) v = other;
+            float other = simd_shuffle_down(local_max, (ushort)off);
+            if (other > local_max) local_max = other;
         }
-        if (tid == 0) reduce_buf[0] = v;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float global_max = reduce_buf[0];
+        if (tid % 32 == 0) reduce_buf[tid / 32] = local_max;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 32) {
+            float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : -INFINITY;
+            for (int off = 16; off > 0; off >>= 1) {
+                float other = simd_shuffle_down(v, (ushort)off);
+                if (other > v) v = other;
+            }
+            if (tid == 0) reduce_buf[0] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float tile_max = reduce_buf[0];
 
-    float local_sum = 0.0f;
-    for (int t = tid; t < S; t += tptg) {
-        scores[t] = exp(scores[t] - global_max);
-        local_sum += scores[t];
-    }
-    for (int off = 16; off > 0; off >>= 1) {
-        local_sum += simd_shuffle_down(local_sum, (ushort)off);
-    }
-    if (tid % 32 == 0) reduce_buf[tid / 32] = local_sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid < 32) {
-        float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : 0.0f;
+        float local_sum = 0.0f;
+        for (int t = tid; t < n; t += tptg) {
+            scores[t] = exp(scores[t] - tile_max);
+            local_sum += scores[t];
+        }
         for (int off = 16; off > 0; off >>= 1) {
-            v += simd_shuffle_down(v, (ushort)off);
+            local_sum += simd_shuffle_down(local_sum, (ushort)off);
         }
-        if (tid == 0) reduce_buf[0] = v;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float inv_sum = 1.0f / reduce_buf[0];
-
-    for (int t = tid; t < S; t += tptg) scores[t] *= inv_sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (int i = tid; i < HD; i += tptg) {
-        float val = 0.0f;
-        for (int t = 0; t < S; t++) {
-            val += scores[t] * v_cache[t * KV + kh * HD + i];
+        if (tid % 32 == 0) reduce_buf[tid / 32] = local_sum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 32) {
+            float v = (tid < (tptg + 31) / 32) ? reduce_buf[tid] : 0.0f;
+            for (int off = 16; off > 0; off >>= 1) {
+                v += simd_shuffle_down(v, (ushort)off);
+            }
+            if (tid == 0) reduce_buf[0] = v;
         }
-        out[h * HD + i] = val;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float tile_sum = reduce_buf[0];
+
+        float new_max = max(running_max, tile_max);
+        float old_scale = exp(running_max - new_max);
+        float tile_scale = exp(tile_max - new_max);
+        running_sum = running_sum * old_scale + tile_sum * tile_scale;
+        acc *= old_scale;
+
+        for (int t = tid; t < n; t += tptg) scores[t] *= tile_scale;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int t = 0; t < n; t++) {
+            acc += scores[t] * v_cache[(base + t) * KV + kh * HD + tid];
+        }
+        running_max = new_max;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+
+    out[h * HD + tid] = acc / running_sum;
 }
 
 // ----------------------------------------------------------------

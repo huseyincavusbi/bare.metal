@@ -62,6 +62,7 @@ struct bmt_scheduler_s {
 
     backend_kernel_t* k_attn_fwd_seq;
     backend_kernel_t* k_attn_fwd_masked;
+    backend_kernel_t* k_attn_decode;
     backend_kernel_t* k_attn_prefill;
     backend_kernel_t* k_kv_store;
     backend_kernel_t* k_add_fwd;
@@ -297,6 +298,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
 
     sched->k_attn_fwd_seq = backend_kernel_create(backend, "attention_forward_seq");
     sched->k_attn_fwd_masked = backend_kernel_create(backend, "attention_forward_seq_masked");
+    sched->k_attn_decode = backend_kernel_create(backend, "attention_forward");
     sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
     sched->k_kv_store = backend_kernel_create(backend, "kv_store");
     sched->k_add_fwd = backend_kernel_create(backend, "add_forward");
@@ -371,6 +373,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     if (sched->k_attn_fwd_seq) backend_kernel_destroy(sched->k_attn_fwd_seq);
     if (sched->k_attn_fwd_masked) backend_kernel_destroy(sched->k_attn_fwd_masked);
+    if (sched->k_attn_decode) backend_kernel_destroy(sched->k_attn_decode);
     if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
     if (sched->k_kv_store) backend_kernel_destroy(sched->k_kv_store);
     if (sched->k_add_fwd) backend_kernel_destroy(sched->k_add_fwd);
@@ -525,6 +528,9 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
             kn = sched->bf16_cls_kernel;
         } else if (node->op_type == BMK_OP_FUSED_CLASSIFIER && sched->precision == BM_PRECISION_FP16 && sched->fp16_cls_kernel) {
             kn = sched->fp16_cls_kernel;
+        } else if (node->op_type == BMK_OP_ATTENTION) {
+            kn = (sched->prefill_mode && sched->k_attn_prefill)
+                 ? sched->k_attn_prefill : sched->k_attn_decode;
         } else {
             kn = bmk_select(sched->reg, node->op_type, p1, p2, p3);
         }
