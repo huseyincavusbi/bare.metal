@@ -7,6 +7,7 @@
  */
 #include "baremetal.h"
 #include "baremetal/lora.h"
+#include "baremetal/sft.h"
 #include "baremetal/context.h"
 #include "baremetal/model.h"
 #include "baremetal/tokenizer.h"
@@ -49,6 +50,11 @@ static void usage(const char* prog) {
         "  --lora-alpha F     LoRA alpha (default 16)\n"
         "  --lora-targets L   q,k,v,o,gate,up,down | attn | mlp | all\n"
         "  --lora-seed N      LoRA init seed (default 1)\n"
+        "  --sft-data FILE    JSONL SFT data (enables SFT mode)\n"
+        "  --template NAME    chatml|llama3|auto (default auto)\n"
+        "  --val-split N      hold out every Nth example (0 = off)\n"
+        "  --max-examples N   cap loaded examples (0 = all)\n"
+        "  --adapter-out FILE save trained LoRA adapter\n"
         "  --parity-steps N   losses compared to ref      (default 1)\n"
         "  --tol F            parity relative tolerance    (default 1e-6)\n"
         "  --check            exit non-zero if parity fails\n"
@@ -124,6 +130,10 @@ int main(int argc, char** argv) {
     int raw = 1, check = 0, parity_steps = 1, profile = 0;
     int lora_rank = 0, lora_seed = 1, lora_targets = BMT_LORA_ALL;
     float lora_alpha = 16.0f;
+    const char* sft_data = NULL;
+    const char* template_name = "auto";
+    const char* adapter_out = NULL;
+    int val_split = 0, max_examples = 0;
     float lr = 1e-4f, tol = 1e-6f;
     double avg_w = 0.0;
 
@@ -145,6 +155,11 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--lora-alpha") && i+1 < argc)    lora_alpha = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--lora-targets") && i+1 < argc)  lora_targets = bmt_lora_parse_targets(argv[++i]);
         else if (!strcmp(argv[i], "--lora-seed") && i+1 < argc)     lora_seed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sft-data") && i+1 < argc)      sft_data = argv[++i];
+        else if (!strcmp(argv[i], "--template") && i+1 < argc)      template_name = argv[++i];
+        else if (!strcmp(argv[i], "--val-split") && i+1 < argc)     val_split = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-examples") && i+1 < argc)  max_examples = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--adapter-out") && i+1 < argc)   adapter_out = argv[++i];
         else if (!strcmp(argv[i], "--parity-steps") && i+1 < argc) parity_steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol") && i+1 < argc)         tol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--check"))                     check = 1;
@@ -207,6 +222,40 @@ int main(int argc, char** argv) {
     if (!trainer) { fprintf(stderr, "trainer creation failed\n"); return 1; }
     double load_ms = bm_now_ms() - t_load0;
 
+    bmt_sft_dataset_t sft_ds;
+    memset(&sft_ds, 0, sizeof(sft_ds));
+    int *sft_train_idx = NULL, *sft_val_idx = NULL;
+    int sft_n_train = 0, sft_n_val = 0, sft_tmpl = BMT_SFT_CHATML;
+    float sft_val_loss = -1.0f;
+    uint8_t *sft_attn = NULL, *sft_lmask = NULL;
+    if (sft_data) {
+        sft_tmpl = strcmp(template_name, "auto") == 0
+                 ? bmt_sft_detect_template(model_dir)
+                 : bmt_sft_parse_template(template_name);
+        if (sft_tmpl < 0) { fprintf(stderr, "unknown template: %s\n", template_name); return 1; }
+        int skipped = 0;
+        if (bmt_sft_load_jsonl(sft_data, (bmt_sft_template_t)sft_tmpl, max_examples,
+                               &sft_ds, &skipped) != 0) {
+            fprintf(stderr, "no usable SFT examples (skipped %d)\n", skipped);
+            return 1;
+        }
+        sft_train_idx = malloc((size_t)sft_ds.n * sizeof(int));
+        sft_val_idx = malloc((size_t)sft_ds.n * sizeof(int));
+        for (int i = 0; i < sft_ds.n; i++) {
+            if (val_split > 0 && (i % val_split) == 0) sft_val_idx[sft_n_val++] = i;
+            else sft_train_idx[sft_n_train++] = i;
+        }
+        if (sft_n_train == 0) { fprintf(stderr, "no SFT training examples\n"); return 1; }
+        unsigned int rng = 42u;
+        for (int i = sft_n_train - 1; i > 0; i--) {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            int j = (int)(rng % (unsigned int)(i + 1));
+            int tmp = sft_train_idx[i]; sft_train_idx[i] = sft_train_idx[j]; sft_train_idx[j] = tmp;
+        }
+        fprintf(stderr, "[sft] template=%s train=%d val=%d\n",
+                sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml", sft_n_train, sft_n_val);
+    }
+
     int V = m->arch.vocab_size;
     int n_tok = 0;
     int* tokens = NULL;
@@ -227,8 +276,9 @@ int main(int argc, char** argv) {
             }
             fclose(f);
         }
-        bm_destroy_tokenizer(tok);
+        if (!sft_data) bm_destroy_tokenizer(tok);
     }
+    if (sft_data && !tok) { fprintf(stderr, "SFT tokenizer failed\n"); return 1; }
     if (!tokens || n_tok < 2) {
         free(tokens);
         n_tok = 4096;
@@ -243,6 +293,10 @@ int main(int argc, char** argv) {
 
     int* inputs = malloc((size_t)batch_size * seq_len * sizeof(int));
     int* targets = malloc((size_t)batch_size * seq_len * sizeof(int));
+    if (sft_data) {
+        sft_attn = calloc((size_t)batch_size * seq_len, 1);
+        sft_lmask = calloc((size_t)batch_size * seq_len, 1);
+    }
     double* step_ms = calloc((size_t)steps, sizeof(double));
     double* token_rate = calloc((size_t)steps, sizeof(double));
     float* losses = calloc((size_t)steps, sizeof(float));
@@ -261,15 +315,30 @@ int main(int argc, char** argv) {
             active_start_unix = time(NULL);
             if (profile) bm_train_profile_begin(trainer);
         }
-        for (int b = 0; b < batch_size; b++) {
-            for (int i = 0; i < seq_len; i++) {
-                inputs[b * seq_len + i] = tokens[pos % n_tok];
-                targets[b * seq_len + i] = tokens[(pos + 1) % n_tok];
-                pos++;
+        if (sft_data) {
+            for (int b = 0; b < batch_size; b++) {
+                int ei = sft_train_idx[(pos + b) % sft_n_train];
+                if (bmt_sft_build_example(tok, &sft_ds.items[ei], seq_len,
+                                          inputs + b * seq_len, targets + b * seq_len,
+                                          sft_attn + b * seq_len, sft_lmask + b * seq_len) != 0) {
+                    fprintf(stderr, "failed to build SFT example %d\n", ei);
+                    return 1;
+                }
+            }
+            pos += batch_size;
+        } else {
+            for (int b = 0; b < batch_size; b++) {
+                for (int i = 0; i < seq_len; i++) {
+                    inputs[b * seq_len + i] = tokens[pos % n_tok];
+                    targets[b * seq_len + i] = tokens[(pos + 1) % n_tok];
+                    pos++;
+                }
             }
         }
         double t0 = bm_now_ms();
-        float loss = bm_train_step(trainer, inputs, targets, batch_size, seq_len);
+        float loss = sft_data
+                   ? bm_train_step_masked(trainer, inputs, targets, sft_attn, sft_lmask, batch_size, seq_len)
+                   : bm_train_step(trainer, inputs, targets, batch_size, seq_len);
         double ms = bm_now_ms() - t0;
         if (step >= 0) {
             step_ms[step] = ms;
@@ -281,7 +350,25 @@ int main(int argc, char** argv) {
     active_end_unix = time(NULL);
     if (profile) bm_train_profile_end(trainer, &prof_fwd, &prof_loss, &prof_bwd, &prof_opt);
     bm_train_flush(trainer);
+    if (sft_data && sft_n_val > 0) {
+        double vsum = 0.0;
+        int vn = 0;
+        for (int i = 0; i < sft_n_val; i++) {
+            int ei = sft_val_idx[i];
+            if (bmt_sft_build_example(tok, &sft_ds.items[ei], seq_len,
+                                      inputs, targets, sft_attn, sft_lmask) != 0) continue;
+            vsum += bm_train_eval_masked(trainer, inputs, targets, sft_attn, sft_lmask, 1, seq_len);
+            vn++;
+        }
+        if (vn > 0) sft_val_loss = (float)(vsum / vn);
+    }
     if (state_out) bm_save_state(trainer, state_out);
+    if (adapter_out && sft_data) {
+        if (bm_save_adapter(trainer, adapter_out) == 0)
+            fprintf(stderr, "[sft] saved adapter to %s\n", adapter_out);
+        else
+            fprintf(stderr, "[sft] failed to save adapter to %s\n", adapter_out);
+    }
 
     int n_cp = 0;
     int marks[5] = { 0, steps / 4, steps / 2, (3 * steps) / 4, steps - 1 };
@@ -419,7 +506,7 @@ int main(int argc, char** argv) {
     fprintf(out, "    \"warmup\": %d,\n", warmup);
     fprintf(out, "    \"learning_rate\": %.9g,\n", (double)lr);
     fprintf(out, "    \"seed\": 42,\n");
-    fprintf(out, "    \"data\": \"%s\"\n", data_path);
+    fprintf(out, "    \"data\": \"%s\"\n", sft_data ? sft_data : data_path);
     fprintf(out, "  },\n");
 
     fprintf(out, "  \"results\": {\n");
@@ -448,6 +535,13 @@ int main(int argc, char** argv) {
     }
     fprintf(out, "      \"load_ms\": %.3f\n", load_ms);
     fprintf(out, "    },\n");
+    if (sft_data) {
+        fprintf(out, "    \"sft\": { \"template\": \"%s\", \"train_examples\": %d, \"val_examples\": %d, "
+                     "\"val_loss\": %.9g, \"adapter\": \"%s\" },\n",
+                sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml",
+                sft_n_train, sft_n_val, (double)sft_val_loss,
+                adapter_out ? adapter_out : "");
+    }
     fprintf(out, "    \"memory\": { \"rss_peak_bytes\": %zu, \"gpu_peak_bytes\": %zu, \"gpu_alloc_bytes\": %zu },\n",
             rss_peak, gpu_peak, gpu_alloc);
     fprintf(out, "    \"gpu_exec\": { \"busy_ms\": %.3f, \"busy_pct\": %.2f, \"cmd_buffers\": %llu, "

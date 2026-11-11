@@ -229,6 +229,41 @@ def train_table_md(train):
     return out
 
 
+def sft_summary(j):
+    r = j.get("results", {})
+    s = r.get("sft", {})
+    t = train_summary(j)
+    return {
+        "template": s.get("template"),
+        "train_examples": s.get("train_examples"),
+        "val_examples": s.get("val_examples"),
+        "val_loss": s.get("val_loss"),
+        "adapter": s.get("adapter"),
+        "step_ms": t["step_ms"],
+        "tokens_per_s": t["tokens_per_s"],
+        "rss_peak_bytes": t["rss_peak_bytes"],
+        "gpu_peak_bytes": t["gpu_peak_bytes"],
+    }
+
+
+def sft_table_md(train):
+    rows = [(cfg, j) for cfg, j in sorted(train.items())
+            if j.get("results", {}).get("sft")]
+    if not rows:
+        return []
+    out = ["| cfg | template | train | val | val loss | step ms | tok/s | RSS MB | GPU MB | adapter |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
+    for cfg, j in rows:
+        t = sft_summary(j)
+        val = "-" if t["val_loss"] is None or t["val_loss"] < 0 else f"{t['val_loss']:.4f}"
+        adapter = os.path.basename(t["adapter"]) if t["adapter"] else "-"
+        out.append(f"| {cfg} | {t['template']} | {t['train_examples']} | {t['val_examples']} "
+                   f"| {val} | {nfmt(t['step_ms'])} | {nfmt(t['tokens_per_s'])} "
+                   f"| {nfmt((t['rss_peak_bytes'] or 0)/1e6, 0)} "
+                   f"| {nfmt((t['gpu_peak_bytes'] or 0)/1e6, 0)} | {adapter} |")
+    return out
+
+
 def print_train_table(train):
     print(f"{'cfg':<14}{'prec':<7}{'B':>3}{'G':>3}{'S':>5}{'step ms':>9}{'tok/s':>9}{'loss':>16}{'RSS MB':>9}{'GPU MB':>9}")
     for cfg, j in sorted(train.items()):
@@ -341,6 +376,9 @@ def aggregate(run_dir, settings_str):
             print(f"  training configs: {', '.join(sorted(models[stem]['train']))}")
             print_train_table(models[stem]["train"])
             md += ["### Training", ""] + train_table_md(models[stem]["train"]) + [""]
+            sft_md = sft_table_md(models[stem]["train"])
+            if sft_md:
+                md += ["### SFT", ""] + sft_md + [""]
     open(os.path.join(run_dir, "summary.md"), "w").write("\n".join(md) + "\n")
 
     # grand
