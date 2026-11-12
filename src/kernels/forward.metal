@@ -1795,6 +1795,74 @@ kernel void attention_forward_prefill(
     for (int d = 0; d < HD; d++) oi[d] = acc[d] * inv;
 }
 
+// attention_forward_prefill_warp
+// Warp-per-query prefill attention. Each warp owns one query position,
+// each lane owns up to four head dimensions, and the Q·K dot is reduced
+// with simd_sum. K/V are read in warp-coalesced order; online softmax
+// keeps m/l and the output accumulator in registers.
+// Dispatch: grid=(ceil(S/8)*NH*256,1,1), threadgroup=(256,1,1)
+kernel void attention_forward_prefill_warp(
+    device const float* Q   [[buffer(0)]],
+    device const float* K   [[buffer(1)]],
+    device const float* V   [[buffer(2)]],
+    device float* out       [[buffer(3)]],
+    constant int* p         [[buffer(4)]],
+    constant float& scale   [[buffer(5)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
+    if (HD > 128) return;
+
+    int lane = (int)tid3.x & 31;
+    int warp = (int)tid3.x >> 5;
+    int tiles = (S + 7) >> 3;
+    int h = (int)tgid.x / tiles;
+    int tile = (int)tgid.x - h * tiles;
+    int i = tile * 8 + warp;
+    if (h >= NH || i >= S) return;
+
+    int kh = h / kv_mul;
+    const device float* qi = Q + (i * NH + h) * HD;
+    float qv[4];
+    float acc[4];
+    for (int k = 0; k < 4; k++) {
+        int d = lane + 32 * k;
+        qv[k] = d < HD ? qi[d] : 0.0f;
+        acc[k] = 0.0f;
+    }
+
+    float m = -INFINITY;
+    float l = 0.0f;
+    for (int j = 0; j <= i; j++) {
+        const device float* kj = K + (j * NKV + kh) * HD;
+        float part = 0.0f;
+        for (int k = 0; k < 4; k++) {
+            int d = lane + 32 * k;
+            if (d < HD) part += qv[k] * kj[d];
+        }
+        float s = simd_sum(part) * scale;
+        float mn = max(m, s);
+        float a = exp(m - mn);
+        float b = exp(s - mn);
+        l = l * a + b;
+
+        const device float* vj = V + (j * NKV + kh) * HD;
+        for (int k = 0; k < 4; k++) {
+            int d = lane + 32 * k;
+            if (d < HD) acc[k] = acc[k] * a + b * vj[d];
+        }
+        m = mn;
+    }
+
+    float inv = 1.0f / l;
+    device float* oi = out + (i * NH + h) * HD;
+    for (int k = 0; k < 4; k++) {
+        int d = lane + 32 * k;
+        if (d < HD) oi[d] = acc[k] * inv;
+    }
+}
+
 // ----------------------------------------------------------------
 // rope_forward_seq (training forward RoPE, full sequence, [S,NH,HD] layout)
 // For each (position s, head h): freq=1/theta^(2i/HD); apply rotation by pos=s.
