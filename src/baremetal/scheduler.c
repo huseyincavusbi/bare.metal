@@ -21,7 +21,9 @@ struct bmt_scheduler_s {
     bm_precision_t precision;
 
     backend_buffer_t** buffers;
-    int*               shared;   /* 1 = buffer owned by another scheduler */
+    int*               shared;   /* 1 = buffer not owned by this scheduler */
+    backend_buffer_t** pool;     /* reused activation buffers */
+    int                n_pool;
 
     backend_buffer_t** param_bufs;
     backend_buffer_t** kv_bufs;
@@ -122,6 +124,87 @@ static int tensor_weight_src_bf16(const bmt_tensor_t* t) {
     return t->src_ptr && t->src_is_bf16;
 }
 
+static int* scheduler_plan_slots(bmt_graph_t* graph, size_t** slot_bytes_out, int* n_slots_out) {
+    int nt = graph->n_tensors;
+    int nn = graph->n_nodes;
+    int* birth = malloc((size_t)nt * sizeof(int));
+    int* death = malloc((size_t)nt * sizeof(int));
+    int* slots = malloc((size_t)nt * sizeof(int));
+    size_t* sizes = malloc((size_t)nt * sizeof(size_t));
+    if (!birth || !death || !slots || !sizes) {
+        free(birth); free(death); free(slots); free(sizes);
+        return NULL;
+    }
+    for (int i = 0; i < nt; i++) {
+        birth[i] = -1;
+        death[i] = -1;
+        slots[i] = -1;
+        sizes[i] = 0;
+    }
+    for (int i = 0; i < nt; i++) {
+        bmt_tensor_t* t = &graph->tensors[i];
+        if (t->type == BMT_TENSOR_TYPE_WEIGHT) continue;
+        size_t n = 1;
+        for (int d = 0; d < t->n_dims; d++) n *= (size_t)t->dims[d];
+        if (n == 0) n = 1024;
+        sizes[i] = n * sizeof(float);
+    }
+    for (int i = 0; i < nn; i++) {
+        bmt_node_t* node = &graph->nodes[i];
+        for (int j = 0; j < node->n_inputs; j++) {
+            int in = node->inputs[j];
+            if (in < 0 || in >= nt) continue;
+            if (birth[in] < 0) birth[in] = 0;
+            if (node->op_type == BMK_OP_ATTENTION && (j == 1 || j == 2))
+                death[in] = nn;
+            else
+                death[in] = i;
+        }
+        int out = node->output;
+        if (out >= 0 && out < nt) {
+            if (birth[out] < 0) birth[out] = i;
+            if (death[out] < i) death[out] = i;
+        }
+    }
+
+    size_t* cap = malloc((size_t)(nt > 0 ? nt : 1) * sizeof(size_t));
+    int* slot_death = malloc((size_t)(nt > 0 ? nt : 1) * sizeof(int));
+    int n_slots = 0;
+    if (!cap || !slot_death) {
+        free(birth); free(death); free(slots); free(sizes); free(cap); free(slot_death);
+        return NULL;
+    }
+    for (int i = 0; i < nn; i++) {
+        for (int k = 0; k < n_slots; k++)
+            if (slot_death[k] < i) slot_death[k] = -1;
+        for (int t = 0; t < nt; t++) {
+            if (birth[t] != i || slots[t] >= 0 || sizes[t] == 0) continue;
+            int best = -1;
+            for (int k = 0; k < n_slots; k++) {
+                if (slot_death[k] < 0 && cap[k] == sizes[t]) { best = k; break; }
+            }
+            if (best < 0) {
+                best = n_slots++;
+                cap[best] = sizes[t];
+                slot_death[best] = -1;
+            }
+            slots[t] = best;
+            slot_death[best] = death[t];
+        }
+    }
+
+    size_t* out = malloc((size_t)(n_slots > 0 ? n_slots : 1) * sizeof(size_t));
+    if (!out) {
+        free(birth); free(death); free(slots); free(sizes); free(cap); free(slot_death);
+        return NULL;
+    }
+    for (int k = 0; k < n_slots; k++) out[k] = cap[k];
+    *slot_bytes_out = out;
+    *n_slots_out = n_slots;
+    free(birth); free(death); free(sizes); free(cap); free(slot_death);
+    return slots;
+}
+
 static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src) {
     bmt_scheduler_t* sched = calloc(1, sizeof(bmt_scheduler_t));
     sched->backend = backend;
@@ -132,6 +215,19 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
 
     sched->buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
     sched->shared = calloc(graph->n_tensors, sizeof(int));
+    int* tensor_slot = NULL;
+    if (!need_grads) {
+        size_t* slot_bytes = NULL;
+        int n_slots = 0;
+        tensor_slot = scheduler_plan_slots(graph, &slot_bytes, &n_slots);
+        if (tensor_slot && n_slots > 0) {
+            sched->pool = calloc((size_t)n_slots, sizeof(backend_buffer_t*));
+            sched->n_pool = n_slots;
+            for (int k = 0; k < n_slots; k++)
+                sched->pool[k] = backend_buffer_alloc(backend, slot_bytes[k]);
+        }
+        free(slot_bytes);
+    }
     for (int i = 0; i < graph->n_tensors; i++) {
         bmt_tensor_t* t = &graph->tensors[i];
 
@@ -139,10 +235,17 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
             int sid = bmt_graph_find_weight(weight_src->graph, t->weight_ptr);
             if (sid < 0) {
                 fprintf(stderr, "shared weight not found in source graph\n");
+                free(tensor_slot);
                 bmt_scheduler_destroy(sched);
                 return NULL;
             }
             sched->buffers[i] = weight_src->buffers[sid];
+            sched->shared[i] = 1;
+            continue;
+        }
+
+        if (tensor_slot && tensor_slot[i] >= 0) {
+            sched->buffers[i] = sched->pool[tensor_slot[i]];
             sched->shared[i] = 1;
             continue;
         }
@@ -320,6 +423,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_resnorm_bwd_train = backend_kernel_create(backend, "residual_rmsnorm_backward_train");
     sched->k_resnorm_bwd_w_train = backend_kernel_create(backend, "residual_rmsnorm_backward_w_train");
 
+    free(tensor_slot);
     return sched;
 }
 
@@ -329,6 +433,8 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
         if (sched->buffers[i] && !sched->shared[i]) backend_buffer_free(sched->buffers[i]);
         if (sched->grad_buffers[i]) backend_buffer_free(sched->grad_buffers[i]);
     }
+    for (int k = 0; k < sched->n_pool; k++) backend_buffer_free(sched->pool[k]);
+    free(sched->pool);
     free(sched->buffers);
     free(sched->shared);
     free(sched->grad_buffers);
