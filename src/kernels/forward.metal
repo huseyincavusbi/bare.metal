@@ -2015,6 +2015,104 @@ kernel void attention_forward_prefill_warp(
     }
 }
 
+// attention_forward_prefill_tiled
+// One threadgroup per (32-query block, head). K/V tiles are staged in
+// threadgroup memory and reused by eight warps; each warp owns four
+// queries. Query dimensions stay in registers, scores use simd_sum, and
+// online softmax is maintained per query.
+// Dispatch: grid=(ceil(S/32)*NH*256,1,1), threadgroup=(256,1,1)
+kernel void attention_forward_prefill_tiled(
+    device const float* Q   [[buffer(0)]],
+    device const float* K   [[buffer(1)]],
+    device const float* V   [[buffer(2)]],
+    device float* out       [[buffer(3)]],
+    constant int* p         [[buffer(4)]],
+    constant float& scale   [[buffer(5)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4];
+    if (HD > 64) return;
+
+    int tid = (int)tid3.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int blocks = (S + 31) / 32;
+    int h = (int)tgid.x / blocks;
+    int blk = (int)tgid.x - h * blocks;
+    int i0 = blk * 32;
+    if (h >= NH || i0 >= S) return;
+
+    int kh = h / kv_mul;
+    int q0 = i0 + warp * 4;
+
+    float qreg[4][2];
+    float acc[4][2];
+    float m[4], l[4];
+    for (int q = 0; q < 4; q++) {
+        int i = q0 + q;
+        for (int k = 0; k < 2; k++) {
+            int d = lane + 32 * k;
+            qreg[q][k] = (i < S && d < HD) ? Q[(size_t)(i * NH + h) * HD + d] : 0.0f;
+            acc[q][k] = 0.0f;
+        }
+        m[q] = -INFINITY;
+        l[q] = 0.0f;
+    }
+
+    threadgroup float Ks[32][64];
+    threadgroup float Vs[32][64];
+    int imax = min(i0 + 32, S);
+
+    for (int jb = 0; jb < imax; jb += 32) {
+        int jn = min(32, imax - jb);
+        for (int idx = tid; idx < 32 * 64; idx += 256) {
+            int jj = idx >> 6, d = idx & 63;
+            float kv = 0.0f, vv = 0.0f;
+            if (jj < jn && d < HD) {
+                size_t off = (size_t)(jb + jj) * NKV * HD + (size_t)kh * HD + d;
+                kv = K[off];
+                vv = V[off];
+            }
+            Ks[jj][d] = kv;
+            Vs[jj][d] = vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int q = 0; q < 4; q++) {
+            int i = q0 + q;
+            if (i >= S) continue;
+            for (int jj = 0; jj < jn; jj++) {
+                int j = jb + jj;
+                if (j > i) break;
+                float part = 0.0f;
+                for (int k = 0; k < 2; k++)
+                    part += qreg[q][k] * Ks[jj][lane + 32 * k];
+                float s = simd_sum(part) * scale;
+                float mn = max(m[q], s);
+                float a = exp(m[q] - mn);
+                float b = exp(s - mn);
+                l[q] = l[q] * a + b;
+                for (int k = 0; k < 2; k++)
+                    acc[q][k] = acc[q][k] * a + b * Vs[jj][lane + 32 * k];
+                m[q] = mn;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (int q = 0; q < 4; q++) {
+        int i = q0 + q;
+        if (i >= S) continue;
+        float inv = 1.0f / l[q];
+        for (int k = 0; k < 2; k++) {
+            int d = lane + 32 * k;
+            if (d < HD)
+                out[(size_t)(i * NH + h) * HD + d] = acc[q][k] * inv;
+        }
+    }
+}
+
 // ----------------------------------------------------------------
 // rope_forward_seq (training forward RoPE, full sequence, [S,NH,HD] layout)
 // For each (position s, head h): freq=1/theta^(2i/HD); apply rotation by pos=s.

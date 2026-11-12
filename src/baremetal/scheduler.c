@@ -69,6 +69,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_attn_decode;
     backend_kernel_t* k_attn_prefill;
     backend_kernel_t* k_attn_prefill_warp;
+    backend_kernel_t* k_attn_prefill_tiled;
     backend_kernel_t* k_kv_store;
     backend_kernel_t* k_add_fwd;
     backend_kernel_t* k_add_scale_fwd;
@@ -409,6 +410,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_attn_decode = backend_kernel_create(backend, "attention_forward");
     sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
     sched->k_attn_prefill_warp = backend_kernel_create(backend, "attention_forward_prefill_warp");
+    sched->k_attn_prefill_tiled = backend_kernel_create(backend, "attention_forward_prefill_tiled");
     sched->k_kv_store = backend_kernel_create(backend, "kv_store");
     sched->k_add_fwd = backend_kernel_create(backend, "add_forward");
     sched->k_add_scale_fwd = backend_kernel_create(backend, "add_scale_forward");
@@ -490,6 +492,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_attn_decode) backend_kernel_destroy(sched->k_attn_decode);
     if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
     if (sched->k_attn_prefill_warp) backend_kernel_destroy(sched->k_attn_prefill_warp);
+    if (sched->k_attn_prefill_tiled) backend_kernel_destroy(sched->k_attn_prefill_tiled);
     if (sched->k_kv_store) backend_kernel_destroy(sched->k_kv_store);
     if (sched->k_add_fwd) backend_kernel_destroy(sched->k_add_fwd);
     if (sched->k_add_scale_fwd) backend_kernel_destroy(sched->k_add_scale_fwd);
@@ -939,6 +942,8 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
         if (node->op_type == BMK_OP_ATTENTION) {
             if (sched->attn_mask_active && sched->k_attn_fwd_masked)
                 kn = sched->k_attn_fwd_masked;
+            else if (sched->prefill_mode && sched->k_attn_prefill_tiled && node->params[1] <= 64)
+                kn = sched->k_attn_prefill_tiled;
             else if (sched->prefill_mode && sched->k_attn_prefill_warp && node->params[1] <= 128)
                 kn = sched->k_attn_prefill_warp;
             else
@@ -1154,7 +1159,11 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             gtx = S * node->params[2]; // S * NH
             ttx = 32;
         } else if (node->op_type == BMK_OP_ATTENTION) {
-            if (kn == sched->k_attn_prefill_warp) {
+            if (kn == sched->k_attn_prefill_tiled) {
+                int blocks = (S + 31) / 32;
+                gtx = blocks * node->params[0] * 256;
+                ttx = 256;
+            } else if (kn == sched->k_attn_prefill_warp) {
                 int tiles = (S + 7) / 8;
                 gtx = tiles * node->params[0] * 256;
                 ttx = 256;
