@@ -238,6 +238,87 @@ kernel void matmul_forward_bf16_tiled64(
 }
 #endif
 
+#if __HAVE_BFLOAT__
+kernel void matmul_forward_bf16_simd(
+    device const float* inp [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    (void)has_bias;
+    int tid = (int)tid3.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int wr = warp >> 1;
+    int wc = warp & 1;
+    int oc0 = (int)tgid.x * 64;
+    int bt0 = (int)tgid.y * 64;
+
+    threadgroup bfloat As[64][24];
+    threadgroup bfloat Bs[64][24];
+    threadgroup float stage[4][64];
+    simdgroup_float8x8 acc[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) acc[i][j] = simdgroup_float8x8(0.0f);
+
+    for (int kk = 0; kk < C; kk += 16) {
+        int kb = min(16, C - kk);
+        for (int idx = tid; idx < 64 * 16; idx += 128) {
+            int r = idx >> 4, k = idx & 15;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? (bfloat)inp[(size_t)br * C + kk + k] : (bfloat)0.0f;
+        }
+        for (int idx = tid; idx < 64 * 16; idx += 128) {
+            int n = idx >> 4, k = idx & 15;
+            int woc = oc0 + n;
+            Bs[n][k] = (woc < OC && k < kb) ? weight[(size_t)woc * C + kk + k] : (bfloat)0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int k0 = 0; k0 < kb; k0 += 8) {
+            simdgroup_bfloat8x8 a[4], b[4];
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+                simdgroup_load(a[i], &As[wr * 32 + i * 8][k0], 24);
+#pragma unroll
+            for (int j = 0; j < 4; j++)
+                simdgroup_load(b[j], &Bs[wc * 32 + j * 8][k0], 24, ulong2(0, 0), true);
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+#pragma unroll
+                for (int j = 0; j < 4; j++)
+                    simdgroup_multiply_accumulate(acc[i][j], a[i], b[j], acc[i][j]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int r = bt0 + wr * 32 + i * 8;
+            int c = oc0 + wc * 32 + j * 8;
+            if (r + 8 <= BT && c + 8 <= OC) {
+                simdgroup_store(acc[i][j], &out[(size_t)r * OC + c], OC);
+            } else {
+                simdgroup_store(acc[i][j], &stage[warp][0], 8);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                for (int e = lane; e < 64; e += 32) {
+                    int rr = e >> 3, cc = e & 7;
+                    if (r + rr < BT && c + cc < OC)
+                        out[(size_t)(r + rr) * OC + c + cc] = stage[warp][e];
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+    }
+}
+#endif
+
 // ----------------------------------------------------------------
 // matmul_forward_fp16
 // Same as naive but weights stored as fp16 (2x memory savings).
