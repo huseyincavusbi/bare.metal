@@ -167,6 +167,77 @@ kernel void matmul_forward_bf16_tiled(
 }
 #endif
 
+#define MM64_BM 64
+#define MM64_BN 64
+#define MM64_BK 16
+#define MM64_TG 256
+
+#if __HAVE_BFLOAT__
+kernel void matmul_forward_bf16_tiled64(
+    device const float* inp [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int* params [[buffer(4)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int BT = params[0], C = params[1], OC = params[2], has_bias = params[3];
+    int tid = (int)tid3.x;
+    int oc0 = (int)tgid.x * MM64_BN;
+    int bt0 = (int)tgid.y * MM64_BM;
+    int tcol = tid & 7;
+    int trow = tid >> 3;
+    int oc = oc0 + tcol * 8;
+    int r0 = bt0 + trow * 4;
+
+    threadgroup float As[MM64_BM][MM64_BK];
+    threadgroup float Bs[MM64_BN][MM64_BK + 1];
+    float acc[4][8];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 8; j++) acc[i][j] = 0.0f;
+
+    for (int kk = 0; kk < C; kk += MM64_BK) {
+        int kb = min(MM64_BK, C - kk);
+        for (int idx = tid; idx < MM64_BM * MM64_BK; idx += 128) {
+            int r = idx >> 4, k = idx & 15;
+            int br = bt0 + r;
+            As[r][k] = (br < BT && k < kb) ? inp[(size_t)br * C + kk + k] : 0.0f;
+        }
+        for (int idx = tid; idx < MM64_BN * MM64_BK; idx += 128) {
+            int n = idx >> 4, k = idx & 15;
+            int woc = oc0 + n;
+            Bs[n][k] = (woc < OC && k < kb) ? (float)weight[(size_t)woc * C + kk + k] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k = 0; k < kb; k++) {
+            float a[4], b[8];
+#pragma unroll
+            for (int i = 0; i < 4; i++) a[i] = As[trow * 4 + i][k];
+#pragma unroll
+            for (int j = 0; j < 8; j++) b[j] = Bs[tcol * 8 + j][k];
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+#pragma unroll
+                for (int j = 0; j < 8; j++) acc[i][j] += a[i] * b[j];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        int r = r0 + i;
+        if (r >= BT) continue;
+        for (int j = 0; j < 8; j++) {
+            int o = oc + j;
+            if (o < OC) {
+                float bv = has_bias ? bias[o] : 0.0f;
+                out[(size_t)r * OC + o] = acc[i][j] + bv;
+            }
+        }
+    }
+}
+#endif
+
 // ----------------------------------------------------------------
 // matmul_forward_fp16
 // Same as naive but weights stored as fp16 (2x memory savings).
