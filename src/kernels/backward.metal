@@ -6,6 +6,15 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// zero_buffer: clear a reusable gradient slot before a new owner writes it.
+kernel void zero_buffer(
+    device float* p [[buffer(0)]],
+    constant int& n [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < (uint)n) p[gid] = 0.0f;
+}
+
 // ----------------------------------------------------------------
 // matmul_backward_inp
 // Forward: out[bt,oc] = bias[oc] + sum_i inp[bt,i] * w[oc,i]
