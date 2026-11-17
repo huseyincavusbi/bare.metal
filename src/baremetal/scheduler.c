@@ -53,6 +53,12 @@ struct bmt_scheduler_s {
     backend_kernel_t* fp16_cls_vec_kernel; /* rmsnorm_matmul_forward_fp16_vec */
 
     backend_buffer_t** grad_buffers;       /* per-tensor fp32 grad (zeroed at create) */
+    int*               grad_slot;          /* pooled activation-grad slot, -1 = per-tensor */
+    int*               grad_birth;         /* backward node that first writes the grad */
+    backend_buffer_t** grad_pool;
+    backend_buffer_t*  grad_pool_n;
+    int                n_grad_pool;
+    backend_kernel_t*  k_zero;
     backend_kernel_t* k_mm_bwd_inp;        /* matmul_backward_inp */
     backend_kernel_t* k_mm_bwd_w;          /* matmul_backward_w   */
     backend_kernel_t* k_mm_bwd_inp_bf16;   /* matmul_backward_inp_bf16 */
@@ -211,6 +217,100 @@ static int* scheduler_plan_slots(bmt_graph_t* graph, size_t** slot_bytes_out, in
     return slots;
 }
 
+static int* scheduler_plan_grad_slots(bmt_graph_t* graph, size_t** slot_bytes_out,
+                                      int* n_slots_out, int** birth_out) {
+    int nt = graph->n_tensors;
+    int nn = graph->n_nodes;
+    int* producer = malloc((size_t)nt * sizeof(int));
+    int* last_use = malloc((size_t)nt * sizeof(int));
+    int* birth = malloc((size_t)nt * sizeof(int));
+    int* death = malloc((size_t)nt * sizeof(int));
+    int* slots = malloc((size_t)nt * sizeof(int));
+    size_t* sizes = malloc((size_t)nt * sizeof(size_t));
+    if (!producer || !last_use || !birth || !death || !slots || !sizes) {
+        free(producer); free(last_use); free(birth); free(death); free(slots); free(sizes);
+        return NULL;
+    }
+    for (int i = 0; i < nt; i++) {
+        producer[i] = -1;
+        last_use[i] = -1;
+        birth[i] = -1;
+        death[i] = -1;
+        slots[i] = -1;
+        sizes[i] = 0;
+    }
+    for (int i = 0; i < nt; i++) {
+        bmt_tensor_t* t = &graph->tensors[i];
+        if (t->type == BMT_TENSOR_TYPE_WEIGHT) continue;
+        size_t n = 1;
+        for (int d = 0; d < t->n_dims; d++) n *= (size_t)t->dims[d];
+        if (n == 0) n = 1024;
+        sizes[i] = n * sizeof(float);
+    }
+    for (int i = 0; i < nn; i++) {
+        bmt_node_t* node = &graph->nodes[i];
+        for (int j = 0; j < node->n_inputs; j++) {
+            int in = node->inputs[j];
+            if (in < 0 || in >= nt) continue;
+            if (last_use[in] < i) last_use[in] = i;
+        }
+        int out = node->output;
+        if (out >= 0 && out < nt) {
+            if (producer[out] < 0 || i < producer[out]) producer[out] = i;
+        }
+    }
+
+    /* Tensor 0's grad is read by embedding_backward after the walk; the
+     * logits grad is written by xent before the walk. Keep both per-tensor. */
+    for (int t = 0; t < nt; t++) {
+        if (t == 0) continue;
+        if (graph->tensors[t].type == BMT_TENSOR_TYPE_WEIGHT) continue;
+        if (last_use[t] < 0 || producer[t] < 0) continue;
+        if (t == nt - 1) continue;
+        birth[t] = last_use[t] > producer[t] ? last_use[t] : producer[t];
+        death[t] = producer[t];
+        if (death[t] > birth[t]) death[t] = birth[t];
+    }
+
+    size_t* cap = malloc((size_t)(nt > 0 ? nt : 1) * sizeof(size_t));
+    int* slot_death = malloc((size_t)(nt > 0 ? nt : 1) * sizeof(int));
+    int n_slots = 0;
+    if (!cap || !slot_death) {
+        free(producer); free(last_use); free(birth); free(death); free(slots); free(sizes);
+        free(cap); free(slot_death);
+        return NULL;
+    }
+    for (int i = nn - 1; i >= 0; i--) {
+        for (int k = 0; k < n_slots; k++)
+            if (slot_death[k] > i) slot_death[k] = -1;
+        for (int t = 0; t < nt; t++) {
+            if (birth[t] != i || slots[t] >= 0 || sizes[t] == 0) continue;
+            int best = -1;
+            for (int k = 0; k < n_slots; k++)
+                if (slot_death[k] < 0 && cap[k] == sizes[t]) { best = k; break; }
+            if (best < 0) {
+                best = n_slots++;
+                cap[best] = sizes[t];
+                slot_death[best] = -1;
+            }
+            slots[t] = best;
+            slot_death[best] = death[t];
+        }
+    }
+    size_t* out = malloc((size_t)(n_slots > 0 ? n_slots : 1) * sizeof(size_t));
+    if (!out) {
+        free(producer); free(last_use); free(birth); free(death); free(slots); free(sizes);
+        free(cap); free(slot_death);
+        return NULL;
+    }
+    for (int k = 0; k < n_slots; k++) out[k] = cap[k];
+    *slot_bytes_out = out;
+    *n_slots_out = n_slots;
+    *birth_out = birth;
+    free(producer); free(last_use); free(death); free(sizes); free(cap); free(slot_death);
+    return slots;
+}
+
 static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t* reg, bmt_graph_t* graph, int max_seq_len, int kv_dim, int n_layers, bm_precision_t precision, int need_grads, bmt_scheduler_t* weight_src) {
     bmt_scheduler_t* sched = calloc(1, sizeof(bmt_scheduler_t));
     sched->backend = backend;
@@ -339,16 +439,39 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
      * Skipped for inference schedulers (need_grads == 0). */
     sched->grad_buffers = calloc(graph->n_tensors, sizeof(backend_buffer_t*));
     if (need_grads) {
-    for (int i = 0; i < graph->n_tensors; i++) {
-        bmt_tensor_t* t = &graph->tensors[i];
-        if (t->type == BMT_TENSOR_TYPE_WEIGHT && !t->trainable) continue;
-        size_t n_elems = 1;
-        for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
-        if (n_elems == 0) n_elems = 1024;
-        sched->grad_buffers[i] = backend_buffer_alloc(backend, n_elems * sizeof(float));
-        memset(backend_buffer_map(sched->grad_buffers[i]), 0, n_elems * sizeof(float));
-        backend_buffer_unmap(sched->grad_buffers[i]);
-    }
+        size_t* gslot_bytes = NULL;
+        int n_grad_slots = 0;
+        int* grad_birth = NULL;
+        sched->grad_slot = scheduler_plan_grad_slots(graph, &gslot_bytes, &n_grad_slots, &grad_birth);
+        sched->grad_birth = grad_birth;
+        if (sched->grad_slot && n_grad_slots > 0) {
+            sched->grad_pool = calloc((size_t)n_grad_slots, sizeof(backend_buffer_t*));
+            sched->grad_pool_n = backend_buffer_alloc(backend, (size_t)n_grad_slots * sizeof(int));
+            sched->n_grad_pool = n_grad_slots;
+            int* pn = backend_buffer_map(sched->grad_pool_n);
+            for (int k = 0; k < n_grad_slots; k++) {
+                sched->grad_pool[k] = backend_buffer_alloc(backend, gslot_bytes[k]);
+                memset(backend_buffer_map(sched->grad_pool[k]), 0, gslot_bytes[k]);
+                backend_buffer_unmap(sched->grad_pool[k]);
+                pn[k] = (int)(gslot_bytes[k] / sizeof(float));
+            }
+            backend_buffer_unmap(sched->grad_pool_n);
+        }
+        free(gslot_bytes);
+        for (int i = 0; i < graph->n_tensors; i++) {
+            bmt_tensor_t* t = &graph->tensors[i];
+            if (t->type == BMT_TENSOR_TYPE_WEIGHT && !t->trainable) continue;
+            if (sched->grad_slot && sched->grad_slot[i] >= 0) {
+                sched->grad_buffers[i] = sched->grad_pool[sched->grad_slot[i]];
+                continue;
+            }
+            size_t n_elems = 1;
+            for (int d = 0; d < t->n_dims; d++) n_elems *= t->dims[d];
+            if (n_elems == 0) n_elems = 1024;
+            sched->grad_buffers[i] = backend_buffer_alloc(backend, n_elems * sizeof(float));
+            memset(backend_buffer_map(sched->grad_buffers[i]), 0, n_elems * sizeof(float));
+            backend_buffer_unmap(sched->grad_buffers[i]);
+        }
     }
 
     sched->param_bufs = malloc(graph->n_nodes * sizeof(backend_buffer_t*));
@@ -426,6 +549,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_gelu_bwd = backend_kernel_create(backend, "gelu_backward");
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
     sched->k_xent = backend_kernel_create(backend, "xent_backward");
+    sched->k_zero = backend_kernel_create(backend, "zero_buffer");
     sched->k_xent_masked = backend_kernel_create(backend, "xent_backward_masked");
     sched->k_add_bwd = backend_kernel_create(backend, "add_backward");
     sched->k_add_scale_bwd = backend_kernel_create(backend, "add_scale_backward");
@@ -443,8 +567,14 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (!sched) return;
     for (int i = 0; i < sched->graph->n_tensors; i++) {
         if (sched->buffers[i] && !sched->shared[i]) backend_buffer_free(sched->buffers[i]);
-        if (sched->grad_buffers[i]) backend_buffer_free(sched->grad_buffers[i]);
+        if (sched->grad_buffers[i] && (!sched->grad_slot || sched->grad_slot[i] < 0))
+            backend_buffer_free(sched->grad_buffers[i]);
     }
+    for (int k = 0; k < sched->n_grad_pool; k++) backend_buffer_free(sched->grad_pool[k]);
+    backend_buffer_free(sched->grad_pool_n);
+    free(sched->grad_pool);
+    free(sched->grad_slot);
+    free(sched->grad_birth);
     for (int k = 0; k < sched->n_pool; k++) backend_buffer_free(sched->pool[k]);
     free(sched->pool);
     free(sched->buffers);
@@ -511,6 +641,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_gelu_bwd) backend_kernel_destroy(sched->k_gelu_bwd);
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
     if (sched->k_xent) backend_kernel_destroy(sched->k_xent);
+    if (sched->k_zero) backend_kernel_destroy(sched->k_zero);
     if (sched->k_xent_masked) backend_kernel_destroy(sched->k_xent_masked);
     if (sched->k_add_bwd) backend_kernel_destroy(sched->k_add_bwd);
     if (sched->k_resnorm_bwd) backend_kernel_destroy(sched->k_resnorm_bwd);
@@ -1237,6 +1368,19 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
     for (int i = sched->graph->n_nodes - 1; i >= 0; i--) {
         bmt_node_t* node = &sched->graph->nodes[i];
         if (node->op_type == BMK_OP_COUNT) continue;
+
+        if (sched->k_zero && sched->grad_slot) {
+            for (int t = 0; t < sched->graph->n_tensors; t++) {
+                if (sched->grad_slot[t] < 0 || sched->grad_birth[t] != i) continue;
+                int slot = sched->grad_slot[t];
+                int n = (int)(backend_buffer_size(sched->grad_pool[slot]) / sizeof(float));
+                if (n <= 0) continue;
+                size_t offs[2] = { 0, (size_t)slot * sizeof(int) };
+                backend_buffer_t* zb[] = { sched->grad_pool[slot], sched->grad_pool_n };
+                int ttx = n < 256 ? n : 256;
+                backend_encode_dispatch(enc, sched->k_zero, zb, offs, 2, n, 1, 1, ttx, 1, 1);
+            }
+        }
 
         /* ADD backward on GPU: grad_x += grad_out, grad_y += grad_out (atomic).
          * No host sync — keeps the GPU pipeline full. */
