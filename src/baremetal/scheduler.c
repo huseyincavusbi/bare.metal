@@ -66,6 +66,7 @@ struct bmt_scheduler_s {
 
     backend_kernel_t* k_attn_fwd_seq;
     backend_kernel_t* k_attn_fwd_masked;
+    backend_kernel_t* k_attn_fwd_train_tiled;
     backend_kernel_t* k_attn_decode;
     backend_kernel_t* k_attn_prefill;
     backend_kernel_t* k_attn_prefill_warp;
@@ -78,6 +79,7 @@ struct bmt_scheduler_s {
     backend_kernel_t* k_rope_fwd_seq;
     backend_kernel_t* k_attn_bwd;
     backend_kernel_t* k_attn_bwd_masked;
+    backend_kernel_t* k_attn_bwd_tiled;
     backend_kernel_t* k_rope_bwd_seq;
     backend_kernel_t* k_gelu_bwd;
     backend_kernel_t* k_swiglu_bwd;
@@ -407,6 +409,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
 
     sched->k_attn_fwd_seq = backend_kernel_create(backend, "attention_forward_seq");
     sched->k_attn_fwd_masked = backend_kernel_create(backend, "attention_forward_seq_masked");
+    sched->k_attn_fwd_train_tiled = backend_kernel_create(backend, "attention_forward_train_tiled");
     sched->k_attn_decode = backend_kernel_create(backend, "attention_forward");
     sched->k_attn_prefill = backend_kernel_create(backend, "attention_forward_prefill");
     sched->k_attn_prefill_warp = backend_kernel_create(backend, "attention_forward_prefill_warp");
@@ -418,6 +421,7 @@ static bmt_scheduler_t* scheduler_create(backend_ctx_t* backend, bmk_registry_t*
     sched->k_rope_fwd_seq = backend_kernel_create(backend, "rope_forward_seq");
     sched->k_attn_bwd = backend_kernel_create(backend, "attention_backward");
     sched->k_attn_bwd_masked = backend_kernel_create(backend, "attention_backward_masked");
+    sched->k_attn_bwd_tiled = backend_kernel_create(backend, "attention_backward_tiled");
     sched->k_rope_bwd_seq = backend_kernel_create(backend, "rope_backward_seq");
     sched->k_gelu_bwd = backend_kernel_create(backend, "gelu_backward");
     sched->k_swiglu_bwd = backend_kernel_create(backend, "swiglu_backward");
@@ -489,6 +493,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rms_bwd_w)  backend_kernel_destroy(sched->k_rms_bwd_w);
     if (sched->k_attn_fwd_seq) backend_kernel_destroy(sched->k_attn_fwd_seq);
     if (sched->k_attn_fwd_masked) backend_kernel_destroy(sched->k_attn_fwd_masked);
+    if (sched->k_attn_fwd_train_tiled) backend_kernel_destroy(sched->k_attn_fwd_train_tiled);
     if (sched->k_attn_decode) backend_kernel_destroy(sched->k_attn_decode);
     if (sched->k_attn_prefill) backend_kernel_destroy(sched->k_attn_prefill);
     if (sched->k_attn_prefill_warp) backend_kernel_destroy(sched->k_attn_prefill_warp);
@@ -501,6 +506,7 @@ void bmt_scheduler_destroy(bmt_scheduler_t* sched) {
     if (sched->k_rope_fwd_seq) backend_kernel_destroy(sched->k_rope_fwd_seq);
     if (sched->k_attn_bwd) backend_kernel_destroy(sched->k_attn_bwd);
     if (sched->k_attn_bwd_masked) backend_kernel_destroy(sched->k_attn_bwd_masked);
+    if (sched->k_attn_bwd_tiled) backend_kernel_destroy(sched->k_attn_bwd_tiled);
     if (sched->k_rope_bwd_seq) backend_kernel_destroy(sched->k_rope_bwd_seq);
     if (sched->k_gelu_bwd) backend_kernel_destroy(sched->k_gelu_bwd);
     if (sched->k_swiglu_bwd) backend_kernel_destroy(sched->k_swiglu_bwd);
@@ -805,7 +811,8 @@ void bmt_scheduler_run(bmt_scheduler_t* sched, int pos, int seq_len) {
                 break;
         }
         
-        if (node->op_type == BMK_OP_ATTENTION && sched->attn_mask_active)
+        if (node->op_type == BMK_OP_ATTENTION &&
+            (sched->attn_mask_active || kn == sched->k_attn_fwd_train_tiled))
             bufs[n_bufs++] = sched->b_attn_mask;
 
         int gtx = 1, gty = 1, gtz = 1;
@@ -940,15 +947,22 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
 
         backend_kernel_t* kn = NULL;
         if (node->op_type == BMK_OP_ATTENTION) {
-            if (sched->attn_mask_active && sched->k_attn_fwd_masked)
+            if (sched->prefill_mode) {
+                if (sched->attn_mask_active && sched->k_attn_fwd_masked)
+                    kn = sched->k_attn_fwd_masked;
+                else if (sched->k_attn_prefill_tiled && node->params[1] <= 64)
+                    kn = sched->k_attn_prefill_tiled;
+                else if (sched->k_attn_prefill_warp && node->params[1] <= 128)
+                    kn = sched->k_attn_prefill_warp;
+                else
+                    kn = sched->k_attn_prefill ? sched->k_attn_prefill : sched->k_attn_fwd_seq;
+            } else if (S > 256 && sched->k_attn_fwd_train_tiled && node->params[1] <= 64) {
+                kn = sched->k_attn_fwd_train_tiled;
+            } else if (sched->attn_mask_active && sched->k_attn_fwd_masked) {
                 kn = sched->k_attn_fwd_masked;
-            else if (sched->prefill_mode && sched->k_attn_prefill_tiled && node->params[1] <= 64)
-                kn = sched->k_attn_prefill_tiled;
-            else if (sched->prefill_mode && sched->k_attn_prefill_warp && node->params[1] <= 128)
-                kn = sched->k_attn_prefill_warp;
-            else
-                kn = (sched->prefill_mode && sched->k_attn_prefill)
-                     ? sched->k_attn_prefill : sched->k_attn_fwd_seq;
+            } else {
+                kn = sched->k_attn_fwd_seq;
+            }
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             kn = sched->k_rope_fwd_seq;
         } else if (node->op_type == BMK_OP_MATMUL && node->n_inputs >= 2
@@ -1013,6 +1027,7 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             p[2] = node->params[1]; // HD
             p[3] = node->params[2]; // NKV
             p[4] = node->params[0] / node->params[2]; // kv_mul
+            p[5] = sched->attn_mask_active;
         } else if (node->op_type == BMK_OP_POS_ENC_ROPE) {
             p[0] = node->params[0]; // head_size
             p[1] = node->params[1]; // n_kv_heads
@@ -1108,7 +1123,8 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
                 break;
         }
         
-        if (node->op_type == BMK_OP_ATTENTION && sched->attn_mask_active)
+        if (node->op_type == BMK_OP_ATTENTION &&
+            (sched->attn_mask_active || kn == sched->k_attn_fwd_train_tiled))
             bufs[n_bufs++] = sched->b_attn_mask;
 
         int gtx = 1, gty = 1, gtz = 1;
@@ -1159,7 +1175,11 @@ void bmt_scheduler_forward_train(bmt_scheduler_t* sched, int S) {
             gtx = S * node->params[2]; // S * NH
             ttx = 32;
         } else if (node->op_type == BMK_OP_ATTENTION) {
-            if (kn == sched->k_attn_prefill_tiled) {
+            if (kn == sched->k_attn_fwd_train_tiled) {
+                int blocks = (S + 31) / 32;
+                gtx = blocks * node->params[0] * 256;
+                ttx = 256;
+            } else if (kn == sched->k_attn_prefill_tiled) {
                 int blocks = (S + 31) / 32;
                 gtx = blocks * node->params[0] * 256;
                 ttx = 256;
@@ -1418,6 +1438,7 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
             p[2] = node->params[1]; // HD
             p[3] = node->params[2]; // NKV
             p[4] = node->params[0] / node->params[2]; // kv_mul
+            p[5] = sched->attn_mask_active;
             backend_buffer_unmap(sched->param_bufs[i]);
             
             float* ef = backend_buffer_map(sched->eps_bufs[i]);
@@ -1431,11 +1452,18 @@ void bmt_scheduler_backward(bmt_scheduler_t* sched) {
                 sched->grad_buffers[node->inputs[0]], sched->grad_buffers[node->inputs[1]], sched->grad_buffers[node->inputs[2]],
                 sched->param_bufs[i], sched->eps_bufs[i], sched->b_attn_mask
             };
-            backend_kernel_t* attn_bwd = (sched->attn_mask_active && sched->k_attn_bwd_masked)
-                                       ? sched->k_attn_bwd_masked : sched->k_attn_bwd;
-            int nb = attn_bwd == sched->k_attn_bwd_masked ? 10 : 9;
-            int gtx = S * node->params[0]; // S * NH
-            backend_encode_dispatch(enc, attn_bwd, b1, NULL, nb, gtx,1,1, 32,1,1);
+            int tiled = S > 256 && sched->k_attn_bwd_tiled && node->params[1] <= 64;
+            backend_kernel_t* attn_bwd;
+            if (tiled)
+                attn_bwd = sched->k_attn_bwd_tiled;
+            else
+                attn_bwd = (sched->attn_mask_active && sched->k_attn_bwd_masked)
+                         ? sched->k_attn_bwd_masked : sched->k_attn_bwd;
+            int nb = tiled ? 10 : (attn_bwd == sched->k_attn_bwd_masked ? 10 : 9);
+            int gtx = tiled ? ((S + 31) / 32) * node->params[0] * 256
+                            : S * node->params[0];
+            int ttx = tiled ? 256 : 32;
+            backend_encode_dispatch(enc, attn_bwd, b1, NULL, nb, gtx,1,1, ttx,1,1);
             continue;
         }
     }
