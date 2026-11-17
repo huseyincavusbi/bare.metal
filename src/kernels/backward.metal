@@ -801,6 +801,165 @@ kernel void attention_backward_masked(
     }
 }
 
+// attention_backward_tiled
+// Tiled training backward. One threadgroup per 32-query block and head.
+// Pass 1 computes the online softmax statistics and sum(p * grad_p);
+// pass 2 recomputes p and accumulates gQ plus atomic gK/gV. No O(S)
+// per-thread score arrays, so S is not capped at 256.
+// buffers: [0]=gout [1]=Q [2]=K [3]=V [4]=gQ [5]=gK [6]=gV
+//          [7]=params{NH,S,HD,NKV,kv_mul,masked} [8]=scale [9]=mask
+kernel void attention_backward_tiled(
+    device const float* gout  [[buffer(0)]],
+    device const float* Q     [[buffer(1)]],
+    device const float* K     [[buffer(2)]],
+    device const float* V     [[buffer(3)]],
+    device float* gQ          [[buffer(4)]],
+    device atomic_float* gK   [[buffer(5)]],
+    device atomic_float* gV   [[buffer(6)]],
+    constant int* p           [[buffer(7)]],
+    constant float& scale     [[buffer(8)]],
+    device const uchar* mask  [[buffer(9)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]])
+{
+    int NH = p[0], S = p[1], HD = p[2], NKV = p[3], kv_mul = p[4], masked = p[5];
+    if (HD > 64) return;
+
+    int tid = (int)tid3.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int blocks = (S + 31) / 32;
+    int h = (int)tgid.x / blocks;
+    int blk = (int)tgid.x - h * blocks;
+    int i0 = blk * 32;
+    if (h >= NH || i0 >= S) return;
+
+    int kh = h / kv_mul;
+    int q0 = i0 + warp * 4;
+
+    float qreg[4][2], goutreg[4][2], gqacc[4][2];
+    float m[4], l[4], gpa[4], gpd[4];
+    for (int q = 0; q < 4; q++) {
+        int i = q0 + q;
+        int valid = i < S && (!masked || mask[i]);
+        for (int k = 0; k < 2; k++) {
+            int d = lane + 32 * k;
+            int ok = valid && d < HD;
+            qreg[q][k] = ok ? Q[(size_t)(i * NH + h) * HD + d] : 0.0f;
+            goutreg[q][k] = ok ? gout[(size_t)(i * NH + h) * HD + d] : 0.0f;
+            gqacc[q][k] = 0.0f;
+        }
+        m[q] = -INFINITY;
+        l[q] = 0.0f;
+        gpa[q] = 0.0f;
+        gpd[q] = 0.0f;
+    }
+
+    threadgroup float Ks[32][64];
+    threadgroup float Vs[32][64];
+    int imax = min(i0 + 32, S);
+
+    for (int jb = 0; jb < imax; jb += 32) {
+        int jn = min(32, imax - jb);
+        for (int idx = tid; idx < 32 * 64; idx += 256) {
+            int jj = idx >> 6, d = idx & 63;
+            float kv = 0.0f, vv = 0.0f;
+            if (jj < jn && d < HD) {
+                size_t off = (size_t)(jb + jj) * NKV * HD + (size_t)kh * HD + d;
+                kv = K[off];
+                vv = V[off];
+            }
+            Ks[jj][d] = kv;
+            Vs[jj][d] = vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int q = 0; q < 4; q++) {
+            int i = q0 + q;
+            if (i >= S || (masked && !mask[i])) continue;
+            for (int jj = 0; jj < jn; jj++) {
+                int j = jb + jj;
+                if (j > i) break;
+                if (masked && !mask[j]) continue;
+                float part = 0.0f, gpart = 0.0f;
+                for (int k = 0; k < 2; k++) {
+                    part += qreg[q][k] * Ks[jj][lane + 32 * k];
+                    gpart += goutreg[q][k] * Vs[jj][lane + 32 * k];
+                }
+                float s = simd_sum(part) * scale;
+                float gp = simd_sum(gpart);
+                float mn = max(m[q], s);
+                float a = exp(m[q] - mn);
+                float b = exp(s - mn);
+                l[q] = l[q] * a + b;
+                gpa[q] = gpa[q] * a + b * gp;
+                m[q] = mn;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (int q = 0; q < 4; q++)
+        if (l[q] > 0.0f) gpd[q] = gpa[q] / l[q];
+
+    for (int jb = 0; jb < imax; jb += 32) {
+        int jn = min(32, imax - jb);
+        for (int idx = tid; idx < 32 * 64; idx += 256) {
+            int jj = idx >> 6, d = idx & 63;
+            float kv = 0.0f, vv = 0.0f;
+            if (jj < jn && d < HD) {
+                size_t off = (size_t)(jb + jj) * NKV * HD + (size_t)kh * HD + d;
+                kv = K[off];
+                vv = V[off];
+            }
+            Ks[jj][d] = kv;
+            Vs[jj][d] = vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int q = 0; q < 4; q++) {
+            int i = q0 + q;
+            if (i >= S || (masked && !mask[i]) || l[q] <= 0.0f) continue;
+            for (int jj = 0; jj < jn; jj++) {
+                int j = jb + jj;
+                if (j > i) break;
+                if (masked && !mask[j]) continue;
+                float part = 0.0f, gpart = 0.0f;
+                for (int k = 0; k < 2; k++) {
+                    part += qreg[q][k] * Ks[jj][lane + 32 * k];
+                    gpart += goutreg[q][k] * Vs[jj][lane + 32 * k];
+                }
+                float s = simd_sum(part) * scale;
+                float gp = simd_sum(gpart);
+                float pj = exp(s - m[q]) / l[q];
+                float gs = pj * (gp - gpd[q]);
+                for (int k = 0; k < 2; k++) {
+                    int d = lane + 32 * k;
+                    if (d < HD) {
+                        gqacc[q][k] += gs * Ks[jj][d];
+                        atomic_fetch_add_explicit(gK + (size_t)j * NKV * HD + (size_t)kh * HD + d,
+                                                  scale * gs * qreg[q][k], memory_order_relaxed);
+                        atomic_fetch_add_explicit(gV + (size_t)j * NKV * HD + (size_t)kh * HD + d,
+                                                  pj * goutreg[q][k], memory_order_relaxed);
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (int q = 0; q < 4; q++) {
+        int i = q0 + q;
+        if (i >= S) continue;
+        int valid = (!masked || mask[i]) && l[q] > 0.0f;
+        for (int k = 0; k < 2; k++) {
+            int d = lane + 32 * k;
+            if (d < HD)
+                gQ[(size_t)(i * NH + h) * HD + d] = valid ? gqacc[q][k] * scale : 0.0f;
+        }
+    }
+}
+
 // ----------------------------------------------------------------
 // rope_backward_seq (training backward RoPE, full sequence, [S,NH,HD] layout)
 // Backward = transposed rotation R^T by pos=s. Independent of forward input values.
