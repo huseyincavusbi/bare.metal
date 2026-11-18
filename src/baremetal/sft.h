@@ -29,6 +29,9 @@ int  bmt_sft_detect_template(const char* model_dir);
 int  bmt_sft_load_jsonl(const char* path, bmt_sft_template_t tmpl, int max_examples,
                         bmt_sft_dataset_t* out, int* n_skipped);
 void bmt_sft_free_dataset(bmt_sft_dataset_t* d);
+int  bmt_sft_split_indices(int n, int val_split, int val_limit,
+                           int* train_idx, int* n_train,
+                           int* val_idx, int* n_val, int* n_holdout);
 
 int  bmt_sft_build_example(bm_tokenizer_t* tok, const bmt_sft_pair_t* pair, int S,
                            int* inputs, int* targets, uint8_t* attn, uint8_t* loss);
