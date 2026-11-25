@@ -34,15 +34,14 @@ static void zero(backend_buffer_t* buf, size_t bytes) {
     backend_buffer_unmap(buf);
 }
 
-static int test_xent(backend_ctx_t* be) {
+static int test_xent(backend_ctx_t* be, const uint8_t* mask) {
     const int N = 4, V = 8;
     const int targets[4] = {1, 3, 5, 0};
-    const uint8_t mask[4] = {1, 0, 1, 0};
     float logits[32];
     for (int i = 0; i < N * V; i++) logits[i] = sinf(0.13f * (float)(i + 1));
 
     int count = 0;
-    for (int i = 0; i < N; i++) count += mask[i] ? 1 : 0;
+    for (int i = 0; i < N; i++) count += (int)mask[i];
 
     float exp_loss = 0.0f;
     float exp_grad[32];
@@ -54,10 +53,10 @@ static int test_xent(backend_ctx_t* be) {
         for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
         float sum = 0.0f;
         for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
-        exp_loss += -(lr[targets[n]] - mx - logf(sum));
+        exp_loss += (float)mask[n] * -(lr[targets[n]] - mx - logf(sum));
         for (int j = 0; j < V; j++) {
             float p = expf(lr[j] - mx) / sum;
-            exp_grad[n * V + j] = (p - (j == targets[n] ? 1.0f : 0.0f)) / (float)count;
+            exp_grad[n * V + j] = (p - (j == targets[n] ? 1.0f : 0.0f)) * (float)mask[n] / (float)count;
         }
     }
     exp_loss /= (float)count;
@@ -97,7 +96,7 @@ static int test_xent(backend_ctx_t* be) {
         for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
         float sum = 0.0f;
         for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
-        loss += -(lr[targets[n]] - mx - logf(sum));
+        loss += (float)mask[n] * -(lr[targets[n]] - mx - logf(sum));
     }
     loss /= (float)count;
     printf("xent masked loss: %.6f (want %.6f), maxdiff %.3g\n", loss, exp_loss, maxdiff);
@@ -317,32 +316,36 @@ static int test_trainer_masks(void) {
 int main(void) {
     backend_ctx_t* be = backend_create();
     if (!be) { fprintf(stderr, "no backend\n"); return 1; }
-    test_xent(be);
+    const uint8_t masks[2][4] = {{1, 0, 1, 0}, {1, 0, 4, 0}};
+    for (int mi = 0; mi < 2; mi++) test_xent(be, masks[mi]);
     {
         const int N = 4, V = 8;
         const int targets[4] = {1, 3, 5, 0};
-        const uint8_t mask[4] = {1, 0, 1, 0};
         float logits[32];
         for (int i = 0; i < N * V; i++) logits[i] = sinf(0.13f * (float)(i + 1));
-        int count = 0;
-        for (int i = 0; i < N; i++) count += mask[i] ? 1 : 0;
-        float exp_loss = 0.0f, exp_grad[32];
-        memset(exp_grad, 0, sizeof(exp_grad));
-        for (int n = 0; n < N; n++) {
-            if (!mask[n]) continue;
-            const float* lr = logits + n * V;
-            float mx = lr[0];
-            for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
-            float sum = 0.0f;
-            for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
-            exp_loss += -(lr[targets[n]] - mx - logf(sum));
-            for (int j = 0; j < V; j++) {
-                float p = expf(lr[j] - mx) / sum;
-                exp_grad[n * V + j] = (p - (j == targets[n] ? 1.0f : 0.0f)) / (float)count;
+        for (int mi = 0; mi < 2; mi++) {
+            const uint8_t* mask = masks[mi];
+            int count = 0;
+            for (int i = 0; i < N; i++) count += (int)mask[i];
+            float exp_loss = 0.0f, exp_grad[32];
+            memset(exp_grad, 0, sizeof(exp_grad));
+            for (int n = 0; n < N; n++) {
+                if (!mask[n]) continue;
+                const float* lr = logits + n * V;
+                float mx = lr[0];
+                for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
+                float sum = 0.0f;
+                for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
+                exp_loss += (float)mask[n] * -(lr[targets[n]] - mx - logf(sum));
+                for (int j = 0; j < V; j++) {
+                    float p = expf(lr[j] - mx) / sum;
+                    exp_grad[n * V + j] = (p - (j == targets[n] ? 1.0f : 0.0f)) *
+                                          (float)mask[n] / (float)count;
+                }
             }
+            exp_loss /= (float)count;
+            test_xent_scheduler(be, logits, targets, mask, N, V, exp_loss, exp_grad);
         }
-        exp_loss /= (float)count;
-        test_xent_scheduler(be, logits, targets, mask, N, V, exp_loss, exp_grad);
     }
     test_attention(be);
     backend_destroy(be);
