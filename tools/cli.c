@@ -427,6 +427,7 @@ static int cmd_train_sft(int argc, char** argv) {
         fprintf(stderr, "  --batch-size <int>  Sequences per step (default: 1)\n");
         fprintf(stderr, "  --grad-accum <int>  Micro-steps per optimizer step (default: 1)\n");
         fprintf(stderr, "  --lr <float>        Learning rate (default: 1e-4)\n");
+        fprintf(stderr, "  --stop-loss-weight <f>  Weight the template stop token (default: 1)\n");
         fprintf(stderr, "  --template <name>   chatml|llama3|auto (default: auto)\n");
         fprintf(stderr, "  --val-split <int>   Hold out every Nth example (0 = off)\n");
         fprintf(stderr, "  --val-limit <int>   Evaluate at most N held-out examples (0 = all)\n");
@@ -448,7 +449,7 @@ static int cmd_train_sft(int argc, char** argv) {
 
     int max_steps = 100, seq_len = 128, batch_size = 1, grad_accum = 1;
     int save_every = 0, max_examples = 0, val_every = 0, val_limit = 0, seed = 1;
-    float lr = 1e-4f;
+    float lr = 1e-4f, stop_loss_weight = 1.0f;
     const char* prec_str = NULL;
     const char* resume_path = NULL;
     const char* save_adapter = NULL;
@@ -462,6 +463,7 @@ static int cmd_train_sft(int argc, char** argv) {
         else if (strcmp(argv[i], "--batch-size") == 0 && i+1 < argc) batch_size = atoi(argv[++i]);
         else if (strcmp(argv[i], "--grad-accum") == 0 && i+1 < argc) grad_accum = atoi(argv[++i]);
         else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--stop-loss-weight") == 0 && i+1 < argc) stop_loss_weight = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--template") == 0 && i+1 < argc) template_name = argv[++i];
         else if (strcmp(argv[i], "--val-split") == 0 && i+1 < argc) val_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--val-limit") == 0 && i+1 < argc) val_limit = atoi(argv[++i]);
@@ -551,6 +553,15 @@ static int cmd_train_sft(int argc, char** argv) {
     cfg.lora_alpha = lora_alpha;
     cfg.lora_targets = lora_targets;
     cfg.lora_seed = lora_seed;
+    if (stop_loss_weight > 1.0f) {
+        const char* stop = tmpl == BMT_SFT_LLAMA3 ? "<|eot_id|>" : "<|im_end|>";
+        int stop_id = bm_tokenizer_token_id(&tok, stop);
+        if (stop_id >= 0) {
+            cfg.stop_token_id = stop_id;
+            cfg.stop_token_weight = stop_loss_weight;
+        }
+        fprintf(stderr, "[sft] stop_token=%d weight=%.2f\n", stop_id, stop_loss_weight);
+    }
 
     bm_trainer_t* trainer = bm_create_trainer(ctx, model, &cfg);
     if (!trainer) {
