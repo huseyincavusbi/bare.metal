@@ -106,6 +106,7 @@ typedef struct {
     int   lora_seed;
     int   stop_token_id;
     float stop_token_weight;
+    int   stop_token_warmup;
 } bm_train_config_t;
 
 /* ---- Opaque types ---- */
