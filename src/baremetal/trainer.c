@@ -454,6 +454,12 @@ float bm_train_step_masked(bm_trainer_t* t, const int* inputs, const int* target
 
     int accum = t->cfg.grad_accum_steps > 0 ? t->cfg.grad_accum_steps : 1;
 
+    uint8_t* stop_mask = NULL;
+    if (loss_mask && t->cfg.stop_token_weight > 1.0f && t->cfg.stop_token_id >= 0) {
+        stop_mask = malloc((size_t)S);
+        if (!stop_mask) return -1.0f;
+    }
+
     /* Gradients accumulate across B sequences and across micro-steps; zero only
      * at the start of an optimizer window. */
     bmt_graph_t* g = (bmt_graph_t*)t->model->graph;
@@ -490,9 +496,20 @@ float bm_train_step_masked(bm_trainer_t* t, const int* inputs, const int* target
 
         /* 2. loss seed (xent_backward fills grad_logits) */
         float loss;
-        if (loss_mask) {
+        const uint8_t* lmask = loss_mask ? loss_mask + b * S : NULL;
+        if (stop_mask && lmask) {
+            memcpy(stop_mask, lmask, (size_t)S);
+            int weight = (int)lroundf(t->cfg.stop_token_weight);
+            if (weight < 1) weight = 1;
+            if (weight > 255) weight = 255;
+            for (int s = 0; s < S; s++)
+                if (stop_mask[s] && seq_targets[s] == t->cfg.stop_token_id)
+                    stop_mask[s] = (uint8_t)weight;
+            lmask = stop_mask;
+        }
+        if (lmask) {
             loss = bmt_scheduler_xent_backward_masked(t->sched, t->t_logits_id, seq_targets,
-                                                      loss_mask + b * S, S, t->model->arch.vocab_size);
+                                                      lmask, S, t->model->arch.vocab_size);
         } else {
             loss = bmt_scheduler_xent_backward(t->sched, t->t_logits_id, seq_targets, S, t->model->arch.vocab_size);
         }
@@ -525,6 +542,7 @@ float bm_train_step_masked(bm_trainer_t* t, const int* inputs, const int* target
         t->accum_count = 0;
     }
 
+    free(stop_mask);
     return total_loss / (float)B;
 }
 
