@@ -1659,7 +1659,7 @@ float bmt_scheduler_xent_backward_masked(bmt_scheduler_t* sched, int logits_id, 
         return -1.0f;
 
     int count = 0;
-    for (int s = 0; s < S; s++) count += mask[s] ? 1 : 0;
+    for (int s = 0; s < S; s++) count += (int)mask[s];
 
     float* logits = backend_buffer_map(sched->buffers[logits_id]);
     float loss = 0.0f;
@@ -1671,7 +1671,7 @@ float bmt_scheduler_xent_backward_masked(bmt_scheduler_t* sched, int logits_id, 
             for (int j = 1; j < V; j++) if (lr[j] > mx) mx = lr[j];
             float sum = 0.0f;
             for (int j = 0; j < V; j++) sum += expf(lr[j] - mx);
-            loss += -(lr[targets[s]] - mx - logf(sum));
+            loss += (float)mask[s] * -(lr[targets[s]] - mx - logf(sum));
         }
         loss /= (float)count;
     }
