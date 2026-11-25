@@ -550,6 +550,12 @@ float bm_train_step(bm_trainer_t* t, const int* inputs, const int* targets, int 
     return bm_train_step_masked(t, inputs, targets, NULL, NULL, B, T);
 }
 
+void bm_trainer_set_stop_token(bm_trainer_t* t, int token_id, float weight) {
+    if (!t) return;
+    t->cfg.stop_token_id = token_id;
+    t->cfg.stop_token_weight = weight;
+}
+
 void bm_train_flush(bm_trainer_t* t) {
     if (!t) return;
     if (t->accum_count > 0) {
