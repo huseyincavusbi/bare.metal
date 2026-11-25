@@ -124,6 +124,7 @@ bm_precision_t bm_get_supported_precision(bm_context_t* ctx);
 /* ---- Model ---- */
 
 bm_model_t*    bm_create_model(bm_context_t* ctx, const bm_arch_t* arch);
+bm_model_t*    bm_load_model(bm_context_t* ctx, const char* path);
 void           bm_load_weights(bm_model_t* model, const char* path);
 void           bm_save_weights(bm_model_t* model, const char* path);
 void           bm_destroy_model(bm_model_t* model);
