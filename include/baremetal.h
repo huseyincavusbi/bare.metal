@@ -179,6 +179,7 @@ void            bm_destroy_tokenizer(bm_tokenizer_t* tok);
 
 bm_trainer_t*  bm_create_trainer(bm_context_t* ctx, bm_model_t* model,
                                  const bm_train_config_t* cfg);
+void           bm_trainer_set_stop_token(bm_trainer_t* trainer, int token_id, float weight);
 float          bm_train_step(bm_trainer_t* trainer, const int* inputs,
                              const int* targets, int B, int T);
 float          bm_train_step_masked(bm_trainer_t* trainer, const int* inputs,
