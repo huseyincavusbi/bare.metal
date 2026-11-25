@@ -123,7 +123,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("%s", prompt);
+    printf("prompt: %s\n", prompt);
+    printf("answer: ");
     for (int i = 0; i < out.n; i++) {
         int prev = i > 0 ? out.ids[i - 1] : 1;
         char* piece = bm_tokenizer_decode(tok, prev, out.ids[i]);
