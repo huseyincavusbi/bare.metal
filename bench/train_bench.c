@@ -42,6 +42,7 @@ static void usage(const char* prog) {
         "  --grad-accum N     micro-steps per optimizer step (default 1)\n"
         "  --state-out FILE   save final trainer state\n"
         "  --lr F             learning rate                 (default 1e-4)\n"
+        "  --stop-loss-weight F  weight the template stop token (default 1)\n"
         "  --precision P      fp32|fp16|bf16 (default device)\n"
         "  --avg-w W          average watts (from powermetrics)\n"
         "  --ref FILE         prior JSON for loss parity\n"
@@ -135,7 +136,7 @@ int main(int argc, char** argv) {
     const char* template_name = "auto";
     const char* adapter_out = NULL;
     int val_split = 0, val_limit = 0, max_examples = 0;
-    float lr = 1e-4f, tol = 1e-6f;
+    float lr = 1e-4f, tol = 1e-6f, stop_loss_weight = 1.0f;
     double avg_w = 0.0;
 
     for (int i = 1; i < argc; i++) {
@@ -148,6 +149,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--grad-accum") && i+1 < argc) grad_accum = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--state-out") && i+1 < argc)  state_out = argv[++i];
         else if (!strcmp(argv[i], "--lr") && i+1 < argc)         lr = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--stop-loss-weight") && i+1 < argc) stop_loss_weight = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--precision") && i+1 < argc)  prec_arg = argv[++i];
         else if (!strcmp(argv[i], "--avg-w") && i+1 < argc)      avg_w = atof(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i+1 < argc)        ref_path = argv[++i];
@@ -228,6 +230,7 @@ int main(int argc, char** argv) {
     memset(&sft_ds, 0, sizeof(sft_ds));
     int *sft_train_idx = NULL, *sft_val_idx = NULL;
     int sft_n_train = 0, sft_n_val = 0, sft_n_holdout = 0, sft_tmpl = BMT_SFT_CHATML;
+    int sft_stop_id = -1;
     float sft_val_loss = -1.0f;
     uint8_t *sft_attn = NULL, *sft_lmask = NULL;
     if (sft_data) {
@@ -270,6 +273,14 @@ int main(int argc, char** argv) {
     int n_tok = 0;
     int* tokens = NULL;
     bm_tokenizer_t* tok = bm_create_tokenizer(model_dir);
+    if (sft_data && tok && stop_loss_weight > 1.0f) {
+        const char* stop = sft_tmpl == BMT_SFT_LLAMA3 ? "<|eot_id|>" : "<|im_end|>";
+        sft_stop_id = bm_tokenizer_token_id(tok, stop);
+        if (sft_stop_id >= 0) {
+            bm_trainer_set_stop_token(trainer, sft_stop_id, stop_loss_weight);
+            fprintf(stderr, "[sft] stop_token=%d weight=%.2f\n", sft_stop_id, stop_loss_weight);
+        }
+    }
     if (tok) {
         FILE* f = fopen(data_path, "r");
         if (f) {
@@ -548,9 +559,11 @@ int main(int argc, char** argv) {
     if (sft_data) {
         fprintf(out, "    \"sft\": { \"template\": \"%s\", \"train_examples\": %d, \"val_examples\": %d, "
                      "\"val_holdout\": %d, \"val_limit\": %d, "
+                     "\"stop_token_id\": %d, \"stop_loss_weight\": %.9g, "
                      "\"val_loss\": %.9g, \"adapter\": \"%s\" },\n",
                 sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml",
                 sft_n_train, sft_n_val, sft_n_holdout, val_limit,
+                sft_stop_id, (double)stop_loss_weight,
                 (double)sft_val_loss, adapter_out ? adapter_out : "");
     }
     fprintf(out, "    \"memory\": { \"rss_peak_bytes\": %zu, \"gpu_peak_bytes\": %zu, \"gpu_alloc_bytes\": %zu },\n",
