@@ -275,11 +275,15 @@ static int collect_token(int token_id, void* user_data) {
 typedef struct {
     token_collector_t c;
     int stop_id;
+    int stopped;
 } chat_collector_t;
 
 static int collect_chat_token(int token_id, void* user_data) {
     chat_collector_t* cc = (chat_collector_t*)user_data;
-    if (token_id == cc->stop_id) return 1;
+    if (token_id == cc->stop_id) {
+        cc->stopped = 1;
+        return 1;
+    }
     return collect_token(token_id, &cc->c);
 }
 
@@ -934,13 +938,16 @@ int main(int argc, char** argv) {
         fflush(stdout);
 
         token_collector_t collector = {NULL, 0, 0};
-        chat_collector_t chat_collector = {{NULL, 0, 0}, stop_id};
+        chat_collector_t chat_collector = {{NULL, 0, 0}, stop_id, 0};
         int rc = bm_run_tokens(ctx, model, ptok, nt,
                                steps, temp, top_k, top_p, seed,
                                chat ? collect_chat_token : collect_token,
                                chat ? (void*)&chat_collector : (void*)&collector);
 
         token_collector_t* out = chat ? &chat_collector.c : &collector;
+        if (chat)
+            fprintf(stderr, "[run] stopped=%d generated=%d\n",
+                    chat_collector.stopped, out->count);
         if (rc == 0) {
             for (int i = 0; i < out->count; i++) {
                 int prev = i > 0 ? out->ids[i-1] : 1;
