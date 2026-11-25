@@ -6,6 +6,7 @@ BINARY  := build/baremetal
 BINARY_TRAIN := build/baremetal-train
 BENCH_BIN := build/bench/bench
 TRAIN_BENCH_BIN := build/bench/train_bench
+FINETUNE_SERVE_BIN := build/examples/finetune_serve
 PARITY_BIN := build/parity
 PARITY_MODEL ?= models/smollm2-135m
 PARITY_FIXTURE ?= test/parity/$(notdir $(PARITY_MODEL)).json
@@ -52,7 +53,7 @@ TOOL_OBJS_TRAIN := $(patsubst %.c,build/train/%.o,$(TOOL_SRCS))
 METAL_SRC := src/kernels/forward.metal src/kernels/backward.metal src/anneal/adamw.metal
 METAL_BIN := build/kernels/default.metallib
 
-.PHONY: all clean baremetal baremetal-train dirs tests bench parity parity-build
+.PHONY: all clean baremetal baremetal-train dirs tests bench finetune-serve parity parity-build
 
 all: dirs baremetal
 
@@ -72,6 +73,14 @@ parity-build: dirs $(PARITY_BIN)
 $(PARITY_BIN): test/parity/parity.c $(OBJS) $(METAL_BIN)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ test/parity/parity.c $(OBJS) $(LDFLAGS)
+	@echo "  Built: $@"
+
+finetune-serve: dirs $(FINETUNE_SERVE_BIN)
+
+$(FINETUNE_SERVE_BIN): examples/finetune_serve.c $(OBJS_TRAIN) build/train/tools/run.o $(METAL_BIN)
+	@mkdir -p build/examples/kernels
+	$(CC) $(CFLAGS_TRAIN) -o $@ examples/finetune_serve.c $(OBJS_TRAIN) build/train/tools/run.o $(LDFLAGS)
+	@ln -sf ../../kernels/default.metallib build/examples/kernels/default.metallib
 	@echo "  Built: $@"
 
 $(BENCH_BIN): bench/bench.c bench/metrics.h $(OBJS) $(METAL_BIN)
