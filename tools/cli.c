@@ -425,6 +425,7 @@ static int cmd_train_sft(int argc, char** argv) {
         fprintf(stderr, "  --lr <float>        Learning rate (default: 1e-4)\n");
         fprintf(stderr, "  --template <name>   chatml|llama3|auto (default: auto)\n");
         fprintf(stderr, "  --val-split <int>   Hold out every Nth example (0 = off)\n");
+        fprintf(stderr, "  --val-limit <int>   Evaluate at most N held-out examples (0 = all)\n");
         fprintf(stderr, "  --max-examples <n>  Cap loaded examples (0 = all)\n");
         fprintf(stderr, "  --seed <int>        Shuffle and LoRA seed (default: 1)\n");
         fprintf(stderr, "  --save-every <int>  Save trainer state every N steps\n");
@@ -442,7 +443,7 @@ static int cmd_train_sft(int argc, char** argv) {
     const char* output_dir = argv[4];
 
     int max_steps = 100, seq_len = 128, batch_size = 1, grad_accum = 1;
-    int save_every = 0, max_examples = 0, val_every = 0, seed = 1;
+    int save_every = 0, max_examples = 0, val_every = 0, val_limit = 0, seed = 1;
     float lr = 1e-4f;
     const char* prec_str = NULL;
     const char* resume_path = NULL;
@@ -459,6 +460,7 @@ static int cmd_train_sft(int argc, char** argv) {
         else if (strcmp(argv[i], "--lr") == 0 && i+1 < argc) lr = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--template") == 0 && i+1 < argc) template_name = argv[++i];
         else if (strcmp(argv[i], "--val-split") == 0 && i+1 < argc) val_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--val-limit") == 0 && i+1 < argc) val_limit = atoi(argv[++i]);
         else if (strcmp(argv[i], "--max-examples") == 0 && i+1 < argc) max_examples = atoi(argv[++i]);
         else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
         else if (strcmp(argv[i], "--save-every") == 0 && i+1 < argc) save_every = atoi(argv[++i]);
@@ -492,11 +494,15 @@ static int cmd_train_sft(int argc, char** argv) {
 
     int* train_idx = malloc((size_t)ds.n * sizeof(int));
     int* val_idx = malloc((size_t)ds.n * sizeof(int));
-    int n_train = 0, n_val = 0;
-    for (int i = 0; i < ds.n; i++) {
-        if (val_every > 0 && (i % val_every) == 0) val_idx[n_val++] = i;
-        else train_idx[n_train++] = i;
+    int n_train = 0, n_val = 0, n_holdout = 0;
+    if (bmt_sft_split_indices(ds.n, val_every, val_limit,
+                              train_idx, &n_train, val_idx, &n_val, &n_holdout) != 0) {
+        fprintf(stderr, "Invalid validation split\n");
+        free(train_idx); free(val_idx); bmt_sft_free_dataset(&ds);
+        return 1;
     }
+    if (val_limit > 0)
+        fprintf(stderr, "[sft] train=%d val=%d/%d\n", n_train, n_val, n_holdout);
     if (n_train == 0) {
         fprintf(stderr, "No training examples after validation split\n");
         free(train_idx); free(val_idx); bmt_sft_free_dataset(&ds);

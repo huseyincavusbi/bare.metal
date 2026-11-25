@@ -53,6 +53,7 @@ static void usage(const char* prog) {
         "  --sft-data FILE    JSONL SFT data (enables SFT mode)\n"
         "  --template NAME    chatml|llama3|auto (default auto)\n"
         "  --val-split N      hold out every Nth example (0 = off)\n"
+        "  --val-limit N      evaluate at most N held-out examples (0 = all)\n"
         "  --max-examples N   cap loaded examples (0 = all)\n"
         "  --adapter-out FILE save trained LoRA adapter\n"
         "  --parity-steps N   losses compared to ref      (default 1)\n"
@@ -133,7 +134,7 @@ int main(int argc, char** argv) {
     const char* sft_data = NULL;
     const char* template_name = "auto";
     const char* adapter_out = NULL;
-    int val_split = 0, max_examples = 0;
+    int val_split = 0, val_limit = 0, max_examples = 0;
     float lr = 1e-4f, tol = 1e-6f;
     double avg_w = 0.0;
 
@@ -158,6 +159,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sft-data") && i+1 < argc)      sft_data = argv[++i];
         else if (!strcmp(argv[i], "--template") && i+1 < argc)      template_name = argv[++i];
         else if (!strcmp(argv[i], "--val-split") && i+1 < argc)     val_split = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--val-limit") && i+1 < argc)     val_limit = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-examples") && i+1 < argc)  max_examples = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--adapter-out") && i+1 < argc)   adapter_out = argv[++i];
         else if (!strcmp(argv[i], "--parity-steps") && i+1 < argc) parity_steps = atoi(argv[++i]);
@@ -225,7 +227,7 @@ int main(int argc, char** argv) {
     bmt_sft_dataset_t sft_ds;
     memset(&sft_ds, 0, sizeof(sft_ds));
     int *sft_train_idx = NULL, *sft_val_idx = NULL;
-    int sft_n_train = 0, sft_n_val = 0, sft_tmpl = BMT_SFT_CHATML;
+    int sft_n_train = 0, sft_n_val = 0, sft_n_holdout = 0, sft_tmpl = BMT_SFT_CHATML;
     float sft_val_loss = -1.0f;
     uint8_t *sft_attn = NULL, *sft_lmask = NULL;
     if (sft_data) {
@@ -241,9 +243,11 @@ int main(int argc, char** argv) {
         }
         sft_train_idx = malloc((size_t)sft_ds.n * sizeof(int));
         sft_val_idx = malloc((size_t)sft_ds.n * sizeof(int));
-        for (int i = 0; i < sft_ds.n; i++) {
-            if (val_split > 0 && (i % val_split) == 0) sft_val_idx[sft_n_val++] = i;
-            else sft_train_idx[sft_n_train++] = i;
+        if (bmt_sft_split_indices(sft_ds.n, val_split, val_limit,
+                                  sft_train_idx, &sft_n_train,
+                                  sft_val_idx, &sft_n_val, &sft_n_holdout) != 0) {
+            fprintf(stderr, "invalid SFT split\n");
+            return 1;
         }
         if (sft_n_train == 0) { fprintf(stderr, "no SFT training examples\n"); return 1; }
         unsigned int rng = 42u;
@@ -252,8 +256,14 @@ int main(int argc, char** argv) {
             int j = (int)(rng % (unsigned int)(i + 1));
             int tmp = sft_train_idx[i]; sft_train_idx[i] = sft_train_idx[j]; sft_train_idx[j] = tmp;
         }
-        fprintf(stderr, "[sft] template=%s train=%d val=%d\n",
-                sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml", sft_n_train, sft_n_val);
+        if (val_limit > 0)
+            fprintf(stderr, "[sft] template=%s train=%d val=%d/%d\n",
+                    sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml",
+                    sft_n_train, sft_n_val, sft_n_holdout);
+        else
+            fprintf(stderr, "[sft] template=%s train=%d val=%d\n",
+                    sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml",
+                    sft_n_train, sft_n_val);
     }
 
     int V = m->arch.vocab_size;
@@ -537,10 +547,11 @@ int main(int argc, char** argv) {
     fprintf(out, "    },\n");
     if (sft_data) {
         fprintf(out, "    \"sft\": { \"template\": \"%s\", \"train_examples\": %d, \"val_examples\": %d, "
+                     "\"val_holdout\": %d, \"val_limit\": %d, "
                      "\"val_loss\": %.9g, \"adapter\": \"%s\" },\n",
                 sft_tmpl == BMT_SFT_LLAMA3 ? "llama3" : "chatml",
-                sft_n_train, sft_n_val, (double)sft_val_loss,
-                adapter_out ? adapter_out : "");
+                sft_n_train, sft_n_val, sft_n_holdout, val_limit,
+                (double)sft_val_loss, adapter_out ? adapter_out : "");
     }
     fprintf(out, "    \"memory\": { \"rss_peak_bytes\": %zu, \"gpu_peak_bytes\": %zu, \"gpu_alloc_bytes\": %zu },\n",
             rss_peak, gpu_peak, gpu_alloc);

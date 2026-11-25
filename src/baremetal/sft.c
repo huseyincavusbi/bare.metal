@@ -224,6 +224,26 @@ void bmt_sft_free_dataset(bmt_sft_dataset_t* d) {
     memset(d, 0, sizeof(*d));
 }
 
+int bmt_sft_split_indices(int n, int val_split, int val_limit,
+                          int* train_idx, int* n_train,
+                          int* val_idx, int* n_val, int* n_holdout) {
+    if (n < 0 || !n_train || !n_val || !n_holdout) return -1;
+    if (n > 0 && (!train_idx || !val_idx)) return -1;
+    int nt = 0, nv = 0, nh = 0;
+    for (int i = 0; i < n; i++) {
+        if (val_split > 0 && (i % val_split) == 0) {
+            nh++;
+            if (val_limit <= 0 || nv < val_limit) val_idx[nv++] = i;
+        } else {
+            train_idx[nt++] = i;
+        }
+    }
+    *n_train = nt;
+    *n_val = nv;
+    *n_holdout = nh;
+    return 0;
+}
+
 int bmt_sft_render_chat(bmt_sft_template_t tmpl, const char* system,
                          const char* user, bm_tokenizer_t* tok,
                          char** out_prompt, int* out_stop_id) {
