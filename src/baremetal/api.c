@@ -42,6 +42,19 @@ bm_model_t* bm_create_model(bm_context_t* ctx, const bm_arch_t* arch) {
     return model;
 }
 
+bm_model_t* bm_load_model(bm_context_t* ctx, const char* path) {
+    if (!path) return NULL;
+    bm_model_t* model = calloc(1, sizeof(bm_model_t));
+    if (!model) return NULL;
+    bm_load_weights(model, path);
+    if (!model->weight_buffer) {
+        bm_destroy_model(model);
+        return NULL;
+    }
+    model->precision = bm_get_supported_precision(ctx);
+    return model;
+}
+
 void bm_load_weights(bm_model_t* model, const char* path) {
     if (bmt_checkpoint_load(model, path) == 0) return;
     if (bmt_checkpoint_load_safetensors(model, path) == 0) return;
