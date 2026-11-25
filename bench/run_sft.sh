@@ -12,6 +12,7 @@ SEQ=128
 LR=3e-4
 VAL_SPLIT=10
 VAL_LIMIT=0
+STOP_WEIGHT=1
 NAME="sft-dolly-v1"
 PUBLISH=1
 RESULTS="${BENCH_RESULTS_DIR:-$HOME/.cache/baremetal/benchmarks-repo}"
@@ -25,6 +26,7 @@ while [ $# -gt 0 ]; do
     --lr) LR="$2"; shift 2;;
     --val-split) VAL_SPLIT="$2"; shift 2;;
     --val-limit) VAL_LIMIT="$2"; shift 2;;
+    --stop-loss-weight) STOP_WEIGHT="$2"; shift 2;;
     --name) NAME="$2"; shift 2;;
     --no-publish) PUBLISH=0; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -55,6 +57,7 @@ for stem in ${MODELS//,/ }; do
     --template auto \
     --val-split "$VAL_SPLIT" \
     --val-limit "$VAL_LIMIT" \
+    --stop-loss-weight "$STOP_WEIGHT" \
     --steps "$STEPS" \
     --seq-len "$SEQ" \
     --lr "$lr" \
@@ -66,7 +69,7 @@ for stem in ${MODELS//,/ }; do
 done
 
 python3 bench/compare/collect.py --run-dir "$RUN_DIR" \
-  --settings "stages=sft,sft_steps=$STEPS,sft_seq=$SEQ,dataset=$(basename "$DATA"),val_split=$VAL_SPLIT,val_limit=$VAL_LIMIT"
+  --settings "stages=sft,sft_steps=$STEPS,sft_seq=$SEQ,dataset=$(basename "$DATA"),val_split=$VAL_SPLIT,val_limit=$VAL_LIMIT,stop_weight=$STOP_WEIGHT"
 
 if [ "$PUBLISH" -eq 1 ]; then
   if [ ! -d "$RESULTS/.git" ]; then
