@@ -606,7 +606,8 @@ kernel void xent_backward_masked(
     int n = (int)gid;
     if (n >= N) return;
     device float* gr = glogits + n * V;
-    if (!mask[n]) {
+    float weight = (float)mask[n];
+    if (weight <= 0.0f) {
         for (int j = 0; j < V; j++) gr[j] = 0.0f;
         return;
     }
@@ -620,7 +621,7 @@ kernel void xent_backward_masked(
     float invN = 1.0f / (float)count;
     for (int j = 0; j < V; j++) {
         float p_j = gr[j] * inv;
-        gr[j] = (p_j - (j == tgt ? 1.0f : 0.0f)) * invN;
+        gr[j] = (p_j - (j == tgt ? 1.0f : 0.0f)) * invN * weight;
     }
 }
 
