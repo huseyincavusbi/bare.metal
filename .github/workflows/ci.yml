@@ -9,7 +9,7 @@ on:
   schedule:
     # Weekly: GitHub runner images update every week, so re-run even with no
     # commits to catch upstream toolchain/SDK churn early.
-    - cron: "0 0 * * 0"   # Sundays 00:00 UTC
+    - cron: "0 0 * * 1"   # Mondays 00:00 UTC
   workflow_dispatch:
 
 jobs:
